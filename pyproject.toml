@@ -1,0 +1,14 @@
+[project]
+name = "cyberyozh-open-scraper"
+version = "0.1.0"
+description = "Web Scraper API on Playwright with CyberYozh proxy integration"
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+readme = "README.md"
+requires-python = ">=3.10"
+
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

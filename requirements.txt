@@ -1,0 +1,11 @@
+# Note: These requirements are also specified in pyproject.toml
+# This file is kept for development environment setup and compatibility
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+pydantic-settings>=2.2
+httpx>=0.26
+playwright==1.57
+lxml>=5.2
+cssselect>=1.2
+fastapi-mcp>=0.4.0,<0.5.0

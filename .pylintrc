@@ -1,0 +1,49 @@
+[MASTER]
+# Use multiple processes
+jobs=1
+
+[MESSAGES CONTROL]
+disable=
+    # Docstrings — not required for this project
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+
+    # Import errors — pylint doesn't see the venv packages (fastapi, playwright, etc.)
+    import-error,
+
+    # Design choices — too-many-* thresholds don't apply to worker/runner architecture
+    too-many-arguments,
+    too-many-positional-arguments,
+    too-many-locals,
+    too-many-statements,
+    too-many-branches,
+    too-many-instance-attributes,
+
+    # _worker_main is a subprocess entry point — local imports are intentional
+    import-outside-toplevel,
+    reimported,
+
+    # Internal API access within the same module group
+    protected-access,
+
+    # broad-exception-caught is intentional in worker/pump loops
+    broad-exception-caught,
+
+    # Duplicate code — schemas intentionally mirror each other
+    duplicate-code,
+
+    # Pydantic false positives — pylint can't introspect pydantic field access at runtime
+    no-member,
+
+    # too-few-public-methods — config/filter classes don't need 2+ methods
+    too-few-public-methods,
+
+    # unused-argument — FastAPI/Protocol interface signatures must match even when unused
+    unused-argument,
+
+[FORMAT]
+max-line-length=120
+
+[DESIGN]
+max-args=10

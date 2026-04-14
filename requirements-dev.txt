@@ -1,0 +1,10 @@
+# Note: These requirements are also specified in pyproject.toml
+# This file is kept for development environment setup and compatibility
+-r requirements.txt
+
+pytest>=8.0
+pytest-asyncio>=0.23
+pytest-mock>=3.11.0
+pytest-cov>=4.1.0
+faker>=19.0.0
+pylint>=3.0
