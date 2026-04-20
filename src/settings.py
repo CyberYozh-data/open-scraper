@@ -53,6 +53,25 @@ class Settings(BaseSettings):
         alias="REQUEST_TIMEOUT_MS",
         description="Default page request timeout in milliseconds.",
     )
+    max_retries: int = Field(
+        default=5,
+        alias="MAX_RETRIES",
+        description=(
+            "Maximum number of fetch attempts per request when a failure looks "
+            "like a proxy issue. Only applies when a proxy is used; direct "
+            "connections never retry."
+        ),
+    )
+    webrtc_block: bool = Field(
+        default=True,
+        alias="WEBRTC_BLOCK",
+        description=(
+            "Prevent WebRTC from leaking the real IP around the proxy by "
+            "launching Chromium with --webrtc-ip-handling-policy=disable_"
+            "non_proxied_udp. Set to false only if you need WebRTC features "
+            "(video chat, RTCPeerConnection, etc.) inside scraped pages."
+        ),
+    )
 
     # =====================
     # Worker pool
@@ -77,11 +96,6 @@ class Settings(BaseSettings):
         alias="JOBS_ENABLED",
         description="Enable background job runner for batch scraping.",
     )
-    jobs_worker_concurrency: int = Field(
-        default=1,
-        alias="JOBS_WORKER_CONCURRENCY",
-        description="Number of concurrent background job processors.",
-    )
 
     # =====================
     # Proxy (CyberYozh)
@@ -97,24 +111,6 @@ class Settings(BaseSettings):
         description="Base URL for CyberYozh API.",
     )
 
-    # =====================
-    # Debug
-    # =====================
-    debug_save_html: bool = Field(
-        default=False,
-        alias="DEBUG_SAVE_HTML",
-        description="Save raw HTML to disk for debugging.",
-    )
-    debug_save_screenshot: bool = Field(
-        default=False,
-        alias="DEBUG_SAVE_SCREENSHOT",
-        description="Save page screenshot to disk for debugging.",
-    )
-    out_dir: str = Field(
-        default="out",
-        alias="OUT_DIR",
-        description="Directory where debug artifacts are saved.",
-    )
 
 
 settings = Settings()

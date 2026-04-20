@@ -252,6 +252,11 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
                             wait_for_selector=request.get("wait_for_selector"),
                             timeout_ms=request.get("timeout_ms"),
                             screenshot=request.get("screenshot", False),
+                            stealth=request.get("stealth", True),
+                            block_assets=request.get("block_assets"),
+                            proxy_geo=proxy_geo,
+                            render=request.get("render", True),
+                            cookies=request.get("cookies"),
                         )
 
                         # If it is success - exit from cycle
@@ -353,6 +358,10 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
                                     "proxy_type": proxy_type_raw,
                                     "proxy_pool_id": proxy_pool_id,
                                     "retries": retries_used,
+                                    "applied_user_agent": fetch_result.applied_user_agent,
+                                    "applied_locale": fetch_result.applied_locale,
+                                    "applied_timezone": fetch_result.applied_timezone,
+                                    "applied_accept_language": fetch_result.applied_accept_language,
                                 },
                                 "data": data,
                                 "raw_html": raw_html,

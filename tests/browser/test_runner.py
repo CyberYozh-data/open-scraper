@@ -48,10 +48,65 @@ class TestPlaywrightRunner:
 
             assert runner._browser == mock_browser
             assert runner._playwright == mock_playwright
-            mock_playwright.chromium.launch.assert_called_once_with(headless=True)
+
+            # Check that launch was called with expected args
+            call_kwargs = mock_playwright.chromium.launch.call_args[1]
+            assert call_kwargs["headless"] is True
+            assert "args" in call_kwargs
 
             # Cleanup
             await runner.stop()
+
+    @pytest.mark.asyncio
+    async def test_runner_start_with_webrtc_block(self):
+        """Start browser with WebRTC blocking enabled"""
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+
+        mock_browser = AsyncMock()
+        mock_playwright = AsyncMock()
+        mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_playwright.stop = AsyncMock()
+
+        mock_async_playwright_instance = MagicMock()
+        mock_async_playwright_instance.start = AsyncMock(return_value=mock_playwright)
+        mock_async_playwright = MagicMock(return_value=mock_async_playwright_instance)
+
+        with patch("src.browser.runner.async_playwright", mock_async_playwright):
+            with patch("src.browser.runner.settings.webrtc_block", True):
+                await runner.start()
+
+                call_kwargs = mock_playwright.chromium.launch.call_args[1]
+                assert call_kwargs["headless"] is True
+                assert call_kwargs["args"] == [
+                    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                    "--force-webrtc-ip-handling-policy",
+                ]
+
+                await runner.stop()
+
+    @pytest.mark.asyncio
+    async def test_runner_start_without_webrtc_block(self):
+        """Start browser with WebRTC blocking disabled"""
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+
+        mock_browser = AsyncMock()
+        mock_playwright = AsyncMock()
+        mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_playwright.stop = AsyncMock()
+
+        mock_async_playwright_instance = MagicMock()
+        mock_async_playwright_instance.start = AsyncMock(return_value=mock_playwright)
+        mock_async_playwright = MagicMock(return_value=mock_async_playwright_instance)
+
+        with patch("src.browser.runner.async_playwright", mock_async_playwright):
+            with patch("src.browser.runner.settings.webrtc_block", False):
+                await runner.start()
+
+                call_kwargs = mock_playwright.chromium.launch.call_args[1]
+                assert call_kwargs["headless"] is True
+                assert call_kwargs.get("args") is None
+
+                await runner.stop()
 
     @pytest.mark.asyncio
     async def test_runner_stop(self):

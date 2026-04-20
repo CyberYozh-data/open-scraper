@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from src.proxy.cyberyozh.provider import (
     CyberYozhProxyProvider,
-    _normalize,
-    _category,
+    normalize_proxy_raw_type,
+    get_category_proxy,
     _server,
 )
 from src.proxy.cyberyozh.client import OrderedProxy
@@ -16,39 +16,40 @@ from src.proxy.base import ProxyFailure
 class TestUtilityFunctions:
     def test_normalize_mobile_shared(self):
         """Normalization mobile_shared"""
-        assert _normalize("mobile_shared") == "mobile"
+        assert normalize_proxy_raw_type("mobile_shared") == "mobile"
 
     def test_normalize_passthrough(self):
         """Other types without changes"""
-        assert _normalize("mobile") == "mobile"
-        assert _normalize("res_rotating") == "res_rotating"
-        assert _normalize("res_static") == "res_static"
-        assert _normalize("dc_static") == "dc_static"
+        assert normalize_proxy_raw_type("mobile") == "mobile"
+        assert normalize_proxy_raw_type("res_rotating") == "res_rotating"
+        assert normalize_proxy_raw_type("res_static") == "res_static"
+        assert normalize_proxy_raw_type("dc_static") == "dc_static"
 
     def test_category_mobile(self):
         """Category for mobile"""
-        assert _category("mobile") == "lte"
-        assert _category("lte") == "lte"
+        assert get_category_proxy("mobile") == "lte"
+        assert get_category_proxy("lte") == "lte"
 
     def test_category_res_rotating(self):
         """Category for residential_rotating"""
-        assert _category("res_rotating") == "residential_rotating"
-        assert _category("residential_rotating") == "residential_rotating"
-        assert _category("rotating") == "residential_rotating"
+        assert get_category_proxy("res_rotating") == "residential_rotating"
+        assert get_category_proxy("residential_rotating") == "residential_rotating"
+        assert get_category_proxy("rotating") == "residential_rotating"
 
     def test_category_res_static(self):
-        """Category for residential"""
-        assert _category("res_static") == "residential"
-        assert _category("residential") == "residential"
+        """Category for residential_static"""
+        assert get_category_proxy("res_static") == "residential_static"
+        assert get_category_proxy("residential") == "residential_static"
+        assert get_category_proxy("residential_static") == "residential_static"
 
     def test_category_dc_static(self):
         """Category for datacenter"""
-        assert _category("dc_static") == "datacenter"
-        assert _category("datacenter") == "datacenter"
+        assert get_category_proxy("dc_static") == "datacenter"
+        assert get_category_proxy("datacenter") == "datacenter"
 
     def test_category_default(self):
         """Category by default"""
-        assert _category("unknown") == "residential"
+        assert get_category_proxy("unknown") == "residential_static"
 
     def test_server_parsing_http(self):
         """Parsing HTTP URL"""
@@ -86,22 +87,30 @@ class TestMaxAttempts:
         return CyberYozhProxyProvider(client=client)
 
     def test_max_attempts_rotating(self, provider):
-        """5 rotating attempts"""
-        assert provider.max_attempts("res_rotating") == 5
-        assert provider.max_attempts("residential_rotating") == 5
-        assert provider.max_attempts("rotating") == 5
+        """max_attempts uses settings.max_retries for all types"""
+        with patch("src.proxy.cyberyozh.provider.settings.max_retries", 5):
+            assert provider.max_attempts("res_rotating") == 5
+            assert provider.max_attempts("residential_rotating") == 5
+            assert provider.max_attempts("rotating") == 5
 
     def test_max_attempts_mobile(self, provider):
-        """5 mobile attempts"""
-        assert provider.max_attempts("mobile") == 5
-        assert provider.max_attempts("mobile_shared") == 5
-        assert provider.max_attempts("lte") == 5
+        """max_attempts uses settings.max_retries for all types"""
+        with patch("src.proxy.cyberyozh.provider.settings.max_retries", 5):
+            assert provider.max_attempts("mobile") == 5
+            assert provider.max_attempts("mobile_shared") == 5
+            assert provider.max_attempts("lte") == 5
 
     def test_max_attempts_static(self, provider):
-        """2 static attempts"""
-        assert provider.max_attempts("res_static") == 2
-        assert provider.max_attempts("dc_static") == 2
-        assert provider.max_attempts("datacenter") == 2
+        """max_attempts uses settings.max_retries for all types"""
+        with patch("src.proxy.cyberyozh.provider.settings.max_retries", 3):
+            assert provider.max_attempts("res_static") == 3
+            assert provider.max_attempts("dc_static") == 3
+            assert provider.max_attempts("datacenter") == 3
+
+    def test_max_attempts_minimum_one(self, provider):
+        """max_attempts never returns less than 1"""
+        with patch("src.proxy.cyberyozh.provider.settings.max_retries", 0):
+            assert provider.max_attempts("res_static") == 1
 
 
 class TestAcquire:
@@ -932,7 +941,7 @@ class TestOkMethod:
         assert provider._ok(proxy) is False
 
     def test_ok_method_no_url(self):
-        """_ok: by url -> False"""
+        """_ok: no URL -> False"""
         client = Mock()
         provider = CyberYozhProxyProvider(client=client)
 

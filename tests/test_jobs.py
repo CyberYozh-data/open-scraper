@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import pytest
 from unittest.mock import Mock, AsyncMock
 
@@ -263,7 +264,7 @@ class TestJobRunner:
 
         await runner.stop()
 
-        # Check, that task was processed
+        # Check that task was processed
         record = await queue.get(job_id)
         assert record.status in ("running", "done")
 
@@ -356,7 +357,7 @@ class TestJobRunner:
 
     @pytest.mark.asyncio
     async def test_job_runner_handles_worker_failure(self, mocker):
-        """Worker errors cathc"""
+        """Worker errors are captured as placeholder responses with warnings"""
         queue = InMemoryJobQueue()
         runner = JobRunner(queue, concurrency=1)
 
@@ -379,8 +380,20 @@ class TestJobRunner:
         await runner.stop()
 
         record = await queue.get(job_id)
-        # Status must be failed
-        assert record.status == "failed"
+
+        # Job completes as "done" even with worker errors
+        assert record.status == "done"
+        assert record.done == 1
+        assert record.total == 1
+
+        # Error is captured in the response warnings
+        assert record.results is not None
+        assert len(record.results) == 1
+        assert "Worker failed" in record.results[0].warnings
+
+        # Response is a placeholder with metadata
+        assert record.results[0].meta.url == "https://example.com/"
+        assert record.results[0].meta.status_code is None
 
     @pytest.mark.asyncio
     async def test_job_runner_collects_results(self, mocker):
@@ -423,6 +436,325 @@ class TestJobRunner:
         if record.status == "done":
             assert record.results is not None
             assert len(record.results) >= 0
+
+    @pytest.mark.asyncio
+    async def test_process_page_success(self, mocker):
+        """_process_page handles successful worker response"""
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=1)
+
+        mock_worker_pool = Mock()
+        mock_worker_pool.submit = AsyncMock(return_value={
+            "ok": True,
+            "result": {
+                "request_id": "req_1",
+                "took_ms": 100,
+                "meta": {
+                    "url": "https://example.com",
+                    "device": "desktop",
+                    "proxy_type": "none",
+                    "retries": 0,
+                },
+                "data": {"title": "Test"},
+                "raw_html": "<html></html>",
+                "screenshot_base64": None,
+                "warnings": [],
+            },
+        })
+
+        mocker.patch("src.jobs.worker_pool", mock_worker_pool)
+
+        import asyncio
+        semaphore = asyncio.Semaphore(1)
+        page = ScrapeRequest(url="https://example.com")
+
+        response = await runner._process_page(semaphore, page)
+
+        assert response.meta.url == "https://example.com"
+        assert response.data == {"title": "Test"}
+        assert response.warnings == []
+
+    @pytest.mark.asyncio
+    async def test_process_page_worker_error(self, mocker):
+        """_process_page creates placeholder on worker error"""
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=1)
+
+        mock_worker_pool = Mock()
+        mock_worker_pool.submit = AsyncMock(return_value={
+            "ok": False,
+            "error": "Connection failed",
+        })
+
+        mocker.patch("src.jobs.worker_pool", mock_worker_pool)
+
+        import asyncio
+        semaphore = asyncio.Semaphore(1)
+        page = ScrapeRequest(url="https://example.com", device="mobile")
+
+        response = await runner._process_page(semaphore, page)
+
+        assert response.meta.url == "https://example.com/"
+        assert response.meta.device == "mobile"
+        assert response.meta.status_code is None
+        assert "Connection failed" in response.warnings
+        assert response.took_ms == 0
+
+    @pytest.mark.asyncio
+    async def test_process_page_timeout(self, mocker):
+        """_process_page handles timeout"""
+        import asyncio
+
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=1)
+
+        mock_worker_pool = Mock()
+        mock_worker_pool.submit = AsyncMock(side_effect=asyncio.TimeoutError())
+
+        mocker.patch("src.jobs.worker_pool", mock_worker_pool)
+
+        semaphore = asyncio.Semaphore(1)
+        page = ScrapeRequest(url="https://example.com", timeout_ms=5000)
+
+        response = await runner._process_page(semaphore, page)
+
+        assert response.meta.url == "https://example.com/"
+        assert any("timed out" in w for w in response.warnings)
+
+    @pytest.mark.asyncio
+    async def test_process_page_exception(self, mocker):
+        """_process_page handles unexpected exceptions"""
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=1)
+
+        mock_worker_pool = Mock()
+        mock_worker_pool.submit = AsyncMock(side_effect=RuntimeError("Unexpected error"))
+
+        mocker.patch("src.jobs.worker_pool", mock_worker_pool)
+
+        import asyncio
+        semaphore = asyncio.Semaphore(1)
+        page = ScrapeRequest(url="https://example.com")
+
+        response = await runner._process_page(semaphore, page)
+
+        assert response.meta.url == "https://example.com/"
+        assert "Unexpected error" in response.warnings or "RuntimeError" in response.warnings
+
+    @pytest.mark.asyncio
+    async def test_parallel_processing_multiple_pages(self, mocker):
+        """Multiple pages are processed in parallel"""
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=1)
+
+        call_count = 0
+        call_times = []
+
+        async def mock_submit(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            import time
+            call_times.append(time.time())
+            await asyncio.sleep(0.1)  # Simulate work
+            return {
+                "ok": True,
+                "result": {
+                    "request_id": f"req_{call_count}",
+                    "took_ms": 100,
+                    "meta": {
+                        "url": f"https://example{call_count}.com",
+                        "device": "desktop",
+                        "proxy_type": "none",
+                        "retries": 0,
+                    },
+                    "data": None,
+                    "raw_html": None,
+                    "screenshot_base64": None,
+                    "warnings": [],
+                },
+            }
+
+        mock_worker_pool = Mock()
+        mock_worker_pool.submit = mock_submit
+
+        mocker.patch("src.jobs.worker_pool", mock_worker_pool)
+        mocker.patch("src.jobs.settings.workers", 5)  # Allow high parallelism
+
+        pages = [ScrapeRequest(url=f"https://example{i}.com") for i in range(5)]
+        job_id = await queue.submit(pages)
+
+        await runner.start()
+        await asyncio.sleep(0.5)
+        await runner.stop()
+
+        record = await queue.get(job_id)
+
+        assert record.status == "done"
+        assert record.done == 5
+        assert len(record.results) == 5
+
+        # Check that pages were processed in parallel (not sequentially)
+        # If sequential, would take 5 * 0.1 = 0.5s
+        # If parallel, should take ~0.1s
+        if len(call_times) >= 2:
+            time_span = call_times[-1] - call_times[0]
+            # All calls should start within a short window if parallel
+            assert time_span < 0.3  # Much less than 0.5s
+
+    @pytest.mark.asyncio
+    async def test_incremental_progress_updates(self, mocker):
+        """Progress is updated incrementally as pages complete"""
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=1)
+
+        completion_order = []
+
+        async def mock_submit(*args, **kwargs):
+            request = args[0]["request"]
+            url = request["url"]
+            # Simulate different completion times
+            if "slow" in url:
+                await asyncio.sleep(0.3)
+            else:
+                await asyncio.sleep(0.1)
+
+            completion_order.append(url)
+
+            return {
+                "ok": True,
+                "result": {
+                    "request_id": "req_1",
+                    "took_ms": 100,
+                    "meta": {
+                        "url": url,
+                        "device": "desktop",
+                        "proxy_type": "none",
+                        "retries": 0,
+                    },
+                    "data": None,
+                    "raw_html": None,
+                    "screenshot_base64": None,
+                    "warnings": [],
+                },
+            }
+
+        mock_worker_pool = Mock()
+        mock_worker_pool.submit = mock_submit
+        mocker.patch("src.jobs.worker_pool", mock_worker_pool)
+
+        pages = [
+            ScrapeRequest(url="https://fast1.com"),
+            ScrapeRequest(url="https://slow.com"),
+            ScrapeRequest(url="https://fast2.com"),
+        ]
+        job_id = await queue.submit(pages)
+
+        await runner.start()
+
+        # Check progress while running
+        await asyncio.sleep(0.15)
+        record = await queue.get(job_id)
+        # At least fast pages should be done
+        assert record.done >= 1
+
+        await asyncio.sleep(0.3)
+        await runner.stop()
+
+        record = await queue.get(job_id)
+        assert record.status == "done"
+        assert record.done == 3
+
+    @pytest.mark.asyncio
+    async def test_job_maintains_page_order(self, mocker):
+        """Results maintain the same order as input pages"""
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=1)
+
+        async def mock_submit(*args, **kwargs):
+            request = args[0]["request"]
+            url = request["url"]
+            # Random delays to ensure out-of-order completion
+            import random
+            await asyncio.sleep(random.uniform(0.01, 0.05))
+
+            return {
+                "ok": True,
+                "result": {
+                    "request_id": "req_1",
+                    "took_ms": 100,
+                    "meta": {
+                        "url": url,
+                        "device": "desktop",
+                        "proxy_type": "none",
+                        "retries": 0,
+                    },
+                    "data": {"url": url},
+                    "raw_html": None,
+                    "screenshot_base64": None,
+                    "warnings": [],
+                },
+            }
+
+        mock_worker_pool = Mock()
+        mock_worker_pool.submit = mock_submit
+        mocker.patch("src.jobs.worker_pool", mock_worker_pool)
+
+        pages = [
+            ScrapeRequest(url="https://first.com"),
+            ScrapeRequest(url="https://second.com"),
+            ScrapeRequest(url="https://third.com"),
+            ScrapeRequest(url="https://fourth.com"),
+        ]
+        job_id = await queue.submit(pages)
+
+        await runner.start()
+        await asyncio.sleep(0.5)
+        await runner.stop()
+
+        record = await queue.get(job_id)
+
+        assert record.status == "done"
+        assert len(record.results) == 4
+
+        # Check order is preserved
+        assert record.results[0].meta.url == "https://first.com/"
+        assert record.results[1].meta.url == "https://second.com/"
+        assert record.results[2].meta.url == "https://third.com/"
+        assert record.results[3].meta.url == "https://fourth.com/"
+
+    @pytest.mark.asyncio
+    async def test_worker_timeout_calculation(self):
+        """_calculate_worker_timeout adds retry budget"""
+        from src.jobs import _calculate_worker_timeout
+
+        # With page timeout
+        assert _calculate_worker_timeout(10000) == 10000 * 2 + 30000  # 50000
+        assert _calculate_worker_timeout(5000) == 5000 * 2 + 30000  # 40000
+
+        # Without page timeout
+        assert _calculate_worker_timeout(None) is None
+
+    @pytest.mark.asyncio
+    async def test_create_error_response(self):
+        """_create_error_response creates valid placeholder"""
+        from src.jobs import _create_error_response
+
+        page = ScrapeRequest(
+            url="https://example.com",
+            device="mobile",
+            proxy_type="res_static",
+            proxy_pool_id="pool_1",
+        )
+
+        response = _create_error_response(page, "Test error")
+
+        assert response.took_ms == 0
+        assert response.meta.url == "https://example.com/"
+        assert response.meta.device == "mobile"
+        assert response.meta.proxy_type == "res_static"
+        assert response.meta.proxy_pool_id == "pool_1"
+        assert response.meta.status_code is None
+        assert "Test error" in response.warnings
 
 
 class TestGetJobQueue:

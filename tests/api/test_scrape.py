@@ -369,9 +369,9 @@ class TestScrapeResultsEndpoint:
 
         response = client.get("/api/v1/scrape/job_123/results")
 
-        assert response.status_code == 409
+        assert response.status_code == 200
         data = response.json()
-        assert "job_not_done" in data["detail"]
+        assert data["status"] == "queued"
 
     def test_scrape_results_not_done_running(self, client, mocker):
         """GET /scrape/{job_id}/results for running job"""
@@ -387,7 +387,7 @@ class TestScrapeResultsEndpoint:
 
         response = client.get("/api/v1/scrape/job_123/results")
 
-        assert response.status_code == 409
+        assert response.status_code == 200
 
     def test_scrape_results_failed_job_returns_200(self, client, mocker):
         """GET /scrape/{job_id}/results for failed job returns 200 with error info"""

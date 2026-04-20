@@ -47,8 +47,6 @@ async def scrape_results(job_id: str) -> JobResultsResponse:
     job_record = await job_queue.get(job_id)
     if job_record is None:
         raise HTTPException(status_code=404, detail="job_not_found")
-    if job_record.status not in ["done", "failed"]:
-        raise HTTPException(status_code=409, detail=f"job_not_done:{job_record.status}")
 
     return JobResultsResponse(
         job_id=job_record.job_id,

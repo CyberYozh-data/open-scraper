@@ -1,4 +1,6 @@
-# Open Scraper
+# Open Scraper by CyberYozh
+
+![ScrapingYozh](scraper-tester/public/ScrapingYozh.png)
 
 Web Scraping API built on **Playwright**. Renders any URL in a real browser and returns:
 - extracted fields via CSS or XPath (optional)
@@ -53,10 +55,18 @@ Set `CYBERYOZH_API_KEY` in `.env` file to enable proxy support.
 ### Available Proxy Types
 
 - `res_rotating` - Residential rotating (recommended for most scraping)
-- `res_static` - Residential static
-- `mobile` - Mobile (LTE) with IP rotation
+- `res_static` - Residential static (dedicated)
+- `mobile` - Mobile / LTE, dedicated
+- `mobile_shared` - Mobile / LTE, shared
 - `dc_static` - Datacenter static
 - `none` - No proxy (direct connection)
+
+### Proxy discovery endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/proxies/available?proxy_type=...` | Lists the current user's purchased proxies of a given type (filtered by `access_type` for shared vs dedicated) |
+| `GET /api/v1/proxies/countries` | Lists the ~250 countries supported by CyberYozh's rotating residential proxies (mirrors the CyberYozh static list) |
 
 ## API
 
@@ -356,7 +366,9 @@ curl -s -X POST http://localhost:8000/api/v1/scrape/page \
 | `region`       | string | Region / state name                |
 | `city`         | string | City name (e.g. `"London"`)        |
 
-GEO targeting is supported only for `res_rotating` proxies. For `res_static`, `mobile`, and `dc_static` the field is accepted but ignored (a warning is logged).
+GEO targeting at the **proxy** level is supported only for `res_rotating`. For `res_static`, `mobile`, `mobile_shared` and `dc_static` the proxy already has a fixed location; `proxy_geo` in those requests is accepted but does not change the exit IP (a warning is logged).
+
+Regardless of the proxy type, when `proxy_geo.country_code` is provided the browser context is automatically aligned with that country — `locale`, `timezone_id` and `Accept-Language` are set accordingly so the fingerprint matches the IP. For US, CA, RU, AU and BR a `city` hint further refines the timezone.
 
 #### Country only
 
@@ -446,10 +458,12 @@ python geo_scraping.py
 | `headers` | object | - | Custom HTTP headers |
 | `cookies` | array | - | Cookies to inject |
 | `proxy_type` | string | `none` | See proxy types table |
-| `proxy_geo` | object | - | `{ country_code, region, city }` — `res_rotating` only |
-| `block_assets` | boolean | - | Block images/fonts/media (faster scraping) |
+| `proxy_pool_id` | string | - | Pin request to a specific purchased proxy id (required when `proxy_type != none` from the tester UI) |
+| `proxy_geo` | object | - | `{ country_code, region, city }` — targets the exit IP for `res_rotating`; also drives browser locale/timezone alignment for every type |
+| `block_assets` | boolean | env | Block images/fonts/media to speed up load; falls back to the `BLOCK_ASSETS` env var when unset |
 | `raw_html` | boolean | `false` | Include raw HTML in response |
-| `screenshot` | boolean | `false` | Include full-page screenshot as base64 |
+| `screenshot` | boolean | `false` | Include full-page screenshot as base64 (triggers a scroll pass for lazy images when assets are not blocked) |
+| `stealth` | boolean | `true` | Apply `playwright-stealth` patches (navigator.webdriver, WebGL, Canvas, etc.) |
 | `extract` | object | - | Structured extraction rules |
 
 ### ExtractRule
@@ -489,7 +503,12 @@ Each result in `results[]` contains:
 | `meta.status_code` | integer | HTTP status code |
 | `meta.device` | string | Device used |
 | `meta.proxy_type` | string | Proxy used |
+| `meta.proxy_pool_id` | string | Specific proxy id used (if any) |
 | `meta.retries` | integer | Number of retries |
+| `meta.applied_user_agent` | string | UA that was actually sent |
+| `meta.applied_locale` | string | Browser locale (`es-ES`, `en-US`, …) |
+| `meta.applied_timezone` | string | Browser timezone id |
+| `meta.applied_accept_language` | string | Effective `Accept-Language` |
 | `data` | object | Extracted fields (if `extract` was set) |
 | `raw_html` | string | Raw HTML (if `raw_html: true`) |
 | `screenshot_base64` | string | Base64 PNG (if `screenshot: true`) |
@@ -550,6 +569,23 @@ npx @modelcontextprotocol/inspector http://localhost:8000/mcp
 
 ---
 
+## Scraper Tester (Web UI)
+
+A small Node.js + vanilla HTML tool under [`scraper-tester/`](scraper-tester/)
+that talks to this API and lets you drive every parameter visually — proxy
+type + country dropdown, header presets, cookies, extraction rules, batch
+submissions, per-page partial results, an MCP explorer, screenshot preview
+and raw HTML download.
+
+```bash
+cd scraper-tester
+npm install
+node server.js
+```
+
+Open [http://localhost:7000](http://localhost:7000). Point the "Scraper URL"
+field in the header at any reachable deployment (default `http://localhost:8000`).
+
 ## Tests
 
 ```bash
@@ -557,13 +593,19 @@ pip install -e ".[test]"
 pytest -q
 ```
 
-## Proxy types (MVP mapping)
+## Proxy type → CyberYozh mapping
 
-This MVP maps `proxy_type` to CyberYozh `category` for `GET /api/v1/proxies/history/`:
+`proxy_type` is mapped to the CyberYozh `category` used against
+`GET /api/v1/proxies/history/` and filtered by `access_type`:
 
-- mobile_shared, mobile -> lte
-- res_static -> residential
-- res_rotating -> residential_rotating (also calls POST /api/v1/proxies/rotating-credentials/)
-- dc_static -> datacenter
+| `proxy_type`     | CyberYozh category     | `access_type` filter |
+|------------------|------------------------|----------------------|
+| `res_rotating`   | `residential_rotating` | — (single tier)      |
+| `res_static`     | `residential_static`   | `private`            |
+| `mobile`         | `lte`                  | `private`            |
+| `mobile_shared`  | `lte`                  | `shared`             |
+| `dc_static`      | `datacenter`           | `private`            |
 
-If your categories differ, update `PROXY_TYPE_TO_CATEGORY` in `app/proxy/resolver.py`.
+`res_rotating` additionally calls `POST /api/v1/proxies/rotating-credentials/`
+to obtain per-session credentials (optionally with `proxy_geo`).
+The mapping lives in [`src/proxy/cyberyozh/provider.py`](src/proxy/cyberyozh/provider.py).

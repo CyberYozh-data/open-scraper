@@ -20,6 +20,7 @@ class OrderedProxy:
     change_ip_links: list[str]
     connection_host: str | None = None
     connection_port: int | None = None
+    access_type: str | None = None  # "private" or "shared"
 
 
 class CyberYozhClient:
@@ -73,6 +74,7 @@ class CyberYozhClient:
                     change_ip_links=list(item.get("change_ip_links") or []),
                     connection_host=item.get("connection_host"),
                     connection_port=item.get("connection_port"),
+                    access_type=item.get("access_type"),
                 )
             )
         return proxies

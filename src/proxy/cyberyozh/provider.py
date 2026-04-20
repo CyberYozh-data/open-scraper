@@ -7,26 +7,27 @@ from urllib.parse import urlparse
 from src.proxy.base import ProxyFailure, ProxyLease
 from src.proxy.cyberyozh.client import CyberYozhClient, OrderedProxy
 from src.proxy.models import ProxyConfig
+from src.settings import settings
 
 log = logging.getLogger(__name__)
 
 
-def _normalize(proxy_type_raw: str) -> str:
+def normalize_proxy_raw_type(proxy_type_raw: str) -> str:
     if proxy_type_raw == "mobile_shared":
         return "mobile"
     return proxy_type_raw
 
 
-def _category(proxy_type_norm: str) -> str:
+def get_category_proxy(proxy_type_norm: str) -> str:
     if proxy_type_norm in ("mobile", "lte"):
         return "lte"
     if proxy_type_norm in ("res_rotating", "residential_rotating", "rotating"):
         return "residential_rotating"
-    if proxy_type_norm in ("res_static", "residential"):
-        return "residential"
+    if proxy_type_norm in ("res_static", "residential", "residential_static"):
+        return "residential_static"
     if proxy_type_norm in ("dc_static", "datacenter"):
         return "datacenter"
-    return "residential"
+    return "residential_static"
 
 
 def _server(url: str) -> str:
@@ -49,12 +50,10 @@ class CyberYozhProxyProvider:
     geo: dict[str, str] | None = None
 
     def max_attempts(self, proxy_type_raw: str) -> int:
-        proxy_type = _normalize(proxy_type_raw)
-        if proxy_type in ("res_rotating", "residential_rotating", "rotating"):
-            return 5
-        if proxy_type in ("mobile", "lte"):
-            return 5
-        return 2
+        # All proxy types share the same cap now — configurable via MAX_RETRIES.
+        # Static types used to be hard-capped at 2 attempts, but there is no
+        # fundamental reason for that: the same pool rotation logic applies.
+        return max(1, int(settings.max_retries))
 
     async def acquire(self, proxy_type_raw: str, proxy_pool_id: str | None) -> ProxyLease:
         return await self.rotate_next(
@@ -70,8 +69,8 @@ class CyberYozhProxyProvider:
         proxy_pool_id: str | None,
         exclude_source_ids: set[str],
     ) -> ProxyLease:
-        proxy_type = _normalize(proxy_type_raw)
-        category = _category(proxy_type)
+        proxy_type = normalize_proxy_raw_type(proxy_type_raw)
+        category = get_category_proxy(proxy_type)
 
         items = await self.client.proxy_history(category=category, expired=False)
 
@@ -122,7 +121,7 @@ class CyberYozhProxyProvider:
         exclude_source_ids: set[str],
         failure: ProxyFailure,
     ) -> tuple[ProxyLease | None, bool]:
-        proxy_type = _normalize(proxy_type_raw)
+        proxy_type = normalize_proxy_raw_type(proxy_type_raw)
 
         log.info(
             "recover: proxy_type=%s, status=%s, error=%s",
@@ -151,8 +150,15 @@ class CyberYozhProxyProvider:
             log.info("excluding source_id=%s", lease.source_id)
             exclude_source_ids.add(str(lease.source_id))
 
-        # mobile: attempt change_ip
-        if proxy_type in ("mobile", "lte") and lease and lease.change_ip_links:
+        # Dedicated mobile: attempt change_ip on the modem. Shared mobile cannot
+        # change IP because the proxy is shared across users — skip straight to
+        # rotating to the next proxy.
+        if (
+            proxy_type_raw != "mobile_shared"
+            and proxy_type in ("mobile", "lte")
+            and lease
+            and lease.change_ip_links
+        ):
             try:
                 log.info("attempting change_ip for mobile")
                 await self.client.call_change_ip_link(lease.change_ip_links[0])

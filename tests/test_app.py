@@ -64,7 +64,6 @@ class TestLifespan:
             mock_settings.queue_maxsize = 100
             mock_settings.job_timeout_ms = 30000
             mock_settings.jobs_enabled = True
-            mock_settings.jobs_worker_concurrency = 1
             mock_settings.log_level = "INFO"  # Add log_level
 
             app = create_app()
@@ -97,7 +96,6 @@ class TestLifespan:
             mock_settings.queue_maxsize = 100
             mock_settings.job_timeout_ms = 30000
             mock_settings.jobs_enabled = True
-            mock_settings.jobs_worker_concurrency = 1
             mock_settings.log_level = "INFO"  # Add log_level
 
             app = create_app()
@@ -130,7 +128,6 @@ class TestLifespan:
             mock_settings.queue_maxsize = 100
             mock_settings.job_timeout_ms = 30000
             mock_settings.jobs_enabled = False  # Disable
-            mock_settings.jobs_worker_concurrency = 1
             mock_settings.log_level = "INFO"  # Add log_level
 
             app = create_app()
@@ -167,7 +164,6 @@ class TestLifespan:
             mock_settings.queue_maxsize = 200
             mock_settings.job_timeout_ms = 60000
             mock_settings.jobs_enabled = False
-            mock_settings.jobs_worker_concurrency = 2
             mock_settings.log_level = "DEBUG"  # Add log_level
 
             app = create_app()

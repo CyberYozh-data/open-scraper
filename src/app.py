@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
     )
     worker_pool.start()
 
-    job_runner = JobRunner(get_job_queue(), concurrency=settings.jobs_worker_concurrency)
+    job_runner = JobRunner(get_job_queue(), concurrency=settings.workers)
     if settings.jobs_enabled:
         await job_runner.start()
 
