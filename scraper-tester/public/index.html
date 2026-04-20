@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Open Scraper Tester</title>
+  <link rel="icon" type="image/png" href="logo.png" />
+  <link rel="apple-touch-icon" href="logo.png" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <img src="logo.png" alt="logo" />
+      <span>Open Scraper Tester</span>
+    </div>
+    <div class="server-bar">
+      <label>Scraper URL</label>
+      <input id="scraperUrl" type="text" value="http://localhost:8000" />
+      <button id="btnHealth" class="btn-secondary">Health Check</button>
+      <span id="healthStatus" class="badge"></span>
+      <a href="https://apidoc.cyberyozh.com" target="_blank" rel="noopener" class="btn-secondary header-link">CyberYozh API Docs ↗</a>
+      <a href="https://app.cyberyozh.com/ru/my-account/api-keys/" target="_blank" rel="noopener" class="btn-secondary header-link">Get API Key ↗</a>
+    </div>
+    <div class="social-icons">
+      <a href="https://github.com/CyberYozh-data" target="_blank" rel="noopener" class="icon-btn" title="GitHub" aria-label="GitHub">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.082-.73.082-.73 1.205.085 1.84 1.237 1.84 1.237 1.07 1.835 2.807 1.305 3.492.998.108-.775.42-1.305.763-1.605-2.665-.3-5.467-1.332-5.467-5.93 0-1.31.467-2.38 1.235-3.22-.125-.302-.535-1.524.117-3.176 0 0 1.007-.322 3.3 1.23a11.5 11.5 0 0 1 3-.404c1.02.005 2.045.138 3 .404 2.29-1.552 3.296-1.23 3.296-1.23.655 1.652.245 2.874.12 3.176.77.84 1.233 1.91 1.233 3.22 0 4.61-2.807 5.625-5.48 5.92.43.37.813 1.102.813 2.222 0 1.606-.014 2.9-.014 3.293 0 .322.218.697.825.577C20.565 21.795 24 17.3 24 12c0-6.63-5.37-12-12-12z"/>
+        </svg>
+      </a>
+      <a href="https://linktr.ee/CyberYozh.com" target="_blank" rel="noopener" class="icon-btn" title="Linktree" aria-label="Linktree">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M13.74 9.98H19.3v-3.2h-5.56l3.93-3.93L15.4 0.57l-3.93 3.93V.27h-3.2v5.03L4.34 1.37 2.08 3.63l3.93 3.93H.45v3.2h5.56L2.08 14.69l2.26 2.26 4.91-4.92v11.96h3.2V12.03l4.91 4.92 2.27-2.26-3.93-3.93z"/>
+        </svg>
+      </a>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="scrape">Scrape Page</button>
+    <button class="tab-btn" data-tab="batch">Batch Scrape</button>
+    <button class="tab-btn" data-tab="jobs">Jobs</button>
+    <button class="tab-btn" data-tab="mcp">MCP</button>
+  </nav>
+
+  <!-- ===== SCRAPE PAGE ===== -->
+  <section id="tab-scrape" class="tab-content active">
+    <div class="two-col">
+      <div class="panel">
+        <h2>Request</h2>
+
+        <div class="field">
+          <label>URL *</label>
+          <input id="s-url" type="text" placeholder="https://example.com" />
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label>Device</label>
+            <select id="s-device">
+              <option value="desktop">Desktop</option>
+              <option value="mobile">Mobile</option>
+            </select>
+          </div>
+          <div class="field">
+            <label style="display:flex;align-items:center;gap:0.35rem">
+              Wait Until
+              <span class="info-icon" tabindex="0">
+                i
+                <div class="info-tooltip">
+                  <div><b>domcontentloaded</b> (fast) — fires as soon as the HTML is parsed. Images, CSS and deferred JS may still be loading. Good for static sites and when you do not need rendered visuals.</div>
+                  <div><b>networkidle</b> (thorough) — waits until there are no network requests for 500ms. Required for SPAs that render content via XHR/fetch after page load. On sites with constant analytics/polling (Amazon, eBay) it may never settle and hit the timeout.</div>
+                  <div><b>Timeout (ms)</b> is the maximum time to wait for this event; the request fails if it is not reached.</div>
+                </div>
+              </span>
+            </label>
+            <select id="s-wait-until">
+              <option value="domcontentloaded">domcontentloaded</option>
+              <option value="networkidle">networkidle</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Timeout (ms)</label>
+            <input id="s-timeout" type="number" value="30000" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label style="display:flex;align-items:center;gap:0.35rem">
+            Wait for Selector
+            <span class="info-icon" tabindex="0">
+              i
+              <div class="info-tooltip">
+                <div><b>CSS selector</b> that must appear on the page before extraction. Useful when a SPA injects the real content after the initial render — e.g. <code>.product-card</code>, <code>#results .item</code>.</div>
+                <div>Waits up to <b>Timeout (ms)</b>. Leave empty if you only need the initial HTML.</div>
+              </div>
+            </span>
+          </label>
+          <input id="s-wait-selector" type="text" placeholder="h1 (optional)" />
+        </div>
+
+        <div class="field-row checkboxes">
+          <label><input id="s-render" type="checkbox" checked /> JS Render</label>
+          <label><input id="s-raw-html" type="checkbox" /> Raw HTML</label>
+          <label><input id="s-screenshot" type="checkbox" /> Screenshot</label>
+          <label><input id="s-block-assets" type="checkbox" checked /> Block Assets</label>
+          <label><input id="s-stealth" type="checkbox" checked /> Stealth</label>
+          <span class="info-icon" tabindex="0">
+            i
+            <div class="info-tooltip">
+              <div><b>JS Render</b> — execute page JavaScript (needed for SPAs).</div>
+              <div><b>Raw HTML</b> — return full HTML of the page in the response.</div>
+              <div><b>Screenshot</b> — capture a full-page PNG and return as base64.</div>
+              <div><b>Block Assets</b> — skip images / fonts / media to speed up load and save traffic. Turn off if you need images in screenshots.</div>
+              <div><b>Stealth</b> — apply playwright-stealth patches (navigator.webdriver, WebGL / Canvas fingerprint, etc.) to reduce bot detection.</div>
+            </div>
+          </span>
+        </div>
+
+        <h3>Proxy</h3>
+        <div class="field-row">
+          <div class="field">
+            <label>Proxy Type</label>
+            <select id="s-proxy-type">
+              <option value="none">none</option>
+              <option value="res_rotating">res_rotating</option>
+              <option value="res_static">res_static</option>
+              <option value="mobile">mobile</option>
+              <option value="mobile_shared">mobile_shared</option>
+              <option value="dc_static">dc_static</option>
+            </select>
+          </div>
+          <div class="field" id="pool-id-field">
+            <label>Pool ID <span id="pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
+            <select id="s-proxy-pool-select" style="display:none"></select>
+            <input id="s-proxy-pool" type="text" placeholder="optional (for rotating: pin to pool id)" />
+          </div>
+        </div>
+        <div class="field-row" id="geo-fields">
+          <div class="field">
+            <label>Country</label>
+            <select id="s-geo-country"><option value="">— any —</option></select>
+          </div>
+          <div class="field">
+            <label>Region</label>
+            <input id="s-geo-region" type="text" placeholder="New York" />
+          </div>
+          <div class="field">
+            <label>City</label>
+            <input id="s-geo-city" type="text" placeholder="New York" />
+          </div>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.4rem">
+          <h3 style="margin:0">Extraction</h3>
+          <span class="info-icon" tabindex="0">
+            i
+            <div class="info-tooltip">
+              <div><b>— disabled —</b> — skip extraction. Use Raw HTML / Screenshot to get the page as-is.</div>
+              <div><b>CSS</b> — pull structured data with CSS selectors. Uses <code>lxml.cssselect</code>.</div>
+              <div><b>XPath</b> — same but with XPath expressions. More powerful for conditional / positional queries.</div>
+              <div>Click <b>+ Add Field</b> for each piece you want. Every field row takes:</div>
+              <div style="margin-left:0.6rem">
+                • <b>field name</b> — the key you will see in the response <code>data</code> object (e.g. <code>title</code>, <code>price</code>).<br>
+                • <b>selector</b> — the CSS / XPath that points at the element (<code>h1</code>, <code>.price_color</code>, <code>//h1</code>).<br>
+                • <b>attr</b> — what to pull out: <code>text</code> (text content), <code>html</code> (outer HTML), or an attribute name like <code>href</code> / <code>src</code>.<br>
+                • <b>all</b> — off: first match as a string. On: every match as a list.
+              </div>
+              <div><b>Example — real site</b>: scrape <code>app.cyberyozh.com</code><br>
+                Fields: <code>page_title</code>=<code>title</code>/text, <code>h1</code>=<code>h1</code>/text →<br>
+                <code>data = {"page_title": "CyberYozh App", "h1": "..."}</code><br>
+                Without extraction the same scrape only returns <code>data: null</code> plus raw HTML you would have to parse yourself.</div>
+              <div><b>all example</b>: selector <code>a</code> on a page with 3 links<br>
+                • off → <code>data.link = "https://a"</code><br>
+                • on → <code>data.links = ["https://a","https://b","https://c"]</code></div>
+            </div>
+          </span>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Type</label>
+            <select id="s-extract-type">
+              <option value="">— disabled —</option>
+              <option value="css">CSS</option>
+              <option value="xpath">XPath</option>
+            </select>
+          </div>
+        </div>
+        <div id="extract-fields-wrapper">
+          <div id="extract-fields"></div>
+          <button class="btn-secondary btn-sm" id="btnAddField">+ Add Field</button>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.4rem">
+          <h3 style="margin:0">Custom Headers</h3>
+          <span class="info-icon" tabindex="0">
+            i
+            <div class="info-tooltip">
+              <div>Extra HTTP headers sent with the request.</div>
+              <div><b>Presets</b> fill a common Chrome/Firefox/Safari/Mobile/RU/anti-bot fingerprint in one click. Picking a mobile preset also flips the <b>Device</b> selector to mobile so viewport + UA stay consistent.</div>
+              <div><b>Interaction with proxy geo</b>: when <code>proxy_geo.country_code</code> is set, the scraper automatically picks a matching <code>Accept-Language</code> (e.g. <code>es-ES,es;q=0.9</code> for Spain). Your custom headers are merged on top — any header you set here <b>wins</b>, including <code>Accept-Language</code> if you override it. Locale and timezone still follow the proxy geo.</div>
+              <div><b>Common additions</b>: <code>Referer</code>, <code>Cookie</code> (prefer the Cookies section), <code>Authorization</code>, site-specific headers. Avoid setting <code>User-Agent</code> in both a preset and manually.</div>
+            </div>
+          </span>
+        </div>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem;align-items:center">
+          <select id="header-preset" style="flex:1;min-width:160px">
+            <option value="">— headers preset —</option>
+            <option value="chrome_win">Chrome / Windows</option>
+            <option value="chrome_mac">Chrome / macOS</option>
+            <option value="firefox_win">Firefox / Windows</option>
+            <option value="mobile_chrome">Mobile Chrome (Android)</option>
+            <option value="safari_ios">Safari / iPhone</option>
+            <option value="ru_locale">RU locale</option>
+            <option value="antibot">Anti-bot pack</option>
+          </select>
+          <button class="btn-secondary btn-sm" id="btnApplyPreset">Apply</button>
+          <button class="btn-secondary btn-sm" id="btnClearHeaders">Clear</button>
+        </div>
+        <div id="headers-wrapper">
+          <div id="headers-list"></div>
+          <button class="btn-secondary btn-sm" id="btnAddHeader">+ Add Header</button>
+        </div>
+
+        <h3>Cookies</h3>
+        <div id="cookies-wrapper">
+          <div id="cookies-list"></div>
+          <button class="btn-secondary btn-sm" id="btnAddCookie">+ Add Cookie</button>
+        </div>
+
+        <div class="actions">
+          <button id="btnScrape" class="btn-primary">Scrape</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Result</h2>
+        <div id="scrape-status" class="status-bar hidden"></div>
+        <div id="scrape-result" class="result-area">
+          <span class="placeholder">Result will appear here...</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== BATCH SCRAPE ===== -->
+  <section id="tab-batch" class="tab-content">
+    <div class="two-col">
+      <div class="panel">
+        <div style="display:flex;align-items:center;gap:0.5rem">
+          <h2 style="border:none;padding:0;flex:1">URLs</h2>
+          <span class="info-icon" tabindex="0">
+            i
+            <div class="info-tooltip">
+              <div><b>Parallelism</b> — pages inside a single batch run in parallel using asyncio + the scraper's worker pool.</div>
+              <div><b>Default</b>: <code>WORKERS=2</code> browser processes, so up to 2 pages at a time per batch.</div>
+              <div><b>To increase</b>: edit the scraper's <code>.env</code> file and bump <code>WORKERS</code> (each browser process uses ~300-500 MB RAM). Then restart the scraper with <code>docker compose down && docker compose up -d</code>.</div>
+              <div><b>Note</b>: <code>docker compose restart</code> does not reload <code>.env</code> — use full down/up.</div>
+            </div>
+          </span>
+        </div>
+        <div class="field">
+          <label>One URL per line</label>
+          <textarea id="b-urls" rows="8" placeholder="https://example.com&#10;https://httpbin.org/ip&#10;https://api.ipify.org?format=json"></textarea>
+        </div>
+
+        <h3>Shared Settings</h3>
+        <div class="field-row">
+          <div class="field">
+            <label>Device</label>
+            <select id="b-device">
+              <option value="desktop">Desktop</option>
+              <option value="mobile">Mobile</option>
+            </select>
+          </div>
+          <div class="field">
+            <label style="display:flex;align-items:center;gap:0.35rem">
+              Wait Until
+              <span class="info-icon" tabindex="0">
+                i
+                <div class="info-tooltip">
+                  <div><b>domcontentloaded</b> (fast) — fires as soon as the HTML is parsed. Images, CSS and deferred JS may still be loading.</div>
+                  <div><b>networkidle</b> (thorough) — waits until there are no network requests for 500ms. Needed for SPAs but may never settle on sites with constant polling.</div>
+                  <div><b>Timeout (ms)</b> caps the wait; the request fails if the event never happens.</div>
+                </div>
+              </span>
+            </label>
+            <select id="b-wait-until">
+              <option value="domcontentloaded">domcontentloaded</option>
+              <option value="networkidle">networkidle</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Timeout (ms)</label>
+            <input id="b-timeout" type="number" value="30000" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label style="display:flex;align-items:center;gap:0.35rem">
+            Wait for Selector
+            <span class="info-icon" tabindex="0">
+              i
+              <div class="info-tooltip">
+                <div><b>CSS selector</b> that must appear on every page in the batch before the HTML is taken — e.g. <code>.product-card</code>, <code>#results .item</code>.</div>
+                <div>Useful when a SPA injects the real content after initial render. Waits up to <b>Timeout (ms)</b>.</div>
+              </div>
+            </span>
+          </label>
+          <input id="b-wait-selector" type="text" placeholder="h1 (optional)" />
+        </div>
+
+        <div class="field-row checkboxes">
+          <label><input id="b-render" type="checkbox" checked /> JS Render</label>
+          <label><input id="b-raw-html" type="checkbox" /> Raw HTML</label>
+          <label><input id="b-screenshot" type="checkbox" /> Screenshot</label>
+          <label><input id="b-block-assets" type="checkbox" checked /> Block Assets</label>
+          <label><input id="b-stealth" type="checkbox" checked /> Stealth</label>
+          <span class="info-icon" tabindex="0">
+            i
+            <div class="info-tooltip">
+              <div><b>JS Render</b> — execute page JavaScript (needed for SPAs).</div>
+              <div><b>Raw HTML</b> — return full HTML of the page in the response.</div>
+              <div><b>Screenshot</b> — capture a full-page PNG and return as base64.</div>
+              <div><b>Block Assets</b> — skip images / fonts / media to speed up load and save traffic. Turn off if you need images in screenshots.</div>
+              <div><b>Stealth</b> — apply playwright-stealth patches (navigator.webdriver, WebGL / Canvas fingerprint, etc.) to reduce bot detection.</div>
+            </div>
+          </span>
+        </div>
+
+        <h3>Proxy</h3>
+        <div class="field-row">
+          <div class="field">
+            <label>Proxy Type</label>
+            <select id="b-proxy-type">
+              <option value="none">none</option>
+              <option value="res_rotating">res_rotating</option>
+              <option value="res_static">res_static</option>
+              <option value="mobile">mobile</option>
+              <option value="mobile_shared">mobile_shared</option>
+              <option value="dc_static">dc_static</option>
+            </select>
+          </div>
+          <div class="field" id="b-pool-id-field">
+            <label>Pool ID <span id="b-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
+            <select id="b-proxy-pool-select" style="display:none"></select>
+            <input id="b-proxy-pool" type="text" placeholder="optional" />
+          </div>
+        </div>
+        <div class="field-row" id="b-geo-fields">
+          <div class="field">
+            <label>Country</label>
+            <select id="b-geo-country"><option value="">— any —</option></select>
+          </div>
+          <div class="field">
+            <label>Region</label>
+            <input id="b-geo-region" type="text" placeholder="New York" />
+          </div>
+          <div class="field">
+            <label>City</label>
+            <input id="b-geo-city" type="text" placeholder="New York" />
+          </div>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.4rem">
+          <h3 style="margin:0">Extraction</h3>
+          <span class="info-icon" tabindex="0">
+            i
+            <div class="info-tooltip">
+              <div><b>— disabled —</b> — skip extraction, returns only <code>raw_html</code> / <code>screenshot</code> if those are on.</div>
+              <div><b>CSS</b> / <b>XPath</b> — one selector language for every field below.</div>
+              <div>Each field row: <b>field name</b> (output key in <code>data</code>), <b>selector</b>, <b>attr</b> (<code>text</code> / <code>html</code> / attribute name), <b>all</b> (off = first match string, on = list of matches).</div>
+              <div>Same rules are applied to <b>every URL</b> in the batch — useful for scraping a list of product pages with the same layout.</div>
+            </div>
+          </span>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Type</label>
+            <select id="b-extract-type">
+              <option value="">— disabled —</option>
+              <option value="css">CSS</option>
+              <option value="xpath">XPath</option>
+            </select>
+          </div>
+        </div>
+        <div id="b-extract-fields-wrapper">
+          <div id="b-extract-fields"></div>
+          <button class="btn-secondary btn-sm" id="btnAddFieldBatch">+ Add Field</button>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.4rem">
+          <h3 style="margin:0">Custom Headers</h3>
+          <span class="info-icon" tabindex="0">
+            i
+            <div class="info-tooltip">
+              <div>Extra HTTP headers sent with every URL in the batch.</div>
+              <div><b>Presets</b> fill a Chrome/Firefox/Safari/Mobile/RU/anti-bot fingerprint in one click. Mobile presets also flip <b>Device</b> to mobile.</div>
+              <div><b>Interaction with proxy geo</b>: when <code>proxy_geo.country_code</code> is set, the scraper auto-injects a matching <code>Accept-Language</code>. Your custom headers are merged on top — anything you set here <b>wins</b>. Locale and timezone still follow the proxy geo.</div>
+            </div>
+          </span>
+        </div>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem;align-items:center">
+          <select id="b-header-preset" style="flex:1;min-width:160px">
+            <option value="">— headers preset —</option>
+            <option value="chrome_win">Chrome / Windows</option>
+            <option value="chrome_mac">Chrome / macOS</option>
+            <option value="firefox_win">Firefox / Windows</option>
+            <option value="mobile_chrome">Mobile Chrome (Android)</option>
+            <option value="safari_ios">Safari / iPhone</option>
+            <option value="ru_locale">RU locale</option>
+            <option value="antibot">Anti-bot pack</option>
+          </select>
+          <button class="btn-secondary btn-sm" id="btnApplyPresetBatch">Apply</button>
+          <button class="btn-secondary btn-sm" id="btnClearHeadersBatch">Clear</button>
+        </div>
+        <div>
+          <div id="b-headers-list"></div>
+          <button class="btn-secondary btn-sm" id="btnAddHeaderBatch">+ Add Header</button>
+        </div>
+
+        <h3>Cookies</h3>
+        <div>
+          <div id="b-cookies-list"></div>
+          <button class="btn-secondary btn-sm" id="btnAddCookieBatch">+ Add Cookie</button>
+        </div>
+
+        <div class="actions">
+          <button id="btnCopyFromSingle" class="btn-secondary" title="Copy settings from Scrape Page tab">Copy from Scrape Page</button>
+          <button id="btnBatch" class="btn-primary">Submit Batch</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Result</h2>
+        <div id="batch-status" class="status-bar hidden"></div>
+        <div id="batch-result" class="result-area">
+          <span class="placeholder">Result will appear here...</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== JOBS ===== -->
+  <section id="tab-jobs" class="tab-content">
+    <div class="two-col">
+      <div class="panel">
+        <h2>Lookup Job</h2>
+        <div class="field">
+          <label>Job ID</label>
+          <input id="j-job-id" type="text" placeholder="req_..." />
+        </div>
+        <div class="actions">
+          <button id="btnJobStatus" class="btn-secondary">Get Status</button>
+          <button id="btnJobResults" class="btn-primary">Get Results</button>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:0.75rem;margin-top:2rem;padding-bottom:0.6rem;border-bottom:1px solid var(--border)">
+          <h2 style="border:none;padding:0;flex:1">Recent Jobs</h2>
+          <button id="btnClearJobs" class="btn-secondary btn-sm">Clear</button>
+        </div>
+        <div id="recent-jobs"></div>
+      </div>
+      <div class="panel">
+        <h2>Response</h2>
+        <div id="jobs-result" class="result-area">
+          <span class="placeholder">Result will appear here...</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== MCP ===== -->
+  <section id="tab-mcp" class="tab-content">
+    <div class="two-col">
+      <div class="panel">
+        <h2>MCP Tools</h2>
+        <button id="btnListTools" class="btn-secondary">Load Available Tools</button>
+        <div id="mcp-tools-list" style="margin-top:1rem"></div>
+
+        <h2 style="margin-top:2rem">Call Tool</h2>
+        <div class="field">
+          <label>Tool Name</label>
+          <input id="mcp-tool-name" type="text" placeholder="run_scrape_page" />
+        </div>
+        <div id="mcp-tool-schema" style="display:none"></div>
+        <div class="field">
+          <label>Arguments (JSON)</label>
+          <textarea id="mcp-tool-args" rows="8" placeholder='{"url":"https://example.com","proxy_type":"none"}'></textarea>
+        </div>
+        <div class="actions">
+          <button id="btnCallTool" class="btn-primary">Call Tool</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Response</h2>
+        <div id="mcp-result" class="result-area">
+          <span class="placeholder">Result will appear here...</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>

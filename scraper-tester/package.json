@@ -1,0 +1,13 @@
+{
+  "name": "scraper-tester",
+  "version": "1.0.0",
+  "description": "Visual tester for open-scraper API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "http-proxy-middleware": "^3.0.0"
+  }
+}
