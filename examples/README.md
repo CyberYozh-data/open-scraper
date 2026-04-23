@@ -34,11 +34,17 @@ python examples/basic_scraping.py
 * **agent.py** - LangChain agent with MCP integration — chat interface that scrapes pages via open-scraper tools
 
 ### E-commerce
-* **ecommerce_product_scraping.py** - Scraping product cards from Amazon/Wildberries
+* **ecommerce_product_scraping.py** - Scraping product cards from books.toscrape.com
+
+### Stealth (anti-bot sites)
+* **stealth_amazon_scraping.py** - Amazon product page — need use stealth + residential proxy
+* **stealth_ebay_scraping.py** - eBay search results — need use stealth + residential proxy
 
 ### Advanced
-* **proxy_rotation_scraping.py** - Using a proxy to bypass locks
+* **proxy_rotation_scraping.py** - IP rotation with residential rotating proxies
+* **proxy_sticky_session_scraping.py** - Sticky sessions (res_static) and pool pinning
 * **geo_scraping.py** - GEO targeting by country/city with IP verification
+* **concurrent_batch_scraping.py** - Submit multiple pages in one job (new batch API)
 
 ## LangChain Agent (MCP)
 

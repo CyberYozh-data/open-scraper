@@ -33,7 +33,9 @@ def submit_scrape_job(
     screenshot: bool = False,
     raw_html: bool = False,
     wait_for_selector: Optional[str] = None,
+    wait_until: str = "domcontentloaded",
     timeout_ms: int = 30000,
+    stealth: bool = True,
 ) -> str:
     """
     Submit a scraping job
@@ -48,6 +50,8 @@ def submit_scrape_job(
         "screenshot": screenshot,
         "raw_html": raw_html,
         "timeout_ms": timeout_ms,
+        "stealth": stealth,
+        "wait_until": wait_until,
     }
 
     if proxy_pool_id:
@@ -63,6 +67,39 @@ def submit_scrape_job(
         response = client.post(f"{API_BASE}/scrape/page", json=payload)
         response.raise_for_status()
         return response.json()["job_id"]
+
+
+def submit_batch_job(pages: list) -> str:
+    """
+    Submit multiple pages as a single batch job.
+    All pages run concurrently in the worker pool.
+
+    Args:
+        pages: List of page dicts, each with the same fields as submit_scrape_job
+
+    Returns:
+        job_id: Job ID
+    """
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(f"{API_BASE}/scrape/pages", json={"pages": pages})
+        response.raise_for_status()
+        return response.json()["job_id"]
+
+
+def batch_scrape_pages(pages: list) -> list:
+    """
+    Submit a batch of pages, wait for completion, return all results.
+
+    Args:
+        pages: List of page dicts
+
+    Returns:
+        results: List of scraping results (same order as input pages)
+    """
+    job_id = submit_batch_job(pages)
+    wait_for_job(job_id)
+    data = get_job_results(job_id)
+    return data.get("results") or []
 
 
 def wait_for_job(job_id: str, timeout: int = 120) -> Dict[str, Any]:

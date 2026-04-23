@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example 9: E-commerce Product Scraping
+Example: E-commerce Product Scraping
 
 Demonstrates scraping product data:
 - Product details (title, price, description)

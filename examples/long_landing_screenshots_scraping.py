@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example 3: Scraping Long Landing Page with Full-Page Screenshots
+Example: Scraping Long Landing Page with Full-Page Screenshots
 
 Demonstrates:
 - Full-page screenshot capture

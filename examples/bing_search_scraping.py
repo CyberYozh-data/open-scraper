@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example 2: Scraping Bing Search Results
+Example: Scraping Bing Search Results
 
 Bing is more scraper-friendly than Google and doesn't require proxy for demos.
 Good for learning pagination and data extraction patterns.

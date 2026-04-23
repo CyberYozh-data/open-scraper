@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example 1: Basic scraping of a single page
+Example: Basic scraping of a single page
 
 The simplest example - scraping example.com
 """

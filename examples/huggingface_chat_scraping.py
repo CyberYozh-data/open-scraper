@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example 6: Scraping Huggingface Chat
+Example: Scraping Huggingface Chat
 
 Demonstrates scraping AI chat interfaces.
 Note: Most ChatGPT clones use JavaScript heavily and require:

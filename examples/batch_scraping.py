@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example 4: Batch Scraping Multiple URLs
+Example: Batch Scraping Multiple URLs
 
 Demonstrates:
 - Scraping multiple URLs efficiently
@@ -18,9 +18,9 @@ from client_helpers import scrape_page, console
 
 
 def batch_scrape(
-        urls: List[str],
-        extract_rules: dict = None,
-        proxy_type: str = "none",
+    urls: List[str],
+    extract_rules: dict = None,
+    proxy_type: str = "none",
 ) -> List[Dict[str, Any]]:
     """
     Scrape multiple URLs in batch

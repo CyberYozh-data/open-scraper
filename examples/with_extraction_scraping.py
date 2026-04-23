@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example 5: Data Extraction with CSS Selectors
+Example: Data Extraction with CSS Selectors
 
 Demonstrates:
 - CSS selector-based data extraction

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example 8: Proxy Rotation
+Example: Proxy Rotation
 
 Simple demonstration of IP rotation with residential rotating proxies.
 Shows how each request gets a different IP address.
