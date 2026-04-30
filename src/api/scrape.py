@@ -57,3 +57,15 @@ async def scrape_results(job_id: str) -> JobResultsResponse:
         error=job_record.error,
         results=job_record.results,
     )
+
+
+@router.delete("/{job_id}", operation_id="cancel_scrape_job")
+async def scrape_cancel(job_id: str) -> dict:
+    """Cancel a scrape/batch job. In-flight pages finish; remaining pages are
+    skipped and the job transitions to status="cancelled"."""
+    job_queue = get_job_queue()
+    job_record = await job_queue.get(job_id)
+    if job_record is None:
+        raise HTTPException(status_code=404, detail="job_not_found")
+    cancelled = await job_queue.request_cancel(job_id)
+    return {"job_id": job_id, "cancelled": cancelled}

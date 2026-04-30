@@ -22,6 +22,7 @@ class JobRecord:
     done: int = 0
     error: str | None = None
     results: list[ScrapeResponse] | None = None
+    cancelled: bool = False
 
 
 def _calculate_worker_timeout(page_timeout_ms: int | None) -> int | None:
@@ -65,6 +66,19 @@ class InMemoryJobQueue:
     async def get(self, job_id: str) -> JobRecord | None:
         async with self._lock:
             return self._jobs.get(job_id)
+
+    async def request_cancel(self, job_id: str) -> bool:
+        """Mark a job as cancelled. In-flight pages finish; remaining pages
+        are skipped and the job transitions to ``status="cancelled"``."""
+        async with self._lock:
+            rec = self._jobs.get(job_id)
+            if rec is None or rec.status in ("done", "failed", "cancelled"):
+                log.info("cancel request ignored job_id=%s reason=%s", job_id,
+                         "not_found" if rec is None else f"already_{rec.status}")
+                return False
+            rec.cancelled = True
+        log.info("cancel requested job_id=%s status=%s", job_id, rec.status)
+        return True
 
     async def next_job(self) -> str:
         """Get next job ID from the queue."""
@@ -144,10 +158,13 @@ class JobRunner:
         results: list[ScrapeResponse],
         done_counter: list[int],
         done_lock: asyncio.Lock,
+        job_record: JobRecord,
     ) -> None:
-        """Process a page and update job progress."""
-        response = await self._process_page(semaphore, page)
-        results[index] = response
+        """Process a page and update job progress. Skip if job is cancelled."""
+        if job_record.cancelled:
+            results[index] = _create_error_response(page, "cancelled")
+        else:
+            results[index] = await self._process_page(semaphore, page)
 
         async with done_lock:
             done_counter[0] += 1
@@ -162,6 +179,10 @@ class JobRunner:
             if job_record is None:
                 continue
 
+            if job_record.cancelled:
+                await self._queue._set(job_id, status="cancelled", done=0)
+                continue
+
             await self._queue._set(job_id, status="running", done=0)
 
             try:
@@ -172,13 +193,14 @@ class JobRunner:
 
                 await asyncio.gather(
                     *(
-                        self._process_and_update(job_id, i, page, semaphore, results, done_counter, done_lock)
+                        self._process_and_update(job_id, i, page, semaphore, results, done_counter, done_lock, job_record)
                         for i, page in enumerate(job_record.pages)
                     ),
                     return_exceptions=False,
                 )
 
-                await self._queue._set(job_id, status="done", done=job_record.total, results=results)
+                final_status: JobStatus = "cancelled" if job_record.cancelled else "done"
+                await self._queue._set(job_id, status=final_status, done=job_record.total, results=results)
 
             except Exception as e:
                 await self._queue._set(job_id, status="failed", error=str(e) or type(e).__name__)

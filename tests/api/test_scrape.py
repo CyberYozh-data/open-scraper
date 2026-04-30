@@ -598,3 +598,40 @@ class TestIntegrationFlows:
         response = client.get(f"/api/v1/scrape/{job_id}/results")
         assert response.status_code == 200
         assert len(response.json()["results"]) == 2
+
+
+class TestScrapeCancelEndpoint:
+    def test_cancel_running_job_returns_cancelled_true(self, client, mocker):
+        queue = AsyncMock()
+        queue.get = AsyncMock(return_value=JobRecord(
+            job_id="job_run", status="running", pages=[], total=1, done=0,
+        ))
+        queue.request_cancel = AsyncMock(return_value=True)
+        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+
+        response = client.delete("/api/v1/scrape/job_run")
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {"job_id": "job_run", "cancelled": True}
+        queue.request_cancel.assert_awaited_once_with("job_run")
+
+    def test_cancel_terminal_job_returns_cancelled_false(self, client, mocker):
+        queue = AsyncMock()
+        queue.get = AsyncMock(return_value=JobRecord(
+            job_id="job_done", status="done", pages=[], total=1, done=1,
+        ))
+        queue.request_cancel = AsyncMock(return_value=False)
+        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+
+        response = client.delete("/api/v1/scrape/job_done")
+        assert response.status_code == 200
+        assert response.json() == {"job_id": "job_done", "cancelled": False}
+
+    def test_cancel_unknown_job_returns_404(self, client, mocker):
+        queue = AsyncMock()
+        queue.get = AsyncMock(return_value=None)
+        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+
+        response = client.delete("/api/v1/scrape/job_missing")
+        assert response.status_code == 404
+        assert response.json()["detail"] == "job_not_found"

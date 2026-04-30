@@ -2,537 +2,109 @@
 
 ![ScrapingYozh](scraper-tester/public/ScrapingYozh.png)
 
-Web Scraping API built on **Playwright**. Renders any URL in a real browser and returns:
-- extracted fields via CSS or XPath (optional)
-- raw HTML (optional)
-- screenshot (optional, base64)
+A two-service scraping stack built on **Playwright**, with an optional Web
+tester and MCP exposure on both services.
 
-Supports async job queuing, batch scraping, device emulation, and CyberYozh proxy integration.
+| Service | Port | Docs | What it does |
+|---|---|---|---|
+| **Scraper** ([`src/`](src/README.md)) | `8000` | [src/README.md](src/README.md) | Async job API — renders a URL in a real browser, returns extracted fields / raw HTML / full-page screenshot. Built-in CyberYozh proxy integration. |
+| **Crawler** ([`open-crawler/`](open-crawler/README.md)) | `8001` | [open-crawler/README.md](open-crawler/README.md) | Walks a site from a seed URL; fetches every page through the scraper over HTTP; streams results via SSE. Dedup, scope, rate-limiting, retries. |
+| **Tester** ([`scraper-tester/`](scraper-tester/README.md)) | `7000` | [scraper-tester/README.md](scraper-tester/README.md) | Node.js + vanilla HTML UI for both services — every knob as a form, live progress, MCP explorer. |
 
-**Base URL:** `http://localhost:8000`  
-**OpenAPI docs:** `http://localhost:8000/docs`  
-**MCP endpoint:** `http://localhost:8000/mcp`
+Both API services mount an **MCP endpoint** at `/mcp` (Streamable HTTP) and
+publish their OpenAPI at `/docs`.
 
-## Quick start (Docker)
+## Quick start
 
 ```bash
-cp .env.example .env
-docker-compose up --build
+cp .env.example .env          # edit CYBERYOZH_API_KEY if using proxies
+docker compose up --build
 ```
 
-Service: `http://localhost:8000`
+That brings up the scraper (`:8000`) and the crawler (`:8001`). Verify both:
 
 ```bash
 curl http://localhost:8000/api/v1/health
-# {"status":"ok"}
+# {"status":"ok","workers":2}
+
+curl http://localhost:8001/api/v1/health
+# {"status":"ok","workers":2,"scraper_reachable":true,...}
 ```
 
-Full test example:
+Full scraper smoke test:
 
 ```bash
 python3 scripts/e2e_smoke.py
 ```
 
-## Proxy Support
+### Individual services
 
-**For reliable web scraping, using proxies is essential.** Most modern websites (especially search engines, e-commerce, social media) have anti-bot protection that blocks direct scraping attempts. Proxies help you:
+- **Scraper only**: `docker compose up --build web-scraper`
+- **Crawler only**: `docker compose up --build open-crawler`
+  (depends on `web-scraper`; compose starts it too)
 
-- Avoid IP bans and CAPTCHAs
-- Bypass geo-restrictions
-- Scale scraping operations
-- Appear as real users from different locations
+### Visual tester
 
-### CyberYozh Proxy Integration
-
-This scraper integrates with **CyberYozh Proxy Service** which provides residential, mobile (LTE), and datacenter proxies.
-
-**Get your API key:** https://app.cyberyozh.com/api-access/
-
-**Proxy documentation:** https://docs.cyberyozh.com/proxies
-
-Set `CYBERYOZH_API_KEY` in `.env` file to enable proxy support.
-
-### Available Proxy Types
-
-- `res_rotating` - Residential rotating (recommended for most scraping)
-- `res_static` - Residential static (dedicated)
-- `mobile` - Mobile / LTE, dedicated
-- `mobile_shared` - Mobile / LTE, shared
-- `dc_static` - Datacenter static
-- `none` - No proxy (direct connection)
-
-### Proxy discovery endpoints
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /api/v1/proxies/available?proxy_type=...` | Lists the current user's purchased proxies of a given type (filtered by `access_type` for shared vs dedicated) |
-| `GET /api/v1/proxies/countries` | Lists the ~250 countries supported by CyberYozh's rotating residential proxies (mirrors the CyberYozh static list) |
-
-## API
-
-## Scrape (async jobs)
-
-Scrape endpoints always create a background job and return `job_id`.
-Then you poll job status and fetch results.
-
-Routes:
-
-* `POST /api/v1/scrape/page`
-* `POST /api/v1/scrape/pages`
-* `GET  /api/v1/scrape/{job_id}`
-* `GET  /api/v1/scrape/{job_id}/results`
-
----
-
-### 1) Scrape single page (no proxy)
-
-Create job:
+The [tester](scraper-tester/README.md) is not part of the compose stack —
+run it separately:
 
 ```bash
-curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com",
-    "proxy_type": "none"
-  }'
+cd scraper-tester
+npm install
+node server.js
+# → http://localhost:7000
 ```
 
-Example response:
-
-```json
-{"job_id":"req_..."}
-```
-
-Check status:
-
-```bash
-curl -s http://localhost:8000/api/v1/scrape/req_...
-```
-
-Fetch results (available for both `done` and `failed` jobs):
-
-```bash
-curl -s http://localhost:8000/api/v1/scrape/req_.../results
-```
-
-Example response:
-
-```json
-{
-  "job_id": "req_...",
-  "status": "done",
-  "total": 1,
-  "done": 1,
-  "pages": [{"url": "https://example.com", "proxy_type": "none", "...": "..."}],
-  "error": null,
-  "results": [
-    {
-      "request_id": "req_...",
-      "took_ms": 1234,
-      "meta": {
-        "url": "https://example.com",
-        "final_url": "https://example.com/",
-        "status_code": 200,
-        "device": "desktop",
-        "proxy_type": "none",
-        "retries": 0
-      },
-      "data": null,
-      "raw_html": null,
-      "screenshot_base64": null,
-      "warnings": []
-    }
-  ]
-}
-```
-
-For a failed job `results` is `null` and `error` contains the reason.
-
----
-
-### 2) One-liner: create job → wait → print results (requires jq)
-
-```bash
-JOB_ID=$(
-  curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-    -H "Content-Type: application/json" \
-    -d '{"url":"https://example.com","proxy_type":"none"}' \
-  | jq -r .job_id
-)
-
-echo "job_id=$JOB_ID"
-
-while true; do
-  STATUS=$(curl -s "http://localhost:8000/api/v1/scrape/$JOB_ID" | jq -r .status)
-  echo "status=$STATUS"
-  if [ "$STATUS" = "done" ]; then
-    curl -s "http://localhost:8000/api/v1/scrape/$JOB_ID/results" | jq .
-    break
-  fi
-  if [ "$STATUS" = "failed" ]; then
-    curl -s "http://localhost:8000/api/v1/scrape/$JOB_ID" | jq .
-    exit 1
-  fi
-  sleep 0.5
-done
-```
-
----
-
-### 3) Batch scrape (multiple pages)
-
-Create job:
-
-```bash
-curl -s -X POST http://localhost:8000/api/v1/scrape/pages \
-  -H "Content-Type: application/json" \
-  -d '{
-    "pages": [
-      {"url":"https://example.com","proxy_type":"none"},
-      {"url":"https://example.org","proxy_type":"none"}
-    ]
-  }'
-```
-
-Then poll status + fetch results using the same `GET /api/v1/scrape/{job_id}` and `/results`.
-
----
-
-### 4) Extract data with CSS
-
-```bash
-curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com",
-    "proxy_type": "none",
-    "extract": {
-      "type": "css",
-      "fields": {
-        "title": {"selector": "h1", "attr": "text", "required": true}
-      }
-    }
-  }'
-```
-
-Result will contain:
-
-```json
-{
-  "data": {
-    "title": "Example Domain"
-  }
-}
-```
-
----
-
-### 5) Extract data with XPath
-
-```bash
-curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com",
-    "proxy_type": "none",
-    "extract": {
-      "type": "xpath",
-      "fields": {
-        "title": {"selector": "//h1", "attr": "text", "required": true}
-      }
-    }
-  }'
-```
-
----
-
-### 6) Return raw HTML
-
-```bash
-curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com",
-    "proxy_type": "none",
-    "raw_html": true
-  }'
-```
-
----
-
-### 7) Screenshot (base64)
-
-```bash
-curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com",
-    "proxy_type": "none",
-    "screenshot": true
-  }'
-```
-
----
-
-### 8) Device emulation (mobile)
-
-```bash
-curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com",
-    "proxy_type": "none",
-    "device": "mobile",
-    "extract": {
-      "type": "css",
-      "fields": {
-        "title": {"selector": "h1", "attr": "text"}
-      }
-    }
-  }'
-```
-
----
-
-### 9) Custom headers
-
-```bash
-curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://httpbin.org/headers",
-    "proxy_type": "none",
-    "headers": {
-      "User-Agent": "open-scraper/1.0",
-      "Accept-Language": "en-US,en;q=0.9"
-    },
-    "raw_html": true
-  }'
-```
-
----
-
-### 10) Cookies
-
-```bash
-curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com",
-    "proxy_type": "none",
-    "cookies": [
-      {"name":"session","value":"abc123","domain":"example.com","path":"/"}
-    ],
-    "raw_html": true
-  }'
-```
-
----
-
-### 11) Wait strategy / selector / timeout
-
-```bash
-curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com",
-    "proxy_type": "none",
-    "wait_until": "networkidle",
-    "wait_for_selector": "h1",
-    "timeout_ms": 45000
-  }'
-```
-
-### 12) Proxies (CyberYozh)
-
-Set `CYBERYOZH_API_KEY` in `.env`, then:
-
-```bash
-curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://httpbin.org/ip",
-    "proxy_type": "res_static"
-  }'
-```
-
-### 13) Proxies (CyberYozh) with GEO targeting
-
-`proxy_geo` accepts the following optional fields:
-
-| Field          | Type   | Description                        |
-|----------------|--------|------------------------------------|
-| `country_code` | string | ISO 3166-1 alpha-2 (e.g. `"US"`, `"GB"`) |
-| `region`       | string | Region / state name                |
-| `city`         | string | City name (e.g. `"London"`)        |
-
-GEO targeting at the **proxy** level is supported only for `res_rotating`. For `res_static`, `mobile`, `mobile_shared` and `dc_static` the proxy already has a fixed location; `proxy_geo` in those requests is accepted but does not change the exit IP (a warning is logged).
-
-Regardless of the proxy type, when `proxy_geo.country_code` is provided the browser context is automatically aligned with that country — `locale`, `timezone_id` and `Accept-Language` are set accordingly so the fingerprint matches the IP. For US, CA, RU, AU and BR a `city` hint further refines the timezone.
-
-#### Country only
-
-```bash
-curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://httpbin.org/ip",
-    "proxy_type": "res_rotating",
-    "proxy_geo": {"country_code": "US"}
-  }'
-```
-
-#### 14) Proxies (CyberYozh) with country and city + verification
-
-Request through a London residential proxy and verify the exit IP is actually in London:
-
-```bash
-# Step 1 – create job
-JOB_ID=$(
-  curl -s -X POST http://localhost:8000/api/v1/scrape/page \
-    -H "Content-Type: application/json" \
-    -d '{
-      "url": "https://httpbin.org/ip",
-      "proxy_type": "res_rotating",
-      "proxy_geo": {"country_code": "GB", "city": "London"},
-      "raw_html": true
-    }' \
-  | jq -r .job_id
-)
-
-# Step 2 – wait for completion
-while true; do
-  STATUS=$(curl -s "http://localhost:8000/api/v1/scrape/$JOB_ID" | jq -r .status)
-  [ "$STATUS" = "done" ] && break
-  [ "$STATUS" = "failed" ] && echo "failed" && exit 1
-  sleep 0.5
-done
-
-# Step 3 – extract IP from result
-IP=$(
-  curl -s "http://localhost:8000/api/v1/scrape/$JOB_ID/results" \
-  | jq -r '.results[0].raw_html' \
-  | python3 -c "
-import sys, re, json
-html = sys.stdin.read()
-m = re.search(r'<pre[^>]*>(.*?)</pre>', html, re.DOTALL)
-data = json.loads(m.group(1) if m else html)
-print(data['origin'].split(',')[0].strip())
-"
-)
-echo "Proxy IP: $IP"
-
-# Step 4 – verify geolocation via ipapi.co
-curl -s "https://ipapi.co/$IP/json/" | jq '{ip, city, country_code}'
-```
-
-Expected output:
-
-```json
-{
-  "ip": "185.x.x.x",
-  "city": "London",
-  "country_code": "GB"
-}
-```
-
-For a ready-to-run Python script that tests multiple cities see [`examples/geo_scraping.py`](examples/geo_scraping.py):
-
-```bash
-cd examples
-python geo_scraping.py
-```
-
-## Request Schema
-
-### POST /api/v1/scrape/page
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `url` | string | required | Target URL |
-| `render` | boolean | `true` | Run full JS rendering in browser |
-| `wait_until` | `domcontentloaded` \| `networkidle` | `domcontentloaded` | When to consider page loaded |
-| `wait_for_selector` | string | - | Wait for CSS selector before extracting |
-| `timeout_ms` | integer | - | Per-page timeout (ms), overrides global |
-| `device` | `desktop` \| `mobile` | `desktop` | Device emulation |
-| `headers` | object | - | Custom HTTP headers |
-| `cookies` | array | - | Cookies to inject |
-| `proxy_type` | string | `none` | See proxy types table |
-| `proxy_pool_id` | string | - | Pin request to a specific purchased proxy id (required when `proxy_type != none` from the tester UI) |
-| `proxy_geo` | object | - | `{ country_code, region, city }` — targets the exit IP for `res_rotating`; also drives browser locale/timezone alignment for every type |
-| `block_assets` | boolean | env | Block images/fonts/media to speed up load; falls back to the `BLOCK_ASSETS` env var when unset |
-| `raw_html` | boolean | `false` | Include raw HTML in response |
-| `screenshot` | boolean | `false` | Include full-page screenshot as base64 (triggers a scroll pass for lazy images when assets are not blocked) |
-| `stealth` | boolean | `true` | Apply `playwright-stealth` patches (navigator.webdriver, WebGL, Canvas, etc.) |
-| `extract` | object | - | Structured extraction rules |
-
-### ExtractRule
-
-```json
-{
-  "type": "css",
-  "fields": {
-    "title": {
-      "selector": "h1",
-      "attr": "text",
-      "all": false,
-      "required": false
-    }
-  }
-}
-```
-
-| Field | Values | Description |
-|-------|--------|-------------|
-| `type` | `css` \| `xpath` | Selector type |
-| `selector` | string | CSS selector or XPath expression |
-| `attr` | `text` (default) \| `html` \| attribute name | What to extract |
-| `all` | boolean | Return all matches as array instead of first match |
-| `required` | boolean | Log warning if field not found |
-
-### Response
-
-Each result in `results[]` contains:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `request_id` | string | Job ID |
-| `took_ms` | integer | Render time in milliseconds |
-| `meta.url` | string | Original URL |
-| `meta.final_url` | string | Final URL after redirects |
-| `meta.status_code` | integer | HTTP status code |
-| `meta.device` | string | Device used |
-| `meta.proxy_type` | string | Proxy used |
-| `meta.proxy_pool_id` | string | Specific proxy id used (if any) |
-| `meta.retries` | integer | Number of retries |
-| `meta.applied_user_agent` | string | UA that was actually sent |
-| `meta.applied_locale` | string | Browser locale (`es-ES`, `en-US`, …) |
-| `meta.applied_timezone` | string | Browser timezone id |
-| `meta.applied_accept_language` | string | Effective `Accept-Language` |
-| `data` | object | Extracted fields (if `extract` was set) |
-| `raw_html` | string | Raw HTML (if `raw_html: true`) |
-| `screenshot_base64` | string | Base64 PNG (if `screenshot: true`) |
-| `warnings` | array | Non-fatal warnings |
-
----
-
-## MCP Integration
-
-Open Scraper exposes all its API tools via the [Model Context Protocol](https://modelcontextprotocol.io/) at `/mcp`. This lets AI assistants use the scraper directly as a tool — no extra code required.
-
-### Available MCP tools
-
-| Tool | Description |
-|------|-------------|
-| `run_scrape_page` | Scrape a single page, returns `job_id` |
-| `run_scrape_pages` | Scrape multiple pages in batch, returns `job_id` |
-| `get_job_status` | Poll job status by `job_id` |
-| `get_job_result` | Fetch results for a completed job |
-| `health` | Health check |
-
-### Claude Code
-
-Add to `~/.claude/settings.json`:
+It has tabs for Scrape Page, Batch Scrape, **Crawler** (with SSE live updates
+and a site-map tree), Jobs, and MCP (with a target dropdown for scraper vs
+crawler). Active tab and form state persist across page refreshes.
+
+## Proxy support (CyberYozh App)
+
+**For reliable web scraping, using proxies is essential.** Most modern sites
+(search engines, e-commerce, social media) have anti-bot protection that
+blocks direct scraping — proxies help you avoid IP bans, bypass
+geo-restrictions, and appear as real users from different locations.
+
+The scraper integrates with **CyberYozh Proxy Service** (residential, mobile
+LTE, and datacenter proxies). The crawler forwards proxy config to the
+scraper as-is — no duplication.
+
+1. Get an API key: https://app.cyberyozh.com/api-access/
+2. Drop it into `.env` as `CYBERYOZH_API_KEY=...`
+3. Restart the scraper container.
+4. Use any `proxy_type` in a scrape / crawl request.
+
+Available types (full details, GEO targeting, CyberYozh category mapping
+and discovery endpoints in [src/README.md](src/README.md#proxy-support)):
+
+| `proxy_type`     | What it is |
+|------------------|------------|
+| `res_rotating`   | Residential rotating — recommended default |
+| `res_static`     | Residential static (dedicated IP)          |
+| `mobile`         | Mobile / LTE, dedicated                    |
+| `mobile_shared`  | Mobile / LTE, shared pool                  |
+| `dc_static`      | Datacenter static                          |
+| `none`           | Direct connection, no proxy                |
+
+The tester lists purchased proxies in each dropdown via
+`GET /api/v1/proxies/available?proxy_type=...` — no manual pool-id hunting.
+
+## MCP integration
+
+Both services speak [Model Context Protocol](https://modelcontextprotocol.io/)
+over Streamable HTTP:
+
+- **Scraper** → `http://localhost:8000/mcp` — tools: `run_scrape_page`,
+  `run_scrape_pages`, `get_job_status`, `get_job_result`, `cancel_scrape_job`,
+  `health`.
+- **Crawler** → `http://localhost:8001/mcp` — tools: `create_crawl`,
+  `get_crawl`, `get_crawl_results`, `cancel_crawl`, `health` (the SSE
+  `events` stream is excluded — streams don't fit the MCP tool model).
+
+### Claude Code / Claude Desktop
+
+Add both servers to `~/.claude/settings.json`:
 
 ```json
 {
@@ -540,17 +112,20 @@ Add to `~/.claude/settings.json`:
     "open-scraper": {
       "type": "http",
       "url": "http://localhost:8000/mcp"
+    },
+    "open-crawler": {
+      "type": "http",
+      "url": "http://localhost:8001/mcp"
     }
   }
 }
 ```
 
-Restart Claude Code — scraper tools appear automatically. Then just ask in chat:
-```
-Scrape https://example.com and tell me what's on the page
-```
+Restart Claude. Both sets of tools appear automatically — you can just ask:
+*"Scrape https://example.com and tell me what's on the page"* or
+*"Crawl app.cyberyozh.com, scope same-domain, depth 2, up to 50 pages"*.
 
-### LangChain Agent
+### LangChain agent
 
 ```bash
 pip install langchain-anthropic langchain-mcp-adapters langgraph
@@ -558,54 +133,65 @@ export ANTHROPIC_API_KEY=sk-ant-...
 python examples/agent.py
 ```
 
-See [`examples/agent.py`](examples/agent.py) — a chat agent that handles the full job lifecycle: submit -> poll -> fetch -> summarize.
+See [`examples/agent.py`](examples/agent.py) — chat agent that handles the
+full scraper job lifecycle (submit → poll → fetch → summarize). Same
+`langchain-mcp-adapters` pattern works for the crawler endpoint — point at
+`http://localhost:8001/mcp`.
 
-### MCP Inspector (debug UI)
+### n8n
+
+n8n has a native **MCP Client Tool** node (or the community
+`n8n-nodes-mcp` package for older versions). Add it to an **AI Agent**
+workflow:
+
+1. Drop an *AI Agent* node.
+2. Add a *MCP Client Tool* node connected to the Agent's **Tools** input.
+3. Configure:
+   - **SSE Endpoint / Server URL**: `http://localhost:8000/mcp` (scraper)
+     or `http://localhost:8001/mcp` (crawler). If n8n runs in Docker too,
+     use the container's network name instead of `localhost`.
+   - **Transport**: Streamable HTTP.
+4. The agent can now call any scraper/crawler tool by name. Repeat the
+   node to wire both services into one agent.
+
+### Debug UI (MCP Inspector)
 
 ```bash
 npx @modelcontextprotocol/inspector http://localhost:8000/mcp
-# Opens at http://localhost:6274
+# or
+npx @modelcontextprotocol/inspector http://localhost:8001/mcp
+# Opens at http://localhost:6274 — list + invoke tools visually
 ```
 
----
+The Web tester's **MCP** tab does the same thing in-app, with a target
+dropdown to switch between scraper and crawler.
 
-## Scraper Tester (Web UI)
+## Documentation map
 
-A small Node.js + vanilla HTML tool under [`scraper-tester/`](scraper-tester/)
-that talks to this API and lets you drive every parameter visually — proxy
-type + country dropdown, header presets, cookies, extraction rules, batch
-submissions, per-page partial results, an MCP explorer, screenshot preview
-and raw HTML download.
+- **[src/README.md](src/README.md)** — scraper service: full REST API
+  reference with 14 curl examples, request/response schema, ExtractRule
+  details, CyberYozh proxy integration (all 5 types + GEO targeting + proxy
+  discovery endpoints), MCP tools, proxy-type → CyberYozh category mapping,
+  tests.
+- **[open-crawler/README.md](open-crawler/README.md)** — crawler service:
+  features, API reference, configuration env vars, `enable_scraping` toggle
+  semantics, MCP tools, architecture diagram, known limitations, running
+  without Docker.
+- **[scraper-tester/README.md](scraper-tester/README.md)** — tester UI:
+  per-tab features, how the cancel buttons / site map / custom selects /
+  state persistence work.
 
-```bash
-cd scraper-tester
-npm install
-node server.js
+## Top-level layout
+
 ```
-
-Open [http://localhost:7000](http://localhost:7000). Point the "Scraper URL"
-field in the header at any reachable deployment (default `http://localhost:8000`).
-
-## Tests
-
-```bash
-pip install -e ".[test]"
-pytest -q
+open-scraper-clone/
+├── src/                      # scraper service
+├── open-crawler/             # crawler service
+├── scraper-tester/           # Web UI (Node.js)
+├── examples/                 # Python examples (incl. MCP agent)
+├── scripts/                  # e2e_smoke.py etc.
+├── tests/                    # scraper pytest suite
+├── docker-compose.yml        # scraper + crawler
+├── Dockerfile                # scraper image (Playwright base)
+└── .env.example              # scraper env template
 ```
-
-## Proxy type → CyberYozh mapping
-
-`proxy_type` is mapped to the CyberYozh `category` used against
-`GET /api/v1/proxies/history/` and filtered by `access_type`:
-
-| `proxy_type`     | CyberYozh category     | `access_type` filter |
-|------------------|------------------------|----------------------|
-| `res_rotating`   | `residential_rotating` | — (single tier)      |
-| `res_static`     | `residential_static`   | `private`            |
-| `mobile`         | `lte`                  | `private`            |
-| `mobile_shared`  | `lte`                  | `shared`             |
-| `dc_static`      | `datacenter`           | `private`            |
-
-`res_rotating` additionally calls `POST /api/v1/proxies/rotating-credentials/`
-to obtain per-session credentials (optionally with `proxy_geo`).
-The mapping lives in [`src/proxy/cyberyozh/provider.py`](src/proxy/cyberyozh/provider.py).

@@ -1,0 +1,9 @@
+[project]
+name = "open-crawler"
+version = "0.1.0"
+description = "Crawler service on top of open-scraper. Takes a seed URL, walks links, streams results via SSE."
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

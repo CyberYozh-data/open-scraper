@@ -5,7 +5,14 @@ const path = require('path');
 const app = express();
 const PORT = 7000;
 
-app.use(express.static(path.join(__dirname, 'public')));
+// Disable caching so edits to index.html/app.js show up immediately on refresh.
+app.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+app.use(express.static(path.join(__dirname, 'public'), { etag: false, lastModified: false }));
 
 // Single proxy instance per target (cached)
 const proxyCache = {};

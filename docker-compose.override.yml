@@ -1,0 +1,23 @@
+# Dev overrides — picked up automatically by `docker compose` (not `-prod`).
+# Mounts open-crawler source read-only and runs uvicorn with --reload so edits
+# in open-crawler/src/**/*.py apply without rebuilding the image.
+#
+# For production deployment either:
+#   - delete this file, or
+#   - run with `docker compose -f docker-compose.yml up` (skip the override).
+services:
+  open-crawler:
+    volumes:
+      - ./open-crawler/src:/app/src:ro
+    command:
+      - python
+      - -m
+      - uvicorn
+      - src.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --reload
+      - --reload-dir
+      - /app/src

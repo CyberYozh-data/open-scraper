@@ -17,8 +17,12 @@
     <div class="server-bar">
       <label>Scraper URL</label>
       <input id="scraperUrl" type="text" value="http://localhost:8000" />
-      <button id="btnHealth" class="btn-secondary">Health Check</button>
+      <button id="btnHealth" class="btn-secondary">Check</button>
       <span id="healthStatus" class="badge"></span>
+      <label style="margin-left:1rem">Crawler URL</label>
+      <input id="crawlerUrl" type="text" value="http://localhost:8001" />
+      <button id="btnCrawlerHealth" class="btn-secondary">Check</button>
+      <span id="crawlerHealthStatus" class="badge"></span>
       <a href="https://apidoc.cyberyozh.com" target="_blank" rel="noopener" class="btn-secondary header-link">CyberYozh API Docs ↗</a>
       <a href="https://app.cyberyozh.com/ru/my-account/api-keys/" target="_blank" rel="noopener" class="btn-secondary header-link">Get API Key ↗</a>
     </div>
@@ -39,6 +43,7 @@
   <nav class="tabs">
     <button class="tab-btn active" data-tab="scrape">Scrape Page</button>
     <button class="tab-btn" data-tab="batch">Batch Scrape</button>
+    <button class="tab-btn" data-tab="crawler">Crawler</button>
     <button class="tab-btn" data-tab="jobs">Jobs</button>
     <button class="tab-btn" data-tab="mcp">MCP</button>
   </nav>
@@ -235,7 +240,10 @@
 
       <div class="panel">
         <h2>Result</h2>
-        <div id="scrape-status" class="status-bar hidden"></div>
+        <div style="display:flex;align-items:stretch;gap:0.5rem">
+          <div id="scrape-status" class="status-bar hidden" style="flex:1"></div>
+          <button id="btnCancelScrape" class="btn-secondary" disabled style="display:none">Cancel</button>
+        </div>
         <div id="scrape-result" class="result-area">
           <span class="placeholder">Result will appear here...</span>
         </div>
@@ -433,9 +441,273 @@
 
       <div class="panel">
         <h2>Result</h2>
-        <div id="batch-status" class="status-bar hidden"></div>
+        <div style="display:flex;align-items:stretch;gap:0.5rem">
+          <div id="batch-status" class="status-bar hidden" style="flex:1"></div>
+          <button id="btnCancelBatch" class="btn-secondary" disabled style="display:none">Cancel</button>
+        </div>
         <div id="batch-result" class="result-area">
           <span class="placeholder">Result will appear here...</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== CRAWLER ===== -->
+  <section id="tab-crawler" class="tab-content">
+    <div class="two-col">
+      <div class="panel">
+        <div style="display:flex;align-items:center;gap:0.5rem">
+          <h2 style="border:none;padding:0;flex:1">Crawl Parameters</h2>
+          <span class="info-icon" tabindex="0">
+            i
+            <div class="info-tooltip">
+              <div><b>Seed URL</b> — the single starting page. The crawler walks outbound <code>&lt;a href&gt;</code> links from there.</div>
+              <div><b>Scope</b> — which URLs are followed:<br>
+                • <b>same-domain</b>: only the exact host of the seed.<br>
+                • <b>subdomains</b>: the seed's registrable domain + its subdomains.<br>
+                • <b>all</b>: no domain restriction.<br>
+                • <b>regex</b>: use <i>Include patterns</i> below. URLs must match at least one include; any match in <i>Exclude patterns</i> always wins.</div>
+              <div><b>Max depth / pages</b> — hard caps. <code>max_depth=3</code>, <code>max_pages=500</code> by default.</div>
+              <div><b>Per-domain RPS</b> — requests per second per host. A global token bucket is shared across all running crawl jobs, so two concurrent crawls on the same domain divide the RPS fairly.</div>
+              <div><b>Per-domain concurrency</b> — how many in-flight fetches can target the same host from this job. Usually 1.</div>
+              <div><b>Enable scraping</b> — when on, each crawled page is kept with its full <code>ScrapeResponse</code> (raw_html/screenshot/extracted data). When off, only URL / parent / depth / status are kept (lighter memory, lighter payload).</div>
+            </div>
+          </span>
+        </div>
+        <div class="field">
+          <label>Seed URL *</label>
+          <input id="c-seed-url" type="text" placeholder="https://example.com" />
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label>Scope Mode</label>
+            <select id="c-scope-mode">
+              <option value="same-domain">same-domain</option>
+              <option value="subdomains">subdomains</option>
+              <option value="all">all</option>
+              <option value="regex">regex</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Max Depth</label>
+            <input id="c-max-depth" type="number" value="3" min="0" />
+          </div>
+          <div class="field">
+            <label>Max Pages</label>
+            <input id="c-max-pages" type="number" value="500" min="1" />
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label>Per-domain RPS</label>
+            <input id="c-rps" type="number" value="1.0" step="0.5" min="0.1" />
+          </div>
+          <div class="field">
+            <label>Per-domain Concurrency</label>
+            <input id="c-concurrency" type="number" value="1" min="1" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Include Patterns (regex, one per line)</label>
+          <textarea id="c-include" rows="2" placeholder="^https://example\.com/blog/"></textarea>
+        </div>
+        <div class="field">
+          <label>Exclude Patterns (regex, one per line)</label>
+          <textarea id="c-exclude" rows="2" placeholder="/logout|/admin"></textarea>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.4rem">
+          <h3 style="margin:0">Crawl Proxy</h3>
+          <span class="info-icon" tabindex="0">
+            i
+            <div class="info-tooltip">
+              <div>Proxy used for every crawler fetch. When <i>Enable scraping</i> is OFF, this is the only proxy config that matters.</div>
+              <div>Pool list, country/region fields and a <i>Buy</i> link appear once you pick a type other than <code>none</code>.</div>
+            </div>
+          </span>
+          <span id="cp-proxy-warning" style="margin-left:auto;font-size:11px;color:var(--color-orange,#c77400)">⚠ crawl proxy=none — no IP rotation</span>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Proxy Type</label>
+            <select id="cp-proxy-type">
+              <option value="none">none</option>
+              <option value="res_rotating">res_rotating</option>
+              <option value="res_static">res_static</option>
+              <option value="mobile">mobile</option>
+              <option value="mobile_shared">mobile_shared</option>
+              <option value="dc_static">dc_static</option>
+            </select>
+          </div>
+          <div class="field" id="cp-pool-id-field">
+            <label>Pool ID <span id="cp-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
+            <select id="cp-proxy-pool-select" style="display:none"></select>
+            <input id="cp-proxy-pool" type="text" placeholder="optional" />
+          </div>
+        </div>
+        <div class="field-row" id="cp-geo-fields">
+          <div class="field">
+            <label>Country</label>
+            <select id="cp-geo-country"><option value="">— any —</option></select>
+          </div>
+          <div class="field">
+            <label>Region</label>
+            <input id="cp-geo-region" type="text" placeholder="New York" />
+          </div>
+          <div class="field">
+            <label>City</label>
+            <input id="cp-geo-city" type="text" placeholder="New York" />
+          </div>
+        </div>
+
+        <div class="field-row checkboxes" style="padding:0.6rem 0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);margin:0.75rem 0 0.5rem">
+          <label style="font-weight:500">
+            <input id="c-enable-scraping" type="checkbox" />
+            Enable scraping (keep raw_html / screenshot / extracted data per page)
+          </label>
+        </div>
+
+        <div id="c-scraping-section" style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:1rem;background:var(--bg-primary);display:flex;flex-direction:column;gap:0.8rem">
+          <h3 style="margin:0">Scrape Settings</h3>
+          <div class="field-row">
+            <div class="field">
+              <label>Device</label>
+              <select id="c-device">
+                <option value="desktop">Desktop</option>
+                <option value="mobile">Mobile</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Wait Until</label>
+              <select id="c-wait-until">
+                <option value="domcontentloaded">domcontentloaded</option>
+                <option value="networkidle">networkidle</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Timeout (ms)</label>
+              <input id="c-timeout" type="number" value="30000" />
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Wait for Selector</label>
+            <input id="c-wait-selector" type="text" placeholder="h1 (optional)" />
+          </div>
+
+          <div class="field-row checkboxes">
+            <label><input id="c-render" type="checkbox" checked /> JS Render</label>
+            <label><input id="c-raw-html" type="checkbox" /> Raw HTML in results</label>
+            <label><input id="c-screenshot" type="checkbox" /> Screenshot</label>
+            <label><input id="c-block-assets" type="checkbox" checked /> Block Assets</label>
+            <label><input id="c-stealth" type="checkbox" checked /> Stealth</label>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.4rem">
+            <h3 style="margin:0">Scrape Proxy</h3>
+            <span class="info-icon" tabindex="0">
+              i
+              <div class="info-tooltip">
+                <div>Proxy used when scraping is enabled — replaces the Crawl Proxy for the full-content fetch (extract / screenshot / raw_html payload).</div>
+                <div>Usually a higher-quality residential proxy makes sense here since every page is fully rendered.</div>
+              </div>
+            </span>
+            <span id="c-proxy-warning" style="margin-left:auto;font-size:11px;color:var(--color-orange,#c77400)">⚠ scrape proxy=none — no IP rotation</span>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Proxy Type</label>
+              <select id="c-proxy-type">
+                <option value="none">none</option>
+                <option value="res_rotating">res_rotating</option>
+                <option value="res_static">res_static</option>
+                <option value="mobile">mobile</option>
+                <option value="mobile_shared">mobile_shared</option>
+                <option value="dc_static">dc_static</option>
+              </select>
+            </div>
+            <div class="field" id="c-pool-id-field">
+              <label>Pool ID <span id="c-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
+              <select id="c-proxy-pool-select" style="display:none"></select>
+              <input id="c-proxy-pool" type="text" placeholder="optional" />
+            </div>
+          </div>
+          <div class="field-row" id="c-geo-fields">
+            <div class="field">
+              <label>Country</label>
+              <select id="c-geo-country"><option value="">— any —</option></select>
+            </div>
+            <div class="field">
+              <label>Region</label>
+              <input id="c-geo-region" type="text" placeholder="New York" />
+            </div>
+            <div class="field">
+              <label>City</label>
+              <input id="c-geo-city" type="text" placeholder="New York" />
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.4rem">
+            <h3 style="margin:0">Extraction</h3>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Type</label>
+              <select id="c-extract-type">
+                <option value="">— disabled —</option>
+                <option value="css">CSS</option>
+                <option value="xpath">XPath</option>
+              </select>
+            </div>
+          </div>
+          <div id="c-extract-fields-wrapper">
+            <div id="c-extract-fields"></div>
+            <button class="btn-secondary btn-sm" id="btnAddFieldCrawler">+ Add Field</button>
+          </div>
+
+          <h3>Custom Headers</h3>
+          <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem;align-items:center">
+            <select id="c-header-preset" style="flex:1;min-width:160px">
+              <option value="">— headers preset —</option>
+              <option value="chrome_win">Chrome / Windows</option>
+              <option value="chrome_mac">Chrome / macOS</option>
+              <option value="firefox_win">Firefox / Windows</option>
+              <option value="mobile_chrome">Mobile Chrome (Android)</option>
+              <option value="safari_ios">Safari / iPhone</option>
+              <option value="ru_locale">RU locale</option>
+              <option value="antibot">Anti-bot pack</option>
+            </select>
+            <button class="btn-secondary btn-sm" id="btnApplyPresetCrawler">Apply</button>
+            <button class="btn-secondary btn-sm" id="btnClearHeadersCrawler">Clear</button>
+          </div>
+          <div>
+            <div id="c-headers-list"></div>
+            <button class="btn-secondary btn-sm" id="btnAddHeaderCrawler">+ Add Header</button>
+          </div>
+
+          <h3>Cookies</h3>
+          <div>
+            <div id="c-cookies-list"></div>
+            <button class="btn-secondary btn-sm" id="btnAddCookieCrawler">+ Add Cookie</button>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="btnCrawl" class="btn-primary">Start Crawl</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Result</h2>
+        <div style="display:flex;align-items:stretch;gap:0.5rem">
+          <div id="crawl-status" class="status-bar hidden" style="flex:1"></div>
+          <button id="btnCancelCrawl" class="btn-secondary" disabled style="display:none">Cancel</button>
+        </div>
+        <div id="crawl-result" class="result-area">
+          <span class="placeholder">Crawl progress and pages will appear here...</span>
         </div>
       </div>
     </div>
@@ -462,7 +734,10 @@
         <div id="recent-jobs"></div>
       </div>
       <div class="panel">
-        <h2>Response</h2>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem">
+          <h2 style="border:none;padding:0;margin:0">Response</h2>
+          <button id="btnCancelJob" class="btn-secondary" disabled style="display:none">Cancel</button>
+        </div>
         <div id="jobs-result" class="result-area">
           <span class="placeholder">Result will appear here...</span>
         </div>
@@ -474,8 +749,14 @@
   <section id="tab-mcp" class="tab-content">
     <div class="two-col">
       <div class="panel">
-        <h2>MCP Tools</h2>
-        <button id="btnListTools" class="btn-secondary">Load Available Tools</button>
+        <div style="display:flex;align-items:center;gap:0.7rem">
+          <h2 style="border:none;padding:0;margin:0;flex:0 0 auto">MCP Tools</h2>
+          <select id="mcp-target" style="flex:0 0 160px">
+            <option value="scraper">Scraper (8000)</option>
+            <option value="crawler">Crawler (8001)</option>
+          </select>
+        </div>
+        <button id="btnListTools" class="btn-secondary" style="margin-top:0.5rem">Load Available Tools</button>
         <div id="mcp-tools-list" style="margin-top:1rem"></div>
 
         <h2 style="margin-top:2rem">Call Tool</h2>

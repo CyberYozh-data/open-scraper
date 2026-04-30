@@ -158,6 +158,47 @@ class TestInMemoryJobQueue:
         assert record.results == results
 
     @pytest.mark.asyncio
+    async def test_request_cancel_marks_flag_and_returns_true(self):
+        """request_cancel sets JobRecord.cancelled and returns True for active jobs."""
+        queue = InMemoryJobQueue()
+        job_id = await queue.submit([ScrapeRequest(url="https://example.com")])
+        rec = await queue.get(job_id)
+        assert rec.cancelled is False
+
+        ok = await queue.request_cancel(job_id)
+        assert ok is True
+        rec2 = await queue.get(job_id)
+        assert rec2.cancelled is True
+
+    @pytest.mark.asyncio
+    async def test_request_cancel_idempotent_on_already_cancelled(self):
+        """request_cancel returns False on already-terminal jobs."""
+        queue = InMemoryJobQueue()
+        job_id = await queue.submit([ScrapeRequest(url="https://example.com")])
+        await queue._set(job_id, status="cancelled")
+
+        ok = await queue.request_cancel(job_id)
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_request_cancel_refused_for_done_and_failed(self):
+        """Cannot cancel a job that already reached a terminal state."""
+        queue = InMemoryJobQueue()
+
+        done_id = await queue.submit([ScrapeRequest(url="https://example.com")])
+        await queue._set(done_id, status="done")
+        assert (await queue.request_cancel(done_id)) is False
+
+        failed_id = await queue.submit([ScrapeRequest(url="https://example.com")])
+        await queue._set(failed_id, status="failed", error="boom")
+        assert (await queue.request_cancel(failed_id)) is False
+
+    @pytest.mark.asyncio
+    async def test_request_cancel_unknown_job_returns_false(self):
+        queue = InMemoryJobQueue()
+        assert (await queue.request_cancel("req_does_not_exist")) is False
+
+    @pytest.mark.asyncio
     async def test_job_queue_set_multiple_fields(self):
         """Update a few fields at the same time"""
         queue = InMemoryJobQueue()

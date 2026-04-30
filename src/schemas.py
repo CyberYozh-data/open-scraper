@@ -7,7 +7,7 @@ ScrapeProxyType = Literal["none", "mobile_shared", "mobile", "res_static", "res_
 WaitUntil = Literal["domcontentloaded", "networkidle"]
 Device = Literal["desktop", "mobile"]
 ExtractType = Literal["css", "xpath"]
-JobStatus = Literal["queued", "running", "done", "failed"]
+JobStatus = Literal["queued", "running", "done", "failed", "cancelled"]
 
 
 class ProxyItem(BaseModel):
