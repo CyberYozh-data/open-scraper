@@ -7,8 +7,8 @@ tester and MCP exposure on both services.
 
 | Service | Port | Docs | What it does |
 |---|---|---|---|
-| **Scraper** ([`src/`](src/README.md)) | `8000` | [src/README.md](src/README.md) | Async job API — renders a URL in a real browser, returns extracted fields / raw HTML / full-page screenshot. Built-in CyberYozh proxy integration + session API for authenticated targets. |
-| **Crawler** ([`open-crawler/`](yozh-crawler/README.md)) | `8001` | [open-crawler/README.md](yozh-crawler/README.md) | Walks a site from a seed URL; fetches every page through the scraper over HTTP; streams results via SSE. Dedup, scope, rate-limiting, retries. |
+| **Scraper** ([`src/`](src/README.md)) | `8000` | [src/README.md](src/README.md) | Async job API — renders a URL in a real browser, returns extracted fields / raw HTML / full-page screenshot. Built-in CyberYozh proxy integration. |
+| **Crawler** ([`yozh-crawler/`](yozh-crawler/README.md)) | `8001` | [yozh-crawler/README.md](yozh-crawler/README.md) | Walks a site from a seed URL; fetches every page through the scraper over HTTP; streams results via SSE. Dedup, scope, rate-limiting, retries. |
 | **Tester** ([`scraper-tester/`](scraper-tester/README.md)) | `7000` | [scraper-tester/README.md](scraper-tester/README.md) | Node.js + vanilla HTML UI for both services — every knob as a form, live progress, MCP explorer. |
 
 Both API services mount an **MCP endpoint** at `/mcp` (Streamable HTTP) and
@@ -89,6 +89,43 @@ and discovery endpoints in [src/README.md](src/README.md#proxy-support)):
 
 The tester lists purchased proxies in each dropdown via
 `GET /api/v1/proxies/available?proxy_type=...` — no manual pool-id hunting.
+
+## Presets & sessions
+
+Two higher-level features layer on raw scraping — both fully documented in
+[src/README.md](src/README.md):
+
+**[Presets](src/README.md#presets)** — a named bundle of request profile +
+URL template + parsing recipe, so you scrape a site by name instead of
+hand-assembling a request. Built-ins ship for Amazon, Google, eBay, Walmart,
+YouTube and LinkedIn; you can also build your own (deterministic CSS/XPath
+or AI-generated). Scrape an Amazon product by `asin`, with optional LLM
+self-heal:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/scrape/preset/page \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "source": "amazon_product",
+    "preset_params": {"asin": "B08N5WRWNW"},
+    "locale": "us",
+    "llm": {"model": "openai/gpt-5.4-mini"}
+  }'
+# → {"job_id": "..."}  then GET /api/v1/scrape/<job_id>/results
+```
+
+`llm` is optional — without it the deterministic parser runs alone; with it,
+selectors self-heal when a required field comes back empty. LLM provider
+keys are server-side: set `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
+`GEMINI_API_KEY` / `OPENROUTER_API_KEY` (or a custom OpenAI-compatible
+endpoint) in `.env` — see [`.env.example`](.env.example) for all LLM
+settings and `DEFAULT_LLM_MODEL`.
+
+**[Sessions](src/README.md#sessions)** — server-managed authenticated
+sessions: create a session, log in once (declarative login script or
+injected cookies), then pass its `session_id` to any scrape so pages are
+fetched with the stored cookies + storage state. Required for logged-in
+targets such as the `linkedin_profile` preset.
 
 ## MCP integration
 
@@ -171,9 +208,9 @@ dropdown to switch between scraper and crawler.
 - **[src/README.md](src/README.md)** — scraper service: full REST API
   reference with 14 curl examples, request/response schema, ExtractRule
   details, CyberYozh proxy integration (all 5 types + GEO targeting + proxy
-  discovery endpoints), MCP tools, proxy-type → CyberYozh category mapping,
-  tests.
-- **[open-crawler/README.md](yozh-crawler/README.md)** — crawler service:
+  discovery endpoints), presets (built-in + AI-generated) and authenticated
+  sessions, MCP tools, proxy-type → CyberYozh category mapping, tests.
+- **[yozh-crawler/README.md](yozh-crawler/README.md)** — crawler service:
   features, API reference, configuration env vars, `enable_scraping` toggle
   semantics, MCP tools, architecture diagram, known limitations, running
   without Docker.
@@ -186,7 +223,7 @@ dropdown to switch between scraper and crawler.
 ```
 yozh-scraper/
 ├── src/                      # scraper service
-├── open-crawler/             # crawler service
+├── yozh-crawler/             # crawler service
 ├── scraper-tester/           # Web UI (Node.js)
 ├── examples/                 # Python examples (incl. MCP agent)
 ├── scripts/                  # e2e_smoke.py etc.
