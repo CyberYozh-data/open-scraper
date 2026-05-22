@@ -28,7 +28,7 @@ This scraper integrates with **CyberYozh Proxy Service** which provides
 residential, mobile (LTE), and datacenter proxies.
 
 - **Get your API key:** https://app.cyberyozh.com/api-access/
-- **Proxy documentation:** https://docs.cyberyozh.com/proxies
+- **Proxy documentation:** https://apidoc.cyberyozh.com/
 
 Set `CYBERYOZH_API_KEY` in `.env` to enable proxy support.
 

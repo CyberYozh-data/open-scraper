@@ -1,8 +1,8 @@
 """Business logic for preset management, generation, testing and preview.
 
 All domain exceptions are plain Python exceptions — no HTTPException.
-The API layer (src/api/presets.py) is a thin wrapper; the global exception
-handlers in src/api/exception_handlers.py map these to HTTP responses.
+The API layer (src/api/presets.py) is a thin wrapper that catches these
+per-route and maps them to HTTP responses.
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import ipaddress
 import logging
 import socket
 import time
-from typing import Any, Literal
+from typing import Literal
 from urllib.parse import urlparse
 
 import httpx

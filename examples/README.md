@@ -37,8 +37,8 @@ python examples/basic_scraping.py
 * **ecommerce_product_scraping.py** - Scraping product cards from books.toscrape.com
 
 ### Stealth (anti-bot sites)
-* **stealth_amazon_scraping.py** - Amazon product page — need use stealth + residential proxy
-* **stealth_ebay_scraping.py** - eBay search results — need use stealth + residential proxy
+* **amazon_scraping.py** - Amazon product page — need use stealth + residential proxy
+* **ebay_scraping.py** - eBay search results — need use stealth + residential proxy
 
 ### Advanced
 * **proxy_rotation_scraping.py** - IP rotation with residential rotating proxies

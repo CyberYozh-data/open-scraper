@@ -93,6 +93,8 @@ async def test_preset(
 ) -> dict:
     try:
         return await preset_service.test(name, req, store)
+    except PresetValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
     except PresetNotFound as exc:
         raise HTTPException(status_code=404, detail="preset_not_found") from exc
     except SampleFetchError as exc:

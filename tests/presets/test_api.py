@@ -157,3 +157,19 @@ class TestDeleteEndpoint:
     def test_delete_missing(self, client: TestClient):
         response = client.delete("/api/v1/presets/user_missing")
         assert response.status_code == 404
+
+
+class TestTestEndpoint:
+    def test_missing_sample_returns_422(self, client: TestClient):
+        # Empty body — neither sample_url nor sample_html. Must be a clean
+        # 422, not an unhandled PresetValidationError surfacing as 500.
+        response = client.post("/api/v1/presets/amazon_product/test", json={})
+        assert response.status_code == 422
+        assert "sample" in response.json()["detail"]
+
+    def test_unknown_preset_returns_404(self, client: TestClient):
+        response = client.post(
+            "/api/v1/presets/does_not_exist/test",
+            json={"sample_html": "<h1>x</h1>"},
+        )
+        assert response.status_code == 404
