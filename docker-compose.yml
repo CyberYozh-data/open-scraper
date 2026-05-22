@@ -1,6 +1,7 @@
 services:
   web-scraper:
     build: .
+    restart: unless-stopped
     ports:
       - "8000:8000"
     env_file:
@@ -15,6 +16,7 @@ services:
 
   open-crawler:
     build: yozh-crawler
+    restart: unless-stopped
     ports:
       - "8001:8001"
     environment:
