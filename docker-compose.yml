@@ -7,6 +7,10 @@ services:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
+    # Persist user-defined / self-healed presets across restarts. Built-in
+    # presets ship read-only inside the image (src/presets/builtin).
+    volumes:
+      - ./data/presets:/app/data/presets
     shm_size: "1gb"
 
   open-crawler:

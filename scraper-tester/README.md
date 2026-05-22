@@ -28,6 +28,32 @@ The tester talks to **two** backends:
   **Two-step cancel**: first click = soft (finish in-flight, stop
   scheduling), second click = force stop (abort asyncio tasks, crawl exits
   immediately).
+- **Presets** — split into a library panel (left) and a Preset Builder wizard
+  (right). The library lists all built-in and user presets with View / Delete
+  buttons, a kind filter, and a Refresh button. The wizard walks four steps:
+  1. **Sample & Fetch** — enter a URL or paste raw HTML, configure scrape
+     options and proxy (same widget as the other tabs), and click "Fetch
+     sample" to run a real scrape job; its `raw_html` becomes the working
+     sample. Step-1 settings (device, render mode, geo, proxy type, headers,
+     etc. — everything except the concrete `proxy_pool_id`) are stored in the
+     preset's `request_defaults`.
+  2. **Method** — choose Manual (type CSS/XPath selectors into the field
+     table), AI by prompt (describe what to extract and the AI fills the
+     table), or AI by schema (define field names + types and the AI fills it).
+     All three converge into one editable field table.
+  3. **Verify** — sends the current field table to `POST /api/v1/presets/preview`
+     (a dry-run endpoint that validates or AI-generates
+     `parsing_instructions`, runs the parser pipeline, and returns
+     `{parsing_instructions, output_schema, extracted, warnings, mode}`)
+     so you can inspect extracted data and iterate without touching the store.
+     The `self_heal` option can be toggled here.
+  4. **Save** — names the preset (auto-prefixed `user_`) and persists it via
+     `POST /api/v1/presets`; it immediately appears in the library and in the
+     preset selector on the **Scrape Page** tab.
+
+  Running presets in production (against real URLs) is done from the
+  **Scrape**, **Batch Scrape**, and **Crawler** tabs — not here.
+
 - **Jobs** — look up any scrape job by id, view status and results, history of
   recent jobs in the session. Cancel button appears when a looked-up job is
   still running.

@@ -1,6 +1,6 @@
 # Dev overrides — picked up automatically by `docker compose` (not `-prod`).
-# Mounts open-crawler source read-only and runs uvicorn with --reload so edits
-# in open-crawler/src/**/*.py apply without rebuilding the image.
+# Mounts yozh-crawler source read-only and runs uvicorn with --reload so edits
+# in yozh-crawler/src/**/*.py apply without rebuilding the image.
 #
 # For production deployment either:
 #   - delete this file, or
@@ -8,7 +8,7 @@
 services:
   open-crawler:
     volumes:
-      - ./open-crawler/src:/app/src:ro
+      - ./yozh-crawler/src:/app/src:ro
     command:
       - python
       - -m

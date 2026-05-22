@@ -62,6 +62,8 @@ class ScrapeOptions(BaseModel):
     screenshot: bool = False
     extract: ExtractRule | None = None
 
+    session_id: str | None = None
+
 
 class CrawlScope(BaseModel):
     mode: ScopeMode = "same-domain"

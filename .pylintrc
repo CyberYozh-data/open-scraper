@@ -42,6 +42,9 @@ disable=
     # unused-argument — FastAPI/Protocol interface signatures must match even when unused
     unused-argument,
 
+    # redefined-outer-name — pytest fixtures are injected by name; pylint can't see that
+    redefined-outer-name,
+
 [FORMAT]
 max-line-length=120
 

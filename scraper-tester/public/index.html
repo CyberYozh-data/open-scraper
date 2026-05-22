@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Open Scraper Tester</title>
+  <title>CyberYozh Scraper UI</title>
   <link rel="icon" type="image/png" href="logo.png" />
   <link rel="apple-touch-icon" href="logo.png" />
   <link rel="stylesheet" href="style.css" />
@@ -12,7 +12,7 @@
   <header>
     <div class="brand">
       <img src="logo.png" alt="logo" />
-      <span>Open Scraper Tester</span>
+      <span>CyberYozh Scraper UI</span>
     </div>
     <div class="server-bar">
       <label>Scraper URL</label>
@@ -43,7 +43,9 @@
   <nav class="tabs">
     <button class="tab-btn active" data-tab="scrape">Scrape Page</button>
     <button class="tab-btn" data-tab="batch">Batch Scrape</button>
+    <button class="tab-btn" data-tab="presets">Presets</button>
     <button class="tab-btn" data-tab="crawler">Crawler</button>
+    <button class="tab-btn" data-tab="sessions">Sessions</button>
     <button class="tab-btn" data-tab="jobs">Jobs</button>
     <button class="tab-btn" data-tab="mcp">MCP</button>
   </nav>
@@ -135,13 +137,13 @@
               <option value="dc_static">dc_static</option>
             </select>
           </div>
-          <div class="field" id="pool-id-field">
-            <label>Pool ID <span id="pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
+          <div class="field" id="s-pool-id-field">
+            <label>Pool ID <span id="s-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
             <select id="s-proxy-pool-select" style="display:none"></select>
             <input id="s-proxy-pool" type="text" placeholder="optional (for rotating: pin to pool id)" />
           </div>
         </div>
-        <div class="field-row" id="geo-fields">
+        <div class="field-row" id="s-geo-fields">
           <div class="field">
             <label>Country</label>
             <select id="s-geo-country"><option value="">— any —</option></select>
@@ -153,6 +155,24 @@
           <div class="field">
             <label>City</label>
             <input id="s-geo-city" type="text" placeholder="New York" />
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label style="display:flex;align-items:center;gap:0.35rem">
+              Session
+              <span class="info-icon" tabindex="0">
+                i
+                <div class="info-tooltip">
+                  <div>Attach a server-side session — created on the <b>Sessions</b> tab — to scrape authenticated pages.</div>
+                  <div>The session's device + proxy override the values selected above. Leave as <code>— none —</code> for a stateless scrape.</div>
+                </div>
+              </span>
+            </label>
+            <select id="s-session-id" data-session-picker>
+              <option value="">— none —</option>
+            </select>
           </div>
         </div>
 
@@ -180,6 +200,12 @@
                 • on → <code>data.links = ["https://a","https://b","https://c"]</code></div>
             </div>
           </span>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Preset <span style="color:var(--text-tertiary);font-weight:400">— applies the preset's selectors + scrape settings; your URL stays</span></label>
+            <select id="s-extract-preset"><option value="">— none —</option></select>
+          </div>
         </div>
         <div class="field-row">
           <div class="field">
@@ -367,6 +393,24 @@
           <div class="field">
             <label>City</label>
             <input id="b-geo-city" type="text" placeholder="New York" />
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label style="display:flex;align-items:center;gap:0.35rem">
+              Session
+              <span class="info-icon" tabindex="0">
+                i
+                <div class="info-tooltip">
+                  <div>Attach a server-side session (created on the <b>Sessions</b> tab) — applied to every URL in the batch.</div>
+                  <div>The session's device + proxy override the shared settings above. Leave as <code>— none —</code> for stateless scraping.</div>
+                </div>
+              </span>
+            </label>
+            <select id="b-session-id" data-session-picker>
+              <option value="">— none —</option>
+            </select>
           </div>
         </div>
 
@@ -650,6 +694,24 @@
             </div>
           </div>
 
+          <div class="field-row">
+            <div class="field">
+              <label style="display:flex;align-items:center;gap:0.35rem">
+                Session
+                <span class="info-icon" tabindex="0">
+                  i
+                  <div class="info-tooltip">
+                    <div>Attach a server-side session (created on the <b>Sessions</b> tab) — used for every page the crawler fetches with scraping enabled.</div>
+                    <div>The session's device + proxy override the Scrape Proxy block above. Leave as <code>— none —</code> for stateless crawling.</div>
+                  </div>
+                </span>
+              </label>
+              <select id="c-session-id" data-session-picker>
+                <option value="">— none —</option>
+              </select>
+            </div>
+          </div>
+
           <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.4rem">
             <h3 style="margin:0">Extraction</h3>
           </div>
@@ -713,6 +775,169 @@
     </div>
   </section>
 
+  <!-- ===== SESSIONS ===== -->
+  <section id="tab-sessions" class="tab-content">
+    <div class="two-col">
+      <div class="panel">
+        <div style="display:flex;align-items:center;gap:0.5rem">
+          <h2 style="border:none;padding:0;flex:1">Create Session</h2>
+          <span class="info-icon" tabindex="0">
+            i
+            <div class="info-tooltip">
+              <div>Server-side session: pins a device + proxy and stores Playwright <code>storage_state</code> on the scraper.</div>
+              <div>Create a session, optionally run a login script to populate cookies / local storage, then reference its <code>session_id</code> on the Scrape Page / Batch / Crawler tabs to scrape authenticated pages.</div>
+              <div>Credentials passed to the login flow are kept in RAM only and never persisted.</div>
+            </div>
+          </span>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label>Device</label>
+            <select id="sess-device">
+              <option value="desktop">Desktop</option>
+              <option value="mobile">Mobile</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>TTL (seconds)</label>
+            <input id="sess-ttl" type="number" value="86400" min="300" max="604800" />
+          </div>
+        </div>
+
+        <h3>Proxy</h3>
+        <div class="field-row">
+          <div class="field">
+            <label>Proxy Type</label>
+            <select id="sess-proxy-type">
+              <option value="none">none</option>
+              <option value="res_rotating">res_rotating</option>
+              <option value="res_static">res_static</option>
+              <option value="mobile">mobile</option>
+              <option value="mobile_shared">mobile_shared</option>
+              <option value="dc_static">dc_static</option>
+            </select>
+          </div>
+          <div class="field" id="sess-pool-id-field">
+            <label>Pool ID <span id="sess-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
+            <select id="sess-proxy-pool-select" style="display:none"></select>
+            <input id="sess-proxy-pool" type="text" placeholder="optional (for rotating: pin to pool id)" />
+          </div>
+        </div>
+        <div class="field-row" id="sess-geo-fields">
+          <div class="field">
+            <label>Country</label>
+            <select id="sess-geo-country"><option value="">— any —</option></select>
+          </div>
+          <div class="field">
+            <label>Region</label>
+            <input id="sess-geo-region" type="text" placeholder="optional" />
+          </div>
+          <div class="field">
+            <label>City</label>
+            <input id="sess-geo-city" type="text" placeholder="optional" />
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="btnSessCreate" class="btn-primary">Create Session</button>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-top:1.5rem;padding-bottom:0.6rem;border-bottom:1px solid var(--border)">
+          <h2 style="border:none;padding:0;flex:1">Inject Cookies (paste from browser)</h2>
+          <span class="info-icon" tabindex="0">
+            i
+            <div class="info-tooltip">
+              <div>Skip the login DSL entirely — log in manually in your real browser, export cookies with an extension like <b>EditThisCookie</b> / <b>Cookie-Editor</b>, paste the JSON here.</div>
+              <div>Works around CAPTCHA / 2FA / device-verification flows that Phase 1's DSL can't solve. The session then carries your real authenticated state into every scrape.</div>
+              <div>Accepts EditThisCookie / Cookie-Editor JSON format (with <code>expirationDate</code>) — converted automatically.</div>
+            </div>
+          </span>
+        </div>
+
+        <div class="field">
+          <label>Session
+            <select id="sess-cookies-session-id"></select>
+          </label>
+        </div>
+        <div class="field">
+          <label>Cookies JSON
+            <textarea id="sess-cookies-json" rows="8" placeholder='[{"name":"sessionid","value":"abc...","domain":".cyberyozh.com","path":"/","expirationDate":1700000000,"httpOnly":true,"secure":true,"sameSite":"lax"}, ...]'></textarea>
+          </label>
+        </div>
+        <div class="actions">
+          <button id="btnSessInjectCookies" class="btn-primary">Inject Cookies</button>
+        </div>
+        <div id="sess-cookies-result" class="result-area" style="display:none"></div>
+
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-top:1.5rem;padding-bottom:0.6rem;border-bottom:1px solid var(--border)">
+          <h2 style="border:none;padding:0;flex:1">Run Login Script</h2>
+          <span class="info-icon" tabindex="0">
+            i
+            <div class="info-tooltip">
+              <div>Replays a sequence of Playwright actions to populate the session's <code>storage_state</code> (cookies / localStorage).</div>
+              <div>Reference <code>$creds_email</code>, <code>$creds_password</code>, <code>$creds_totp_secret</code> in step <i>value</i> / <i>url</i> fields — the scraper substitutes them from the credentials below at run time and never logs them.</div>
+              <div>Define a <b>success selector</b> or <b>success URL regex</b> so the scraper can verify the login actually worked.</div>
+            </div>
+          </span>
+        </div>
+
+        <div class="field">
+          <label>Session</label>
+          <select id="sess-login-session-id"></select>
+        </div>
+
+        <h3>Credentials (RAM-only, never persisted)</h3>
+        <div class="field-row">
+          <div class="field">
+            <label>Email / username</label>
+            <input id="sess-creds-email" type="text" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label>Password</label>
+            <input id="sess-creds-password" type="password" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label>TOTP secret</label>
+            <input id="sess-creds-totp" type="password" autocomplete="off" placeholder="optional" />
+          </div>
+        </div>
+
+        <h3>Steps</h3>
+        <div id="sess-login-steps"></div>
+        <button class="btn-secondary btn-sm" id="btnSessAddStep">+ Add Step</button>
+
+        <h3>Success check</h3>
+        <div class="field-row">
+          <div class="field">
+            <label>Success selector</label>
+            <input id="sess-success-selector" type="text" placeholder="e.g. .dashboard, #user-menu" />
+          </div>
+          <div class="field">
+            <label>Success URL regex</label>
+            <input id="sess-success-url-regex" type="text" placeholder="e.g. /dashboard" />
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="btnSessRunLogin" class="btn-primary">Run Login</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div style="display:flex;align-items:center;gap:0.5rem">
+          <h2 style="border:none;padding:0;margin:0;flex:1">Existing Sessions</h2>
+          <button id="btnSessRefresh" class="btn-secondary btn-sm">Refresh</button>
+        </div>
+        <div id="sess-create-result" class="result-area" style="min-height:80px;display:none"></div>
+        <div id="sess-login-result" class="result-area" style="min-height:80px;display:none"></div>
+        <div id="sess-list" class="result-area">
+          <span class="placeholder">Click Refresh to load sessions...</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ===== JOBS ===== -->
   <section id="tab-jobs" class="tab-content">
     <div class="two-col">
@@ -740,6 +965,222 @@
         </div>
         <div id="jobs-result" class="result-area">
           <span class="placeholder">Result will appear here...</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== PRESETS ===== -->
+  <section id="tab-presets" class="tab-content">
+    <div class="two-col">
+      <div class="panel">
+        <!-- Library header -->
+        <div style="display:flex;align-items:center;gap:0.75rem;padding-bottom:0.6rem;border-bottom:1px solid var(--border)">
+          <h2 style="border:none;padding:0;margin:0;flex:1">Presets</h2>
+          <select id="p-filter-kind" style="flex:0 0 110px">
+            <option value="">all</option>
+            <option value="builtin">builtin</option>
+            <option value="user">user</option>
+          </select>
+          <div class="p-search-wrap">
+            <svg class="p-search-ico" width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <circle cx="9" cy="9" r="6" stroke="currentColor" stroke-width="1.7"/>
+              <path d="M14 14L18 18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+            <input type="text" id="p-search" placeholder="search name or source…" />
+          </div>
+          <button id="btnLoadPresets" class="btn-secondary btn-sm">Refresh</button>
+        </div>
+        <!-- Preset list -->
+        <div id="presets-list">
+          <span class="placeholder">Click Refresh to load presets…</span>
+        </div>
+        <!-- Pagination bar -->
+        <div id="p-pager" style="display:none">
+          <button id="p-prev">←</button>
+          <span id="p-pageinfo"></span>
+          <button id="p-next">→</button>
+        </div>
+
+        <!-- Separator before builder -->
+        <div style="padding-top:0.6rem;border-top:1px solid var(--border);margin-top:0.4rem">
+          <h2 style="border:none;padding:0;margin:0">Preset Builder</h2>
+        </div>
+
+        <!-- Wizard (moved from right panel) -->
+        <div class="wizard-steps" id="pw-steps">
+          <span class="wizard-step active" data-step="1">1 · Sample</span>
+          <span class="wizard-step" data-step="2">2 · Method</span>
+          <span class="wizard-step" data-step="3">3 · Verify</span>
+          <span class="wizard-step" data-step="4">4 · Save</span>
+        </div>
+
+        <!-- STEP 1: Sample & Fetch -->
+        <div class="wizard-pane active" data-pane="1">
+          <div class="field">
+            <label>Sample URL *</label>
+            <input id="pw-url" type="text" placeholder="https://books.toscrape.com/" />
+          </div>
+          <div class="field">
+            <label>…or paste sample HTML (skips fetch)</label>
+            <textarea id="pw-sample-html" rows="3" placeholder="&lt;html&gt;…&lt;/html&gt;"></textarea>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Device</label>
+              <select id="pw-device">
+                <option value="desktop">Desktop</option>
+                <option value="mobile">Mobile</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Wait Until</label>
+              <select id="pw-wait-until">
+                <option value="domcontentloaded">domcontentloaded</option>
+                <option value="networkidle">networkidle</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Timeout (ms)</label>
+              <input id="pw-timeout" type="number" value="30000" />
+            </div>
+          </div>
+          <div class="field">
+            <label>Wait for Selector</label>
+            <input id="pw-wait-selector" type="text" placeholder="h1 (optional)" />
+          </div>
+          <div class="field-row checkboxes">
+            <label><input id="pw-render" type="checkbox" checked /> JS Render</label>
+            <label><input id="pw-raw-html" type="checkbox" checked disabled title="The builder always needs the page HTML to build/verify a preset" /> Raw HTML</label>
+            <label><input id="pw-screenshot" type="checkbox" /> Screenshot</label>
+            <label><input id="pw-block-assets" type="checkbox" checked /> Block Assets</label>
+            <label><input id="pw-stealth" type="checkbox" checked /> Stealth</label>
+          </div>
+
+          <h3>Proxy</h3>
+          <div class="field-row">
+            <div class="field">
+              <label>Proxy Type</label>
+              <select id="pw-proxy-type">
+                <option value="none">none</option>
+                <option value="res_rotating">res_rotating</option>
+                <option value="res_static">res_static</option>
+                <option value="mobile">mobile</option>
+                <option value="mobile_shared">mobile_shared</option>
+                <option value="dc_static">dc_static</option>
+              </select>
+            </div>
+            <div class="field" id="pw-pool-id-field">
+              <label>Pool ID <span id="pw-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
+              <select id="pw-proxy-pool-select" style="display:none"></select>
+              <input id="pw-proxy-pool" type="text" placeholder="optional" />
+            </div>
+          </div>
+          <div class="field-row" id="pw-geo-fields">
+            <div class="field">
+              <label>Country</label>
+              <select id="pw-geo-country"><option value="">— any —</option></select>
+            </div>
+            <div class="field">
+              <label>Region</label>
+              <input id="pw-geo-region" type="text" placeholder="New York" />
+            </div>
+            <div class="field">
+              <label>City</label>
+              <input id="pw-geo-city" type="text" placeholder="New York" />
+            </div>
+          </div>
+          <div class="actions">
+            <button id="pw-fetch" class="btn-primary">Fetch sample</button>
+          </div>
+          <div id="pw-fetch-status" class="status-bar hidden"></div>
+        </div>
+
+        <!-- STEP 2: Method -->
+        <div class="wizard-pane" data-pane="2">
+          <div class="field">
+            <label>Method</label>
+            <select id="pw-method">
+              <option value="manual">Manual (type selectors)</option>
+              <option value="from_prompt">AI by prompt</option>
+              <option value="from_schema">AI by schema</option>
+            </select>
+          </div>
+
+          <div id="pw-ai-prompt" style="display:none">
+            <div class="field">
+              <label>Describe what to extract</label>
+              <textarea id="pw-desc" rows="3" placeholder="Grab the book title, price and availability"></textarea>
+            </div>
+          </div>
+          <div id="pw-ai-schema" style="display:none">
+            <div class="field">
+              <label>Fields (name → type)</label>
+              <div id="pw-schema-rows"></div>
+              <button class="btn-secondary btn-sm" id="pw-add-schema-row">+ Add Field</button>
+            </div>
+          </div>
+          <div id="pw-ai-model-wrap" style="display:none">
+            <div class="field">
+              <label>LLM model</label>
+              <select id="pw-llm-model"><option value="">— default —</option></select>
+            </div>
+            <div class="actions">
+              <button id="pw-generate" class="btn-secondary">Generate with AI</button>
+            </div>
+          </div>
+
+          <h3>Fields</h3>
+          <div class="field">
+            <label>Selector type</label>
+            <select id="pw-extract-type">
+              <option value="css">CSS</option>
+              <option value="xpath">XPath</option>
+            </select>
+          </div>
+          <div id="pw-fields"></div>
+          <button class="btn-secondary btn-sm" id="pw-add-field">+ Add Field</button>
+        </div>
+
+        <!-- STEP 3: Verify -->
+        <div class="wizard-pane" data-pane="3">
+          <div class="field-row checkboxes">
+            <label><input id="pw-self-heal" type="checkbox" /> self_heal (let the LLM fix selectors)</label>
+          </div>
+          <div class="actions">
+            <button id="pw-verify" class="btn-primary">Run verify</button>
+          </div>
+          <div id="pw-verify-result" class="result-area">
+            <span class="placeholder">Run verify to see extracted data…</span>
+          </div>
+        </div>
+
+        <!-- STEP 4: Save -->
+        <div class="wizard-pane" data-pane="4">
+          <div class="field">
+            <label>Name (auto-prefixed <code>user_</code>)</label>
+            <input id="pw-name" type="text" placeholder="my_preset" />
+          </div>
+          <div class="field">
+            <label>Source</label>
+            <input id="pw-source" type="text" placeholder="custom" />
+          </div>
+          <div class="actions">
+            <button id="pw-save" class="btn-primary">Save preset</button>
+          </div>
+        </div>
+
+        <!-- Step nav: #pw-next hidden on step 4; per-step actions live in their panes. -->
+        <div class="wizard-nav">
+          <button id="pw-back" class="btn-secondary" disabled>← Back</button>
+          <button id="pw-next" class="btn-primary">Next →</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Response</h2>
+        <div id="presets-result" class="result-area">
+          <span class="placeholder">Result will appear here…</span>
         </div>
       </div>
     </div>

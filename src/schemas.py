@@ -2,11 +2,25 @@ from __future__ import annotations
 from typing import Any, Literal, Dict
 from pydantic import BaseModel, Field, HttpUrl
 
+# Single source of truth for extraction models. `FieldRule`/`ExtractRule`
+# (and `PostProcess`) live in src.extract.models — the worker validates the
+# same classes, so a preset's parsing_instructions flows through
+# ScrapeRequest.extract without losing post_process/type.
+# pylint: disable=unused-import
+from src.extract.models import (  # noqa: F401  re-exported for API consumers
+    ExtractRule,
+    ExtractType,
+    FieldRule,
+    PostProcess,
+)
+from src.presets.models import ParserPlan, PresetMeta
+
+# pylint: enable=unused-import
+
 ProxyType = Literal["mobile_shared", "mobile", "res_static", "res_rotating", "dc_static"]
 ScrapeProxyType = Literal["none", "mobile_shared", "mobile", "res_static", "res_rotating", "dc_static"]
 WaitUntil = Literal["domcontentloaded", "networkidle"]
 Device = Literal["desktop", "mobile"]
-ExtractType = Literal["css", "xpath"]
 JobStatus = Literal["queued", "running", "done", "failed", "cancelled"]
 
 
@@ -47,60 +61,6 @@ class Cookie(BaseModel):
     sameSite: Literal["Strict", "Lax", "None"] | None = None
 
 
-class FieldRule(BaseModel):
-    selector: str = Field(
-        ...,
-        description=(
-            "CSS or XPath expression (must match the parent ExtractRule.type). "
-            "Examples: 'h1', '.price_color', '#cart a' for CSS; '//h1', "
-            "'//div[@class=\"item\"]/a/@href' for XPath."
-        ),
-    )
-    attr: str = Field(
-        default="text",
-        description=(
-            "What to pull from the matched element. One of: "
-            "'text' (default, text content), 'html' (outer HTML of the node), "
-            "or any HTML attribute name like 'href', 'src', 'data-id'."
-        ),
-    )
-    all: bool = Field(
-        default=False,
-        description=(
-            "If false (default), returns the FIRST match as a string. If true, "
-            "returns a LIST of every match. Use true for repeating elements "
-            "like product cards, links, table rows."
-        ),
-    )
-    required: bool = Field(
-        default=False,
-        description=(
-            "If true and the selector matches nothing, a warning is added to "
-            "the response. The request itself still succeeds."
-        ),
-    )
-
-
-class ExtractRule(BaseModel):
-    type: ExtractType = Field(
-        ...,
-        description=(
-            "Which selector language to use for every field: 'css' "
-            "(lxml.cssselect) or 'xpath' (lxml XPath). Must match the syntax "
-            "used in field selectors."
-        ),
-    )
-    fields: Dict[str, FieldRule] = Field(
-        ...,
-        description=(
-            "Map of {output_key: FieldRule}. The output_key is the name the "
-            "extracted value will appear under in the response's data object. "
-            "Example: {'title': {selector:'h1'}, 'price': {selector:'.price_color'}} "
-            "-> data = {'title': '...', 'price': '...'}."
-        ),
-    )
-
-
 class ProxyGeo(BaseModel):
     country_code: str | None = None
     region: str | None = None
@@ -121,6 +81,16 @@ class ScrapeRequest(BaseModel):
     proxy_type: ScrapeProxyType = "none"
     proxy_pool_id: str | None = None
     proxy_geo: ProxyGeo | None = None
+
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Use a previously authenticated server-side session. When set, "
+            "the server pulls cookies + storage_state from the session and "
+            "writes any new state back. Mutually exclusive with `cookies`. "
+            "Must match the session's pinned device/proxy_type/proxy_pool_id/proxy_geo."
+        ),
+    )
 
     block_assets: bool | None = Field(
         default=None,
@@ -158,6 +128,21 @@ class ScrapeRequest(BaseModel):
             "Canvas fingerprint, chrome runtime) to reduce bot detection."
         ),
     )
+    preset_meta: PresetMeta | None = Field(
+        default=None,
+        description=(
+            "Internal — populated by the preset materializer, not by direct "
+            "callers. Echoes which preset/locale/version produced this "
+            "request so the worker can surface it on the response meta."
+        ),
+    )
+    parser_plan: ParserPlan | None = Field(
+        default=None,
+        description=(
+            "Internal — populated by the preset materializer. Carries the "
+            "self-heal / AI-extraction config the worker runs after render."
+        ),
+    )
 
 
 class ScrapeMeta(BaseModel):
@@ -172,6 +157,7 @@ class ScrapeMeta(BaseModel):
     applied_locale: str | None = None
     applied_timezone: str | None = None
     applied_accept_language: str | None = None
+    applied_preset: PresetMeta | None = None
 
 
 class ScrapeResponse(BaseModel):
@@ -186,6 +172,13 @@ class ScrapeResponse(BaseModel):
 
 class BatchScrapeRequest(BaseModel):
     pages: list[ScrapeRequest]
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Apply this session_id to every page in `pages`. Rejected (422) if "
+            "any page already has a different session_id."
+        ),
+    )
 
 
 class JobCreateResponse(BaseModel):

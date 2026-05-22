@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
-from src.proxy.resolver import proxy_resolver
+from src.proxy.resolver import CyberYozhAPIError, proxy_resolver
 from src.schemas import CountriesResponse, ProxyListResponse, ProxyType
 
 router = APIRouter()
@@ -22,7 +22,10 @@ async def list_available_proxies(proxy_type: ProxyType) -> ProxyListResponse:
     rotating endpoint; passing the id of one via ``proxy_pool_id`` pins the
     scrape to that pool.
     """
-    return await proxy_resolver.list_available_proxies(proxy_type)
+    try:
+        return await proxy_resolver.list_available_proxies(proxy_type)
+    except CyberYozhAPIError as exc:
+        raise HTTPException(status_code=502, detail=exc.detail) from exc
 
 
 @router.get(

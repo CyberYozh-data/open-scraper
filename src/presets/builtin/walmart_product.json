@@ -1,0 +1,61 @@
+{
+  "name": "walmart_product",
+  "source": "walmart",
+  "description": "Walmart US product page. Walmart's markup is React-rendered and rotates class names — selectors target stable data-testid/itemprop hooks, self_heal on for drift.",
+  "kind": "builtin",
+  "url_template": "https://www.walmart.com/ip/{product_id}",
+  "request_defaults": {
+    "device": "desktop",
+    "proxy_type": "res_rotating",
+    "stealth": true,
+    "wait_until": "domcontentloaded",
+    "timeout_ms": 60000,
+    "block_assets": true
+  },
+  "locales": {
+    "us": { "domain": "com", "country": "US" }
+  },
+  "default_locale": "us",
+  "parsing_instructions": {
+    "type": "css",
+    "fields": {
+      "title": {
+        "selector": "h1[itemprop='name'], h1#main-title",
+        "required": true,
+        "post_process": [{ "op": "strip" }]
+      },
+      "price": {
+        "selector": "span[itemprop='price'], [data-testid='price-wrap'] [aria-hidden='true']",
+        "post_process": [{ "op": "parse_price" }]
+      },
+      "rating": {
+        "selector": "[data-testid='reviews-section'] .rating-number, span.rating-number",
+        "post_process": [{ "op": "regex", "args": ["([\\d.]+)"] }, { "op": "parse_float" }]
+      },
+      "availability": {
+        "selector": "[data-testid='fulfillment-add-to-cart'] button, [data-automation-id='atc']",
+        "post_process": [{ "op": "strip" }]
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "title":        { "type": "string" },
+      "price":        { "type": "number" },
+      "rating":       { "type": "number" },
+      "availability": { "type": "string" }
+    },
+    "required": ["title"]
+  },
+  "self_heal": true,
+  "prompt_schema": {
+    "title": "product name",
+    "price": "current price as a number",
+    "rating": "average star rating",
+    "availability": "in-stock / add-to-cart state"
+  },
+  "llm_extract_prompt": null,
+  "version": 1,
+  "updated_at": 1747267200.0
+}

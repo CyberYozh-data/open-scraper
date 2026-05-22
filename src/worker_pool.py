@@ -139,8 +139,7 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
     import traceback
 
     from src.browser.runner import PlaywrightRunner, FetchResult
-    from src.extract.extractor import extract_fields
-    from src.extract.models import ExtractRule
+    from src.presets.worker_parse import apply as apply_parser
     from src.proxy.base import ProxyFailure
     from src.proxy.resolver import proxy_resolver
     from src.settings import settings, setup_logging
@@ -172,7 +171,197 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
             "tls",
             "handshake",
         )
-        return any(x in error for x in needles)
+        return any(needle in error for needle in needles)
+
+    async def _handle_login_job(runner, result_q_ref, job: dict[str, Any]) -> None:
+        """Replay a login script in the worker subprocess.
+
+        Job envelope:
+          type: "login", job_id, session_pin: {device, proxy_type, proxy_pool_id, proxy_geo},
+          script: dict (LoginScript), creds: dict[str,str], storage_state: dict | None
+        """
+        from src.browser.login_runner import LoginRunner
+        from src.sessions.models import LoginScript
+
+        request_id = job["job_id"]
+        session_pin = job["session_pin"]
+        script_dict = job["script"]
+        creds = job["creds"]
+        storage_state = job.get("storage_state")
+
+        page = None
+        context = None
+        bridge_cm = None
+        try:
+            await runner.start()
+            proxy_geo = session_pin.get("proxy_geo") or None
+            session = await proxy_resolver.open_session(
+                proxy_type=session_pin["proxy_type"],
+                proxy_pool_id=session_pin.get("proxy_pool_id"),
+                proxy_geo=proxy_geo,
+            )
+            proxy_cfg = session.current_proxy()
+
+            # Chromium can't speak authenticated SOCKS5 directly; the runner
+            # exposes resolve_proxy() to spawn a local HTTP-to-SOCKS5 bridge
+            # when needed. Re-use the same helper that scrape paths use so
+            # login works for every proxy type a scrape works for.
+            effective_proxy, bridge_cm = await runner.resolve_proxy(proxy_cfg)
+
+            context = await runner._new_context(
+                device=session_pin["device"],
+                proxy=effective_proxy,
+                headers=None,
+                block_assets=False,
+                proxy_geo=proxy_geo,
+                render=True,
+                storage_state=storage_state,
+            )
+            page = await context.new_page()
+            try:
+                from playwright_stealth import Stealth  # type: ignore
+                await Stealth().apply_stealth_async(page)
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+            login_runner = LoginRunner()
+            script = LoginScript.model_validate(script_dict)
+            result, new_state = await login_runner.replay(
+                page=page, context=context, script=script, creds=creds,
+            )
+
+            result_q_ref.put({
+                "job_id": request_id,
+                "ok": True,
+                "login_result": result.model_dump(),
+                "storage_state": new_state,
+            })
+        except Exception as exc:  # pylint: disable=broad-except
+            err_text = str(exc)
+            tb_text = traceback.format_exc(limit=20)
+            # Defensive: redact any credential value from the error surface — Playwright
+            # error messages may echo the substituted field value.
+            for cred_value in creds.values():
+                if cred_value:
+                    err_text = err_text.replace(cred_value, "***")
+                    tb_text = tb_text.replace(cred_value, "***")
+            result_q_ref.put({
+                "job_id": request_id,
+                "ok": False,
+                "error": err_text,
+                "traceback": tb_text,
+            })
+        finally:
+            try:
+                if page is not None:
+                    await page.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+            try:
+                if context is not None:
+                    await context.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+            if bridge_cm is not None:
+                try:
+                    await bridge_cm.__aexit__(None, None, None)
+                except Exception:  # pylint: disable=broad-except
+                    pass
+
+    async def _handle_login_job(runner, result_q_ref, job: dict[str, Any]) -> None:
+        """Replay a login script in the worker subprocess.
+
+        Job envelope:
+          type: "login", job_id, session_pin: {device, proxy_type, proxy_pool_id, proxy_geo},
+          script: dict (LoginScript), creds: dict[str,str], storage_state: dict | None
+        """
+        from src.browser.login_runner import LoginRunner
+        from src.sessions.models import LoginScript
+
+        request_id = job["job_id"]
+        session_pin = job["session_pin"]
+        script_dict = job["script"]
+        creds = job["creds"]
+        storage_state = job.get("storage_state")
+
+        page = None
+        context = None
+        bridge_cm = None
+        try:
+            await runner.start()
+            proxy_geo = session_pin.get("proxy_geo") or None
+            session = await proxy_resolver.open_session(
+                proxy_type=session_pin["proxy_type"],
+                proxy_pool_id=session_pin.get("proxy_pool_id"),
+                proxy_geo=proxy_geo,
+            )
+            proxy_cfg = session.current_proxy()
+
+            # Chromium can't speak authenticated SOCKS5 directly; the runner
+            # exposes resolve_proxy() to spawn a local HTTP-to-SOCKS5 bridge
+            # when needed. Re-use the same helper that scrape paths use so
+            # login works for every proxy type a scrape works for.
+            effective_proxy, bridge_cm = await runner.resolve_proxy(proxy_cfg)
+
+            context = await runner._new_context(
+                device=session_pin["device"],
+                proxy=effective_proxy,
+                headers=None,
+                block_assets=False,
+                proxy_geo=proxy_geo,
+                render=True,
+                storage_state=storage_state,
+            )
+            page = await context.new_page()
+            try:
+                from playwright_stealth import Stealth  # type: ignore
+                await Stealth().apply_stealth_async(page)
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+            login_runner = LoginRunner()
+            script = LoginScript.model_validate(script_dict)
+            result, new_state = await login_runner.replay(
+                page=page, context=context, script=script, creds=creds,
+            )
+
+            result_q_ref.put({
+                "job_id": request_id,
+                "ok": True,
+                "login_result": result.model_dump(),
+                "storage_state": new_state,
+            })
+        except Exception as exc:  # pylint: disable=broad-except
+            err_text = str(exc)
+            tb_text = traceback.format_exc(limit=20)
+            # Defensive: redact any credential value from the error surface — Playwright
+            # error messages may echo the substituted field value.
+            for cred_value in creds.values():
+                if cred_value:
+                    err_text = err_text.replace(cred_value, "***")
+                    tb_text = tb_text.replace(cred_value, "***")
+            result_q_ref.put({
+                "job_id": request_id,
+                "ok": False,
+                "error": err_text,
+                "traceback": tb_text,
+            })
+        finally:
+            try:
+                if page is not None:
+                    await page.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+            try:
+                if context is not None:
+                    await context.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+            if bridge_cm is not None:
+                try:
+                    await bridge_cm.__aexit__(None, None, None)
+                except Exception:  # pylint: disable=broad-except
+                    pass
 
     async def run() -> None:
         runner = PlaywrightRunner(
@@ -186,6 +375,10 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
                 job = task_q.get()
                 if isinstance(job, dict) and job.get("type") == "STOP":
                     break
+
+                if isinstance(job, dict) and job.get("type") == "login":
+                    await _handle_login_job(runner, result_q, job)
+                    continue
 
                 request_id = job["job_id"]
                 request: dict[str, Any] = job["request"]
@@ -257,6 +450,7 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
                             proxy_geo=proxy_geo,
                             render=request.get("render", True),
                             cookies=request.get("cookies"),
+                            storage_state=job.get("storage_state"),
                         )
 
                         # If it is success - exit from cycle
@@ -330,12 +524,17 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
                         if fetch_result.status_code:
                             warnings.append(f"status_code={fetch_result.status_code}")
 
-                    # Extract data if need
-                    if request.get("extract") and fetch_result.html:
-                        rule = ExtractRule.model_validate(request["extract"])
-                        extracted, extraction_warnings = extract_fields(fetch_result.html, rule)
-                        data = extracted
-                        warnings.extend([str(w) for w in extraction_warnings])
+                    # Parse data: preset pipeline (self-heal / AI) when a
+                    # parser_plan is present, else the plain deterministic
+                    # extract for raw /scrape callers.
+                    if (request.get("extract") or request.get("parser_plan")) and fetch_result.html:
+                        parsed_data, parse_warnings = await apply_parser(
+                            fetch_result.html,
+                            request.get("extract"),
+                            request.get("parser_plan"),
+                        )
+                        data = parsed_data
+                        warnings.extend(parse_warnings)
 
                     raw_html = fetch_result.html if request.get("raw_html", False) else None
                     screenshot_b64 = fetch_result.screenshot_b64 if request.get("screenshot") else None
@@ -362,12 +561,14 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
                                     "applied_locale": fetch_result.applied_locale,
                                     "applied_timezone": fetch_result.applied_timezone,
                                     "applied_accept_language": fetch_result.applied_accept_language,
+                                    "applied_preset": request.get("preset_meta"),
                                 },
                                 "data": data,
                                 "raw_html": raw_html,
                                 "screenshot_base64": screenshot_b64,
                                 "warnings": warnings,
                             },
+                            "storage_state": fetch_result.storage_state,
                         }
                     )
 

@@ -209,9 +209,12 @@ network mocks in the test suite.
 - **No persistence** — jobs live in memory, reset on container restart
   (symmetric with the scraper). `JobStore` accumulates all finished jobs too;
   a long-lived process should be restarted periodically.
-- **Stateless cookies** — an initial cookie jar from `scrape_options.cookies`
-  is sent with every request; cookies set by the server during the crawl are
-  not round-tripped. Sites requiring login / CSRF flows aren't supported yet.
+- **Authenticated crawls.** Pass `scrape_options.session_id` referencing a
+  session created via the scraper's `POST /sessions` +
+  `POST /sessions/{id}/login`. The scraper round-trips cookies + localStorage
+  per request, so every page in the crawl sees the authenticated state. See
+  [`../src/README.md`](../src/README.md#sessions) for the session lifecycle
+  and DSL.
 - **Naive `subdomains` scope** — uses "last two labels" as the registrable
   domain. Over-matches on Public Suffix List hosts like `github.io` / `co.uk`.
   Use `same-domain` or `regex` for those.

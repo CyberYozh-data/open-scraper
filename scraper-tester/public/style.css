@@ -409,6 +409,20 @@ select option {
 .custom-select-dropdown::-webkit-scrollbar { width: 8px; }
 .custom-select-dropdown::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.25); border-radius: 999px; }
 
+.custom-select-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  list-style: none;
+  padding: 8px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+}
+.custom-select-search input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
 .custom-select-option {
   display: flex;
   align-items: center;
@@ -789,3 +803,121 @@ details[open] > .details-summary .details-chevron { transform: rotate(90deg); }
 .json-num    { color: #7a271a; }
 .json-bool   { color: #7e3af2; }
 .json-null   { color: var(--text-tertiary); }
+
+/* ── Preset library: search, pagination, favicons ───────────────────── */
+.p-search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 200px;
+}
+.p-search-ico {
+  position: absolute;
+  left: 10px;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+#p-search {
+  width: 100%;
+  padding-left: 32px;
+}
+#presets-list .recent-job {
+  padding: 0.6rem 0.35rem;
+  border-bottom: 1px solid var(--border);
+}
+#presets-list .recent-job:last-child {
+  border-bottom: none;
+}
+
+#p-pager {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-top: 0.25rem;
+}
+
+#p-pageinfo {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  min-width: 80px;
+  text-align: center;
+}
+
+.p-favicon {
+  vertical-align: middle;
+  margin-right: 6px;
+  border-radius: 3px;
+}
+
+.cs-favicon {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  object-fit: contain;
+  vertical-align: middle;
+}
+.custom-select-label .cs-favicon { margin-right: 6px; }
+
+/* Presets tab: the left column holds the library AND the full 4-step
+   wizard, which exceeds the global `.two-col > *` height cap and inner-
+   scrolls (cramped). Let this tab flow with the page instead, and keep
+   the Result panel in view while the long left column scrolls. */
+#tab-presets .two-col > * {
+  max-height: none;
+  overflow: visible;
+}
+#tab-presets .two-col > .panel:last-child {
+  position: sticky;
+  top: 1rem;
+  align-self: start;
+}
+
+.p-favicon-spacer {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+/* ── Preset Builder wizard ───────────────────────────────────────────── */
+.wizard-steps {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.75rem 0 1rem;
+  flex-wrap: wrap;
+}
+.wizard-step {
+  font-size: 12px;
+  padding: 0.3rem 0.6rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-tertiary);
+  border: 1px solid var(--border);
+}
+.wizard-step.active {
+  background: var(--color-blue, #2563eb);
+  color: #fff;
+  border-color: transparent;
+}
+.wizard-step.done { color: var(--text-secondary); }
+.wizard-pane { display: none; }
+/* Match the .panel column rhythm (gap: 0.8rem) so wizard step fields have
+   the same vertical spacing as the Scrape Page form (whose .field children
+   are direct children of .panel). Without this the pane is display:block
+   with no gap and the fields look squished. */
+.wizard-pane.active {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+.wizard-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}

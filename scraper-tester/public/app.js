@@ -30,7 +30,7 @@ async function loadServerConfig() {
 }
 
 async function loadCountries() {
-  const selects = ['s-geo-country', 'b-geo-country', 'c-geo-country', 'cp-geo-country']
+  const selects = ['s-geo-country', 'b-geo-country', 'c-geo-country', 'cp-geo-country', 'pw-geo-country', 'sess-geo-country']
     .map(id => document.getElementById(id)).filter(Boolean);
   if (!selects.length) return;
 
@@ -48,6 +48,101 @@ async function loadCountries() {
   });
 }
 loadCountries();
+
+// Populate the Scrape Page "Preset" dropdown (loads a preset's CSS/XPath
+// fields into the Extraction form — selectors only; URL/proxy stay the
+// user's). Refreshed after create/delete so new presets appear.
+async function populateScrapePresetSelect() {
+  const sel = document.getElementById('s-extract-preset');
+  if (!sel) return;
+  const { ok, data } = await apiCall('/api/v1/presets');
+  if (!ok || !data?.items) return;
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— none —</option>' +
+    data.items.map(p => {
+      const d = presetFaviconDomain(p);
+      const fav = d
+        ? ` data-favicon="${escapeHtml('https://www.google.com/s2/favicons?domain=' + encodeURIComponent(d) + '&sz=32')}"`
+        : '';
+      return `<option value="${escapeHtml(p.name)}"${fav}>${escapeHtml(p.name)} (${escapeHtml(p.kind)})</option>`;
+    }).join('');
+  if (prev) sel.value = prev;
+}
+
+let _restoringState = false;
+
+const _sExtractPreset = document.getElementById('s-extract-preset');
+if (_sExtractPreset) _sExtractPreset.addEventListener('change', async (e) => {
+  // restoreState() re-dispatches a synthetic `change` on every select[id] to
+  // replay saved UI state. Ignore ONLY that replay (it would refetch, clobber
+  // the rows restoreState just restored, and pop a spurious alert on load).
+  // Keyed on the restore flag, not e.isTrusted, so genuine programmatic
+  // selection (tests, automation) still works like a real click.
+  if (_restoringState) return;
+  const name = e.target.value;
+  if (!name) return;
+  const { ok, data } = await apiCall(`/api/v1/presets/${encodeURIComponent(name)}`);
+  if (!ok || !data) { alert('Failed to load preset'); e.target.value = ''; return; }
+  const pi = data.parsing_instructions;
+  if (!pi || !pi.fields || !Object.keys(pi.fields).length) {
+    alert(`Preset "${name}" has no deterministic selectors (AI-only) — ` +
+          `it can't be loaded into the Scrape Page form. Run it via the ` +
+          `preset API (POST /api/v1/scrape/preset/page).`);
+    e.target.value = '';
+    return;
+  }
+  document.getElementById('s-extract-type').value = pi.type || 'css';
+  const container = document.getElementById('extract-fields');
+  container.innerHTML = '';
+  let lossy = false;  // post_process or per-field type can't ride the raw row UI
+  for (const [fname, fr] of Object.entries(pi.fields)) {
+    addExtractField('extract-fields');
+    const row = container.lastElementChild;
+    const inputs = row.querySelectorAll('input[type="text"]');
+    inputs[0].value = fname;
+    inputs[1].value = fr.selector || '';
+    const attrSel = row.querySelector('select');
+    const attr = fr.attr || 'text';
+    if (![...attrSel.options].some(o => o.value === attr)) {
+      attrSel.add(new Option(attr, attr));  // e.g. value / content
+    }
+    attrSel.value = attr;
+    row.querySelector('input[type="checkbox"]').checked = !!fr.all;
+    if ((fr.post_process && fr.post_process.length) || fr.type) lossy = true;
+  }
+  if (lossy) {
+    alert(`Loaded ${Object.keys(pi.fields).length} selectors from "${name}". ` +
+          `This preset also uses post_process and/or per-field selector types ` +
+          `which the raw Scrape Page does not apply — use Presets → Preset ` +
+          `Builder → Verify to preview full-fidelity extraction.`);
+  }
+
+  // Apply the preset's request profile too (device / wait / render / proxy
+  // / geo). The URL stays the user's; proxy_pool_id is per-account so it is
+  // intentionally not set (changing proxy_type reloads the pool dropdown).
+  const rd = data.request_defaults || {};
+  const setVal = (id, v) => {
+    if (v === undefined || v === null) return;
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (el.type === 'checkbox') el.checked = !!v;
+    else el.value = v;
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  setVal('s-device', rd.device);
+  setVal('s-wait-until', rd.wait_until);
+  setVal('s-timeout', rd.timeout_ms);
+  setVal('s-wait-selector', rd.wait_for_selector);
+  setVal('s-render', rd.render);
+  setVal('s-stealth', rd.stealth);
+  setVal('s-block-assets', rd.block_assets);
+  setVal('s-proxy-type', rd.proxy_type);
+  if (rd.proxy_geo) {
+    setVal('s-geo-country', rd.proxy_geo.country_code);
+    setVal('s-geo-region', rd.proxy_geo.region);
+    setVal('s-geo-city', rd.proxy_geo.city);
+  }
+});
 
 let mcpSessionId = null;
 
@@ -72,7 +167,12 @@ async function apiCall(path, options = {}) {
 }
 
 function syntaxHighlight(obj) {
-  const json = JSON.stringify(obj, null, 2);
+  // Escape &<> BEFORE tokenizing: this string is assigned via innerHTML and
+  // now renders attacker-influenced content (LLM output + data extracted
+  // from an arbitrary sample page via /presets/test and /presets/generate).
+  // Quotes are intentionally left intact so the JSON tokenizer regex below
+  // still matches "..." string bodies.
+  const json = escapeHtml(JSON.stringify(obj, null, 2));
   return json.replace(
     /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
     (match) => {
@@ -647,6 +747,11 @@ function buildScrapePayload() {
     }
   }
 
+  // Session — server-side session id (created on Sessions tab). Overrides
+  // device + proxy on the server when present.
+  const sessionId = document.getElementById('s-session-id')?.value.trim();
+  if (sessionId) payload.session_id = sessionId;
+
   // Headers
   const headerRows = getRowValues('headers-list');
   if (headerRows.length) {
@@ -753,6 +858,10 @@ function buildBatchSharedPayload() {
     }
   }
 
+  // Session — applied to every URL in the batch.
+  const sessionId = document.getElementById('b-session-id')?.value.trim();
+  if (sessionId) payload.session_id = sessionId;
+
   // Shared extract
   const bExtractType = document.getElementById('b-extract-type').value;
   if (bExtractType) {
@@ -799,56 +908,7 @@ function buildBatchSharedPayload() {
   return payload;
 }
 
-async function refreshBatchProxyPool() {
-  const type = document.getElementById('b-proxy-type').value;
-  const geoFields = document.getElementById('b-geo-fields');
-  const poolField = document.getElementById('b-pool-id-field');
-  const poolSelect = document.getElementById('b-proxy-pool-select');
-  const poolInput = document.getElementById('b-proxy-pool');
-  const hint = document.getElementById('b-pool-id-hint');
-  const buyEl = ensureBuyButtonEl(poolField, 'b-buy-proxy');
-
-  if (type === 'none') {
-    geoFields.style.display = 'none';
-    poolField.style.display = 'none';
-    buyEl.innerHTML = '';
-    return;
-  }
-  poolField.style.display = '';
-  geoFields.style.display = type === 'res_rotating' ? '' : 'none';
-
-  hint.textContent = 'loading...';
-  poolSelect.style.display = 'none';
-  poolInput.style.display = '';
-  poolSelect.innerHTML = '';
-  buyEl.innerHTML = '';
-
-  const { ok, data } = await apiCall(`/api/v1/proxies/available?proxy_type=${encodeURIComponent(type)}`);
-  if (!ok || !data) { hint.textContent = '(failed to load)'; return; }
-  if (!data.configured) { hint.textContent = '(CyberYozh API key not set)'; return; }
-  if (!data.items?.length) {
-    hint.textContent = `(no purchased ${type.replace(/_/g, ' ')} proxies)`;
-    poolSelect.style.display = 'none';
-    poolInput.style.display = 'none';
-    buyEl.innerHTML = renderBuyButton(type);
-    return;
-  }
-
-  hint.textContent = `(${data.items.length} available)`;
-  poolSelect.innerHTML = '<option value="">— select one —</option>' +
-    data.items.map(p =>
-      `<option value="${escapeHtml(p.id)}">${escapeHtml(p.id)} — ${escapeHtml(p.url || '(no url)')} ${p.expired ? '[expired]' : ''}</option>`
-    ).join('');
-  poolSelect.style.display = '';
-  poolInput.style.display = 'none';
-  poolInput.value = '';
-}
-
-document.getElementById('b-proxy-type').addEventListener('change', refreshBatchProxyPool);
-document.getElementById('b-proxy-pool-select').addEventListener('change', () => {
-  document.getElementById('b-proxy-pool').value = document.getElementById('b-proxy-pool-select').value;
-});
-refreshBatchProxyPool();
+initProxyPool('b');
 
 document.getElementById('btnCopyFromSingle').addEventListener('click', () => {
   const pairs = [
@@ -892,7 +952,7 @@ document.getElementById('btnCopyFromSingle').addEventListener('click', () => {
       srcRow.querySelector('input[type="checkbox"]').checked;
   });
 
-  refreshBatchProxyPool();
+  wireProxyPool('b');
 });
 
 document.getElementById('btnBatch').addEventListener('click', async () => {
@@ -1034,14 +1094,23 @@ function ensureBuyButtonEl(fieldEl, id) {
   return el;
 }
 
-async function refreshProxyPool() {
-  const type = document.getElementById('s-proxy-type').value;
-  const geoFields = document.getElementById('geo-fields');
-  const poolField = document.getElementById('pool-id-field');
-  const poolSelect = document.getElementById('s-proxy-pool-select');
-  const poolInput = document.getElementById('s-proxy-pool');
-  const hint = document.getElementById('pool-id-hint');
-  const buyEl = ensureBuyButtonEl(poolField, 's-buy-proxy');
+// One implementation for every proxy block. `prefix` is the element-id
+// prefix: s (Scrape), b (Batch), c (Crawler scrape), cp (Crawl proxy),
+// pw (Preset Builder wizard). Replaces four copy-pasted refresh functions.
+async function wireProxyPool(prefix) {
+  const $ = (suffix) => document.getElementById(`${prefix}-${suffix}`);
+  const typeSel = $('proxy-type');
+  if (!typeSel) return;            // tab not present in DOM
+  const type = typeSel.value;
+  const geoFields = $('geo-fields');
+  const poolField = $('pool-id-field');
+  const poolSelect = $('proxy-pool-select');
+  const poolInput = $('proxy-pool');
+  const hint = $('pool-id-hint');
+  // All five sub-elements must exist for this prefix; bail if a block is
+  // only partially in the DOM (e.g. a future block wired incrementally).
+  if (!geoFields || !poolField || !poolSelect || !poolInput || !hint) return;
+  const buyEl = ensureBuyButtonEl(poolField, `${prefix}-buy-proxy`);
 
   if (type === 'none') {
     geoFields.style.display = 'none';
@@ -1058,11 +1127,10 @@ async function refreshProxyPool() {
   poolSelect.innerHTML = '';
   buyEl.innerHTML = '';
 
-  const { ok, data } = await apiCall(`/api/v1/proxies/available?proxy_type=${encodeURIComponent(type)}`);
-  if (!ok || !data) {
-    hint.textContent = '(failed to load)';
-    return;
-  }
+  const { ok, data } = await apiCall(
+    `/api/v1/proxies/available?proxy_type=${encodeURIComponent(type)}`
+  );
+  if (!ok || !data) { hint.textContent = '(failed to load)'; return; }
   if (!data.configured) {
     hint.textContent = '(CyberYozh API key not set — manual entry only)';
     return;
@@ -1085,12 +1153,26 @@ async function refreshProxyPool() {
   poolInput.value = '';
 }
 
-document.getElementById('s-proxy-type').addEventListener('change', refreshProxyPool);
-// Keep input and select in sync
-document.getElementById('s-proxy-pool-select').addEventListener('change', () => {
-  document.getElementById('s-proxy-pool').value = document.getElementById('s-proxy-pool-select').value;
-});
-refreshProxyPool();
+// Attach the standard listeners (type change + select↔input sync + initial
+// load) for a proxy block. Returns nothing; safe to call once per prefix.
+function initProxyPool(prefix, { onChange } = {}) {
+  const typeSel = document.getElementById(`${prefix}-proxy-type`);
+  const sel = document.getElementById(`${prefix}-proxy-pool-select`);
+  if (!typeSel || !sel) return;
+  typeSel.addEventListener('change', () => {
+    wireProxyPool(prefix);
+    if (onChange) onChange();
+  });
+  sel.addEventListener('change', () => {
+    document.getElementById(`${prefix}-proxy-pool`).value = sel.value;
+  });
+  // Initial load. wireProxyPool is async and intentionally not awaited;
+  // onChange runs synchronously (current callbacks only read .value).
+  wireProxyPool(prefix);
+  if (onChange) onChange();
+}
+
+initProxyPool('s');
 
 // ─── MCP helpers ─────────────────────────────────────────────────────────────
 function mcpTarget() {
@@ -1402,123 +1484,21 @@ document.getElementById('btnClearHeadersCrawler').addEventListener('click', () =
   document.getElementById('c-header-preset').value = '';
 });
 
-// ─── Crawler proxy pool (copy of refreshBatchProxyPool with c-* prefix) ──────
-async function refreshCrawlerProxyPool() {
-  const type = document.getElementById('c-proxy-type').value;
-  const geoFields = document.getElementById('c-geo-fields');
-  const poolField = document.getElementById('c-pool-id-field');
-  const poolSelect = document.getElementById('c-proxy-pool-select');
-  const poolInput = document.getElementById('c-proxy-pool');
-  const hint = document.getElementById('c-pool-id-hint');
-  const buyEl = ensureBuyButtonEl(poolField, 'c-buy-proxy');
-
-  if (type === 'none') {
-    geoFields.style.display = 'none';
-    poolField.style.display = 'none';
-    buyEl.innerHTML = '';
-    return;
-  }
-  poolField.style.display = '';
-  geoFields.style.display = type === 'res_rotating' ? '' : 'none';
-
-  hint.textContent = 'loading...';
-  poolSelect.style.display = 'none';
-  poolInput.style.display = '';
-  poolSelect.innerHTML = '';
-  buyEl.innerHTML = '';
-
-  const { ok, data } = await apiCall(`/api/v1/proxies/available?proxy_type=${encodeURIComponent(type)}`);
-  if (!ok || !data) { hint.textContent = '(failed to load)'; return; }
-  if (!data.configured) { hint.textContent = '(CyberYozh API key not set)'; return; }
-  if (!data.items?.length) {
-    hint.textContent = `(no purchased ${type.replace(/_/g, ' ')} proxies)`;
-    poolSelect.style.display = 'none';
-    poolInput.style.display = 'none';
-    buyEl.innerHTML = renderBuyButton(type);
-    return;
-  }
-  hint.textContent = `(${data.items.length} available)`;
-  poolSelect.innerHTML = '<option value="">— select one —</option>' +
-    data.items.map(p =>
-      `<option value="${escapeHtml(p.id)}">${escapeHtml(p.id)} — ${escapeHtml(p.url || '(no url)')} ${p.expired ? '[expired]' : ''}</option>`
-    ).join('');
-  poolSelect.style.display = '';
-  poolInput.style.display = 'none';
-  poolInput.value = '';
-}
+// ─── Crawler proxy pool ───────────────────────────────────────────────────────
 function updateCrawlerProxyWarning() {
   const warn = document.getElementById('c-proxy-warning');
   if (!warn) return;
   warn.style.display = document.getElementById('c-proxy-type').value === 'none' ? '' : 'none';
 }
-document.getElementById('c-proxy-type').addEventListener('change', () => {
-  refreshCrawlerProxyPool();
-  updateCrawlerProxyWarning();
-});
-document.getElementById('c-proxy-pool-select').addEventListener('change', () => {
-  document.getElementById('c-proxy-pool').value = document.getElementById('c-proxy-pool-select').value;
-});
-refreshCrawlerProxyPool();
-updateCrawlerProxyWarning();
+initProxyPool('c', { onChange: updateCrawlerProxyWarning });
 
 // ─── Crawl Proxy pool (independent block, cp-* prefix) ───────────────────────
-async function refreshCrawlProxyPool() {
-  const type = document.getElementById('cp-proxy-type').value;
-  const geoFields = document.getElementById('cp-geo-fields');
-  const poolField = document.getElementById('cp-pool-id-field');
-  const poolSelect = document.getElementById('cp-proxy-pool-select');
-  const poolInput = document.getElementById('cp-proxy-pool');
-  const hint = document.getElementById('cp-pool-id-hint');
-  const buyEl = ensureBuyButtonEl(poolField, 'cp-buy-proxy');
-
-  if (type === 'none') {
-    geoFields.style.display = 'none';
-    poolField.style.display = 'none';
-    buyEl.innerHTML = '';
-    return;
-  }
-  poolField.style.display = '';
-  geoFields.style.display = type === 'res_rotating' ? '' : 'none';
-
-  hint.textContent = 'loading...';
-  poolSelect.style.display = 'none';
-  poolInput.style.display = '';
-  poolSelect.innerHTML = '';
-  buyEl.innerHTML = '';
-
-  const { ok, data } = await apiCall(`/api/v1/proxies/available?proxy_type=${encodeURIComponent(type)}`);
-  if (!ok || !data) { hint.textContent = '(failed to load)'; return; }
-  if (!data.configured) { hint.textContent = '(CyberYozh API key not set)'; return; }
-  if (!data.items?.length) {
-    hint.textContent = `(no purchased ${type.replace(/_/g, ' ')} proxies)`;
-    poolSelect.style.display = 'none';
-    poolInput.style.display = 'none';
-    buyEl.innerHTML = renderBuyButton(type);
-    return;
-  }
-  hint.textContent = `(${data.items.length} available)`;
-  poolSelect.innerHTML = '<option value="">— select one —</option>' +
-    data.items.map(p =>
-      `<option value="${escapeHtml(p.id)}">${escapeHtml(p.id)} — ${escapeHtml(p.url || '(no url)')} ${p.expired ? '[expired]' : ''}</option>`
-    ).join('');
-  poolSelect.style.display = '';
-  poolInput.style.display = 'none';
-  poolInput.value = '';
-}
 function updateCrawlProxyWarning() {
   const warn = document.getElementById('cp-proxy-warning');
   if (!warn) return;
   warn.style.display = document.getElementById('cp-proxy-type').value === 'none' ? '' : 'none';
 }
-document.getElementById('cp-proxy-type').addEventListener('change', () => {
-  refreshCrawlProxyPool();
-  updateCrawlProxyWarning();
-});
-document.getElementById('cp-proxy-pool-select').addEventListener('change', () => {
-  document.getElementById('cp-proxy-pool').value = document.getElementById('cp-proxy-pool-select').value;
-});
-refreshCrawlProxyPool();
-updateCrawlProxyWarning();
+initProxyPool('cp', { onChange: updateCrawlProxyWarning });
 
 // ─── Enable-scraping toggle: show/hide the scraping section ─────────────────
 function applyCrawlerScrapingVisibility() {
@@ -1576,6 +1556,10 @@ function buildCrawlPayload() {
       if (city) scrape.proxy_geo.city = city;
     }
   }
+
+  // Session — attaches the crawler's per-page scrape to a server-side session.
+  const sessionId = document.getElementById('c-session-id')?.value.trim();
+  if (sessionId) scrape.session_id = sessionId;
 
   const extractType = document.getElementById('c-extract-type').value;
   if (extractType) {
@@ -2059,13 +2043,52 @@ function enhanceSelect(select) {
     const opt = select.options[select.selectedIndex];
     const text = opt ? opt.textContent : '';
     const empty = !opt || opt.value === '' || text.startsWith('—');
-    labelEl.textContent = text || '—';
+    labelEl.textContent = '';
+    if (opt && opt.dataset && opt.dataset.favicon) {
+      const ic = document.createElement('img');
+      ic.className = 'cs-favicon';
+      ic.src = opt.dataset.favicon;
+      ic.width = 16;
+      ic.height = 16;
+      ic.alt = '';
+      ic.onerror = function () { this.style.display = 'none'; };
+      labelEl.appendChild(ic);
+    }
+    labelEl.appendChild(document.createTextNode(text || '—'));
     labelEl.classList.toggle('placeholder', empty);
+  }
+
+  // Long lists (e.g. the ~250-country geo select) get an in-dropdown
+  // filter. Short selects (device, wait, proxy type…) are left untouched.
+  const CS_SEARCH_MIN = 12;
+
+  function applyFilter(q) {
+    const needle = q.trim().toLowerCase();
+    dropdown.querySelectorAll('.custom-select-option').forEach(li => {
+      li.style.display = (!needle || li.textContent.toLowerCase().includes(needle))
+        ? '' : 'none';
+    });
   }
 
   function rebuildOptions() {
     dropdown.innerHTML = '';
     const groupName = 'cs-' + (select.id || select.name || Math.random().toString(36).slice(2, 8));
+    if (select.options.length >= CS_SEARCH_MIN) {
+      const sli = document.createElement('li');
+      sli.className = 'custom-select-search';
+      const si = document.createElement('input');
+      si.type = 'text';
+      si.placeholder = 'search…';
+      si.autocomplete = 'off';
+      si.addEventListener('click', (e) => e.stopPropagation());
+      si.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') { closeDropdown(); trigger.focus(); return; }
+        e.stopPropagation();
+      });
+      si.addEventListener('input', () => applyFilter(si.value));
+      sli.appendChild(si);
+      dropdown.appendChild(sli);
+    }
     Array.from(select.options).forEach((opt, i) => {
       const li = document.createElement('li');
       li.className = 'custom-select-option';
@@ -2084,6 +2107,17 @@ function enhanceSelect(select) {
       label.setAttribute('for', optId);
       label.textContent = opt.textContent;
       li.appendChild(input);
+      if (opt.dataset.favicon) {
+        const ic = document.createElement('img');
+        ic.className = 'cs-favicon';
+        ic.src = opt.dataset.favicon;
+        ic.width = 16;
+        ic.height = 16;
+        ic.loading = 'lazy';
+        ic.alt = '';
+        ic.onerror = function () { this.style.display = 'none'; };
+        li.appendChild(ic);
+      }
       li.appendChild(label);
       li.addEventListener('click', (e) => {
         e.preventDefault();
@@ -2104,6 +2138,9 @@ function enhanceSelect(select) {
     if (!dropdown.children.length) return;
     wrap.classList.add('open');
     dropdown.style.display = '';
+    // Focus the in-dropdown filter (long lists) so the user can type at once.
+    const si = dropdown.querySelector('.custom-select-search input');
+    if (si) requestAnimationFrame(() => si.focus());
     // Close other open custom selects
     document.querySelectorAll('.custom-select.open').forEach(el => {
       if (el !== wrap) el.dispatchEvent(new CustomEvent('cs:close'));
@@ -2206,6 +2243,12 @@ function captureState() {
     // Skip selects populated dynamically from APIs — restoring stale values
     // would conflict with the refresh fetches on page load.
     if (el.id.endsWith('-proxy-pool-select') || el.id.endsWith('-geo-country')) return;
+    // Session pickers are repopulated from /api/v1/sessions on load; preserving
+    // their value via restoreState would point at sessions that no longer exist.
+    if (el.id === 's-session-id' || el.id === 'b-session-id' ||
+        el.id === 'c-session-id' || el.id === 'sess-login-session-id') return;
+    // Skip credential inputs — never persist passwords / TOTP secrets to localStorage.
+    if (el.id.startsWith('sess-creds-')) return;
     // Skip ephemeral inputs
     if (el.id === 'mcp-tool-schema' || el.id === 'mcp-tool-name' || el.id === 'mcp-tool-args') return;
     if (el.id === 'j-job-id') return;
@@ -2250,6 +2293,7 @@ function restoreState() {
   let state;
   try { state = JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); } catch { return; }
   if (!state) return;
+  _restoringState = true;
 
   Object.entries(state.inputs || {}).forEach(([id, value]) => {
     const el = document.getElementById(id);
@@ -2293,6 +2337,7 @@ function restoreState() {
   document.querySelectorAll('select[id]').forEach(el => {
     el.dispatchEvent(new Event('change', { bubbles: true }));
   });
+  _restoringState = false;
 
   if (state.activeTab) {
     const btn = document.querySelector(`.tab-btn[data-tab="${state.activeTab}"]`);
@@ -2309,4 +2354,1143 @@ document.addEventListener('click', (e) => {
 }, true);
 window.addEventListener('beforeunload', persistState);
 
+// ─── Presets ─────────────────────────────────────────────────────────────────
+function pShow(data) { showResult('presets-result', data); }
+
+// Module-level state for the presets library
+let _presetsAll = [];   // full fetched list (unfiltered)
+let pPage = 1;          // current 1-based page
+const P_PAGE_SIZE = 10;
+
+// Derive a favicon domain for a preset object.
+// Priority: url_template host → default_locale domain → source heuristic.
+function presetFaviconDomain(p) {
+  // 1. url_template host; only trust it when the host portion has no {placeholder}
+  // (e.g. https://www.amazon.{domain}/... must fall through to source → "amazon.com").
+  if (p.url_template) {
+    try {
+      const m = String(p.url_template).match(/^[a-z]+:\/\/([^/?#]+)/i);
+      const host = m && m[1];
+      if (host && host.includes('.') && !host.includes('{') && !host.includes('}')) {
+        return host;
+      }
+    } catch (_) {}
+  }
+  // 2. default_locale's domain (or first locale); if it's a bare TLD-ish token without a dot, skip
+  const locs = p.locales || {};
+  const loc = locs[p.default_locale] || Object.values(locs)[0];
+  if (loc && loc.domain && String(loc.domain).includes('.')) {
+    try { return new URL(/^https?:/.test(loc.domain) ? loc.domain : 'https://' + loc.domain).hostname; }
+    catch (_) {}
+  }
+  // 3. source heuristic
+  if (p.source) return p.source.includes('.') ? p.source : `${p.source}.com`;
+  return '';
+}
+
+// Render the preset list from _presetsAll applying current search + kind filter + pagination.
+function renderPresetList() {
+  const search = (document.getElementById('p-search')?.value || '').toLowerCase().trim();
+  const kind = document.getElementById('p-filter-kind')?.value || '';
+
+  // Apply filters
+  const filtered = _presetsAll.filter(p => {
+    if (kind && p.kind !== kind) return false;
+    if (search) {
+      const name = String(p.name || '').toLowerCase();
+      const source = String(p.source || '').toLowerCase();
+      if (!name.includes(search) && !source.includes(search)) return false;
+    }
+    return true;
+  });
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / P_PAGE_SIZE));
+  // Clamp page
+  if (pPage > totalPages) pPage = totalPages;
+  if (pPage < 1) pPage = 1;
+
+  const start = (pPage - 1) * P_PAGE_SIZE;
+  const pageItems = filtered.slice(start, start + P_PAGE_SIZE);
+
+  const box = document.getElementById('presets-list');
+  if (!filtered.length) {
+    box.innerHTML = '<span class="placeholder">No presets match.</span>';
+  } else {
+    box.innerHTML = pageItems.map(p => {
+      const isUser = p.kind === 'user';
+      const domain = presetFaviconDomain(p);
+      const faviconHtml = domain
+        ? `<img class="p-favicon" src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=32" width="16" height="16" loading="lazy" alt="" onerror="this.style.display='none'">`
+        : '<span class="p-favicon-spacer"></span>';
+      return `<div class="recent-job" style="display:flex;align-items:center;gap:0.5rem">
+        <div style="flex:1;display:flex;align-items:center;gap:0">
+          ${faviconHtml}<b>${escapeHtml(p.name)}</b>
+          <span class="badge" style="margin-left:0.4rem">${escapeHtml(p.kind)}</span>
+          <span style="color:var(--muted);margin-left:0.4rem">${escapeHtml(p.source)} · v${escapeHtml(String(p.version))}</span>
+        </div>
+        <button class="btn-secondary btn-sm" data-p-view="${escapeHtml(p.name)}">View</button>
+        ${isUser ? `<button class="btn-secondary btn-sm" data-p-del="${escapeHtml(p.name)}">Delete</button>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  // Update pager
+  const pager = document.getElementById('p-pager');
+  const pageInfo = document.getElementById('p-pageinfo');
+  const prevBtn = document.getElementById('p-prev');
+  const nextBtn = document.getElementById('p-next');
+  if (pager && pageInfo && prevBtn && nextBtn) {
+    pageInfo.textContent = `${pPage} / ${totalPages} (${filtered.length})`;
+    prevBtn.disabled = pPage <= 1;
+    nextBtn.disabled = pPage >= totalPages;
+    // Hide/neutralize pager when all items fit on one page
+    pager.style.display = filtered.length <= P_PAGE_SIZE ? 'none' : '';
+  }
+}
+
+// ─── Preset Builder wizard ───────────────────────────────────────────────
+const pwState = {
+  step: 1,
+  sampleHtml: '',
+  sampleUrl: '',
+  scrapeDefaults: {},
+  outputSchema: null,
+};
+
+function pwSetStep(n) {
+  pwState.step = n;
+  document.querySelectorAll('#pw-steps .wizard-step').forEach(s => {
+    const sn = Number(s.dataset.step);
+    s.classList.toggle('active', sn === n);
+    s.classList.toggle('done', sn < n);
+  });
+  document.querySelectorAll('#tab-presets .wizard-pane').forEach(p => {
+    p.classList.toggle('active', Number(p.dataset.pane) === n);
+  });
+  document.getElementById('pw-back').disabled = n === 1;
+  document.getElementById('pw-next').style.display = n === 4 ? 'none' : '';
+}
+
+function pwReadFields() {
+  const rows = document.querySelectorAll('#pw-fields .dynamic-row');
+  const fields = {};
+  rows.forEach(row => {
+    const inputs = row.querySelectorAll('input[type="text"]');
+    const name = inputs[0].value.trim();
+    const selector = inputs[1].value.trim();
+    const attr = row.querySelector('select').value;
+    const all = row.querySelector('input[type="checkbox"]').checked;
+    if (name && selector) fields[name] = { selector, attr, all };
+  });
+  return {
+    type: document.getElementById('pw-extract-type').value,
+    fields,
+  };
+}
+
+function pwFillFields(instructions) {
+  const container = document.getElementById('pw-fields');
+  container.innerHTML = '';
+  if (!instructions || !instructions.fields) return;
+  document.getElementById('pw-extract-type').value = instructions.type || 'css';
+  for (const [fname, fr] of Object.entries(instructions.fields)) {
+    addExtractField('pw-fields');
+    const row = container.lastElementChild;
+    const inputs = row.querySelectorAll('input[type="text"]');
+    inputs[0].value = fname;
+    inputs[1].value = fr.selector || '';
+    const attrSel = row.querySelector('select');
+    const attr = fr.attr || 'text';
+    if (![...attrSel.options].some(o => o.value === attr)) {
+      attrSel.add(new Option(attr, attr));
+    }
+    attrSel.value = attr;
+    row.querySelector('input[type="checkbox"]').checked = !!fr.all;
+  }
+}
+
+// A fresh sample means a new preset: wipe everything downstream of step 1
+// (method, generated fields/schema, name, source) so a prior build's values
+// — restored from the F5-persist state — don't bleed into the new preset.
+function pwResetBuild() {
+  const set = (id, v) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = v;
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  set('pw-name', '');
+  set('pw-source', '');
+  set('pw-desc', '');
+  set('pw-llm-model', '');
+  set('pw-extract-type', 'css');
+  set('pw-method', 'manual');
+  const fields = document.getElementById('pw-fields');
+  if (fields) fields.innerHTML = '';
+  const schemaRows = document.getElementById('pw-schema-rows');
+  if (schemaRows) schemaRows.innerHTML = '';
+  pwState.outputSchema = null;
+  if (typeof pwSyncMethod === 'function') pwSyncMethod();
+  if (typeof schedulePersist === 'function') schedulePersist();
+}
+
+// Step 1: real scrape job → raw_html into pwState.sampleHtml
+document.getElementById('pw-fetch').addEventListener('click', async () => {
+  const pasted = document.getElementById('pw-sample-html').value.trim();
+  const proxyType = document.getElementById('pw-proxy-type').value;
+  // Persist scrape settings for Save (everything except concrete pool_id).
+  pwState.scrapeDefaults = {
+    device: document.getElementById('pw-device').value,
+    render: document.getElementById('pw-render').checked,
+    stealth: document.getElementById('pw-stealth').checked,
+    block_assets: document.getElementById('pw-block-assets').checked,
+    wait_until: document.getElementById('pw-wait-until').value,
+    timeout_ms: Number(document.getElementById('pw-timeout').value) || 30000,
+    proxy_type: proxyType,
+  };
+  const waitSel = document.getElementById('pw-wait-selector').value.trim();
+  if (waitSel) pwState.scrapeDefaults.wait_for_selector = waitSel;
+  if (proxyType === 'res_rotating') {
+    const cc = document.getElementById('pw-geo-country').value.trim();
+    const rg = document.getElementById('pw-geo-region').value.trim();
+    const ct = document.getElementById('pw-geo-city').value.trim();
+    if (cc || rg || ct) {
+      pwState.scrapeDefaults.proxy_geo = {};
+      if (cc) pwState.scrapeDefaults.proxy_geo.country_code = cc.toUpperCase();
+      if (rg) pwState.scrapeDefaults.proxy_geo.region = rg;
+      if (ct) pwState.scrapeDefaults.proxy_geo.city = ct;
+    }
+  }
+
+  if (pasted) {
+    // Reset only once we're committed to a new build — never on a
+    // mis-click that bails at the guards (that would silently destroy
+    // and persist over an in-progress build).
+    pwState.sampleUrl = '';
+    pwResetBuild();
+    pwState.sampleHtml = pasted;
+    setStatus('pw-fetch-status', 'done', `Using pasted HTML (${pasted.length} chars)`);
+    return;
+  }
+  const url = document.getElementById('pw-url').value.trim();
+  if (!url) { alert('Sample URL (or pasted HTML) is required'); return; }
+  // Committed to a new fetch: safe to reset prior build state now.
+  pwState.sampleHtml = '';
+  pwResetBuild();
+  pwState.sampleUrl = url;
+
+  const payload = {
+    url,
+    ...pwState.scrapeDefaults,
+    raw_html: true,
+    screenshot: document.getElementById('pw-screenshot').checked,
+  };
+  const poolId = document.getElementById('pw-proxy-pool').value.trim();
+  if (poolId) payload.proxy_pool_id = poolId;
+  if (proxyType !== 'none' && !poolId) {
+    alert(`Select a Pool ID for proxy type "${proxyType}", or use Buy on CyberYozh.`);
+    return;
+  }
+
+  const fetchBtn = document.getElementById('pw-fetch');
+  fetchBtn.disabled = true;
+  try {
+    setStatus('pw-fetch-status', 'queued', 'Submitting scrape…');
+    const sub = await apiCall('/api/v1/scrape/page', {
+      method: 'POST', body: JSON.stringify(payload),
+    });
+    if (!sub.ok || !sub.data?.job_id) {
+      setStatus('pw-fetch-status', 'failed', 'Failed to submit scrape');
+      pShow(sub.data);
+      return;
+    }
+    const jobId = sub.data.job_id;
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      const { data } = await apiCall(`/api/v1/scrape/${jobId}`);
+      if (!data || data.detail) {
+        setStatus('pw-fetch-status', 'failed', 'Error polling scrape');
+        pShow(data);
+        return;
+      }
+      setStatus('pw-fetch-status', data.status, `Scrape ${data.status}…`);
+      if (data.status === 'done') {
+        const res = await apiCall(`/api/v1/scrape/${jobId}/results`);
+        const html = res.data?.results?.[0]?.raw_html || '';
+        if (!html) {
+          setStatus('pw-fetch-status', 'failed', 'Scrape returned no raw_html');
+          pShow(res.data);
+          return;
+        }
+        pwState.sampleHtml = html;
+        setStatus('pw-fetch-status', 'done', `Fetched sample (${html.length} chars)`);
+        return;
+      }
+      if (data.status === 'failed' || data.status === 'cancelled') {
+        setStatus('pw-fetch-status', 'failed', `Scrape ${data.status}`);
+        pShow(data);
+        return;
+      }
+    }
+    setStatus('pw-fetch-status', 'failed', 'Timed out — check the Jobs tab');
+  } finally {
+    fetchBtn.disabled = false;
+  }
+});
+
+// Step 2: method switch
+function pwSyncMethod() {
+  const m = document.getElementById('pw-method').value;
+  document.getElementById('pw-ai-prompt').style.display = m === 'from_prompt' ? '' : 'none';
+  document.getElementById('pw-ai-schema').style.display = m === 'from_schema' ? '' : 'none';
+  document.getElementById('pw-ai-model-wrap').style.display = m === 'manual' ? 'none' : '';
+}
+document.getElementById('pw-method').addEventListener('change', pwSyncMethod);
+document.getElementById('pw-add-field').addEventListener('click', () =>
+  addExtractField('pw-fields'));
+document.getElementById('pw-add-schema-row').addEventListener('click', () =>
+  pwAddSchemaRow());
+
+function pwAddSchemaRow() {
+  const c = document.getElementById('pw-schema-rows');
+  const row = document.createElement('div');
+  row.className = 'dynamic-row';
+  row.innerHTML = `
+    <input type="text" placeholder="field name" style="flex:0 0 140px" />
+    <select style="flex:0 0 120px">
+      <option value="string">string</option>
+      <option value="number">number</option>
+      <option value="boolean">boolean</option>
+      <option value="array">array</option>
+    </select>
+    <button class="btn-remove" title="Remove row">×</button>`;
+  row.querySelector('.btn-remove').addEventListener('click', () => row.remove());
+  c.appendChild(row);
+}
+
+function pwBuildSchema() {
+  const schema = {};
+  document.querySelectorAll('#pw-schema-rows .dynamic-row').forEach(row => {
+    const name = row.querySelector('input').value.trim();
+    const type = row.querySelector('select').value;
+    if (name) schema[name] = type;
+  });
+  return schema;
+}
+
+document.getElementById('pw-generate').addEventListener('click', async () => {
+  if (!pwState.sampleHtml) { alert('Fetch a sample first (step 1)'); return; }
+  const mode = document.getElementById('pw-method').value;
+  const body = {
+    mode,
+    sample_html: pwState.sampleHtml,
+    llm_model: document.getElementById('pw-llm-model').value || undefined,
+  };
+  if (mode === 'from_prompt') {
+    body.description = document.getElementById('pw-desc').value.trim();
+    if (!body.description) { alert('Describe what to extract'); return; }
+  } else if (mode === 'from_schema') {
+    body.schema = pwBuildSchema();
+    if (!Object.keys(body.schema).length) { alert('Add at least one schema field'); return; }
+  } else {
+    alert('Manual mode: just add fields below'); return;
+  }
+  pShow('Generating with AI…');
+  const r = await apiCall('/api/v1/presets/preview', {
+    method: 'POST', body: JSON.stringify(body),
+  });
+  if (!r.ok) { pShow(r.data); return; }
+  pwState.outputSchema = r.data.output_schema || null;
+  pwFillFields(r.data.parsing_instructions);
+  pShow(r.data);
+});
+
+// Step 3: verify (always re-runs the pipeline with the edited table)
+document.getElementById('pw-verify').addEventListener('click', async () => {
+  if (!pwState.sampleHtml) { alert('Fetch a sample first (step 1)'); return; }
+  const instructions = pwReadFields();
+  if (!Object.keys(instructions.fields).length) {
+    alert('Add at least one field with a name and a selector'); return;
+  }
+  const body = {
+    mode: 'manual',
+    sample_html: pwState.sampleHtml,
+    parsing_instructions: instructions,
+    output_schema: pwState.outputSchema || undefined,
+    self_heal: document.getElementById('pw-self-heal').checked,
+    llm_model: document.getElementById('pw-llm-model').value || undefined,
+  };
+  showResult('pw-verify-result', 'Running…');
+  const r = await apiCall('/api/v1/presets/preview', {
+    method: 'POST', body: JSON.stringify(body),
+  });
+  showResult('pw-verify-result', r.data);
+});
+
+// Step 4: save (deterministic create, no LLM)
+document.getElementById('pw-save').addEventListener('click', async () => {
+  // Backend requires name/source to match ^[a-z][a-z0-9_]*$. Slugify the
+  // user's input (spaces, caps, a pasted URL, punctuation) instead of
+  // POSTing it raw and failing with a cryptic 422.
+  const slugify = (s) => String(s || '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_').replace(/^[^a-z]+/, '').replace(/_+$/g, '');
+  let name = slugify(document.getElementById('pw-name').value);
+  if (!name) { pShow('name is required (letters, digits, underscores)'); return; }
+  if (!name.startsWith('user_')) name = `user_${name}`;
+  const source = slugify(document.getElementById('pw-source').value) || 'custom';
+  const instructions = pwReadFields();
+  const preset = {
+    name,
+    source,
+    kind: 'user',
+    request_defaults: pwState.scrapeDefaults,
+    locales: {},
+    default_locale: 'us',
+    parsing_instructions: instructions,
+    updated_at: Date.now() / 1000,
+  };
+  if (pwState.outputSchema) preset.output_schema = pwState.outputSchema;
+  // Persist the sample URL as the preset's url_template: it records the real
+  // site the preset was built from so the favicon (and server-side preset
+  // scrape) come from the actual URL, not a guess from the `source` tag.
+  if (pwState.sampleUrl) preset.url_template = pwState.sampleUrl;
+  const r = await apiCall('/api/v1/presets', {
+    method: 'POST', body: JSON.stringify(preset),
+  });
+  pShow(r.data);
+  if (r.ok) {
+    loadPresets();
+    populateScrapePresetSelect();
+    pwSetStep(1);
+  }
+});
+
+// Nav
+document.getElementById('pw-back').addEventListener('click', () => {
+  if (pwState.step > 1) pwSetStep(pwState.step - 1);
+});
+document.getElementById('pw-next').addEventListener('click', () => {
+  if (pwState.step === 1 && !pwState.sampleHtml) {
+    alert('Fetch a sample (or paste HTML) before continuing'); return;
+  }
+  if (pwState.step < 4) pwSetStep(pwState.step + 1);
+});
+
+async function loadPresetModels() {
+  const { data } = await apiCall('/api/v1/presets/llm-models');
+  const models = (data && data.available) || [];
+  const def = (data && data.default) || '';
+  const sel = document.getElementById('pw-llm-model');
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— default —</option>' +
+    models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}${m === def ? ' (default)' : ''}</option>`).join('');
+  if (prev) sel.value = prev;
+}
+
+async function loadPresets() {
+  // Fetch all presets from server (no server-side kind filter — client does it)
+  const { data } = await apiCall('/api/v1/presets');
+  _presetsAll = (data && data.items) || [];
+  renderPresetList();
+}
+
+document.getElementById('presets-list').addEventListener('click', async (e) => {
+  const view = e.target.closest('[data-p-view]');
+  const del = e.target.closest('[data-p-del]');
+  if (view) {
+    const { data } = await apiCall(`/api/v1/presets/${encodeURIComponent(view.dataset.pView)}`);
+    pShow(data);
+  } else if (del) {
+    const name = del.dataset.pDel;
+    if (!confirm(`Delete preset ${name}?`)) return;
+    const r = await apiCall(`/api/v1/presets/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    pShow(r.ok ? { deleted: name } : r.data);
+    loadPresets();
+    populateScrapePresetSelect();
+  }
+});
+
+document.getElementById('btnLoadPresets').addEventListener('click', loadPresets);
+document.getElementById('p-filter-kind').addEventListener('change', () => { pPage = 1; renderPresetList(); });
+document.getElementById('p-search').addEventListener('input', () => { pPage = 1; renderPresetList(); });
+document.getElementById('p-prev').addEventListener('click', () => { pPage--; renderPresetList(); });
+document.getElementById('p-next').addEventListener('click', () => { pPage++; renderPresetList(); });
+
+let _presetsLoaded = false;
+document.querySelector('.tab-btn[data-tab="presets"]').addEventListener('click', () => {
+  if (_presetsLoaded) return;
+  _presetsLoaded = true;
+  loadPresets();
+  loadPresetModels();
+  initProxyPool('pw');
+  pwSyncMethod();
+  pwSetStep(1);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Sessions tab — server-side Playwright session create / login script / list.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const LOGIN_OPS = [
+  'goto', 'fill', 'click', 'wait_for_selector', 'wait_for_timeout',
+  'press_key', 'type_text', 'hover',
+];
+
+function escapeAttr(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+function addLoginStep(initial) {
+  const wrap = document.getElementById('sess-login-steps');
+  if (!wrap) return;
+  const step = initial || { op: 'goto' };
+  const row = document.createElement('div');
+  row.className = 'dynamic-row';
+  row.innerHTML = `
+    <select style="flex:0 0 160px">
+      ${LOGIN_OPS.map(o => `<option value="${o}"${o === step.op ? ' selected' : ''}>${o}</option>`).join('')}
+    </select>
+    <input type="text" placeholder="selector" value="${escapeAttr(step.selector)}" />
+    <input type="text" placeholder="value / url" value="${escapeAttr(step.value ?? step.url ?? '')}" />
+    <input type="text" placeholder="key" value="${escapeAttr(step.key)}" style="flex:0 0 90px" />
+    <input type="text" placeholder="ms / timeout_ms" value="${escapeAttr(step.ms ?? step.timeout_ms ?? '')}" style="flex:0 0 130px" />
+    <button class="btn-remove" title="Remove">×</button>`;
+  row.querySelector('.btn-remove').addEventListener('click', () => row.remove());
+  wrap.appendChild(row);
+}
+
+function readLoginSteps() {
+  return Array.from(document.querySelectorAll('#sess-login-steps .dynamic-row')).map(row => {
+    const op = row.querySelector('select').value;
+    const inputs = row.querySelectorAll('input[type="text"]');
+    const selector = inputs[0].value.trim();
+    const value = inputs[1].value.trim();
+    const key = inputs[2].value.trim();
+    const msRaw = inputs[3].value.trim();
+    const step = { op };
+    if (op === 'goto') {
+      if (value) step.url = value;
+    } else if (value !== '') {
+      step.value = value;
+    }
+    if (selector) step.selector = selector;
+    if (key) step.key = key;
+    if (msRaw) {
+      const ms = Number(msRaw);
+      if (Number.isFinite(ms) && ms >= 0) {
+        if (op === 'wait_for_timeout') step.ms = ms;
+        else step.timeout_ms = ms;
+      }
+    }
+    return step;
+  });
+}
+
+function showSessOutput(elId, data) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.style.display = '';
+  // Pull the screenshot (if any) out of the JSON dump and render it as an image
+  // alongside — login failures ship a 50KB+ base64 PNG that is useless inside a
+  // syntax-highlighted blob. The JSON dump keeps a placeholder so the operator
+  // sees the field is set without scrolling through the encoded payload.
+  let imgHtml = '';
+  let dataForJson = data;
+  if (data && typeof data === 'object' && typeof data.screenshot_b64 === 'string' && data.screenshot_b64) {
+    const b64 = data.screenshot_b64;
+    imgHtml = `<div style="margin-bottom:0.5rem">
+      <img src="data:image/png;base64,${b64}" alt="login failure screenshot"
+           style="max-width:100%;border:1px solid var(--border);border-radius:4px" />
+    </div>`;
+    dataForJson = { ...data, screenshot_b64: `<${Math.round(b64.length * 0.75)} bytes — rendered above>` };
+  }
+  el.innerHTML = imgHtml + `<pre>${syntaxHighlight(dataForJson)}</pre>`;
+}
+
+async function refreshSessProxyPool() {
+  const type = document.getElementById('sess-proxy-type').value;
+  const geoFields = document.getElementById('sess-geo-fields');
+  const poolField = document.getElementById('sess-pool-id-field');
+  const poolSelect = document.getElementById('sess-proxy-pool-select');
+  const poolInput = document.getElementById('sess-proxy-pool');
+  const hint = document.getElementById('sess-pool-id-hint');
+  const buyEl = ensureBuyButtonEl(poolField, 'sess-buy-proxy');
+
+  if (type === 'none') {
+    if (geoFields) geoFields.style.display = 'none';
+    if (poolField) poolField.style.display = 'none';
+    buyEl.innerHTML = '';
+    return;
+  }
+  if (poolField) poolField.style.display = '';
+  if (geoFields) geoFields.style.display = type === 'res_rotating' ? '' : 'none';
+
+  hint.textContent = 'loading...';
+  poolSelect.style.display = 'none';
+  poolInput.style.display = '';
+  poolSelect.innerHTML = '';
+  buyEl.innerHTML = '';
+
+  const { ok, data } = await apiCall(`/api/v1/proxies/available?proxy_type=${encodeURIComponent(type)}`);
+  if (!ok || !data) {
+    hint.textContent = '(failed to load)';
+    return;
+  }
+  if (!data.configured) {
+    hint.textContent = '(CyberYozh API key not set — manual entry only)';
+    return;
+  }
+  if (!data.items?.length) {
+    hint.textContent = `(no purchased ${type.replace(/_/g, ' ')} proxies)`;
+    poolSelect.style.display = 'none';
+    poolInput.style.display = 'none';
+    buyEl.innerHTML = renderBuyButton(type);
+    return;
+  }
+
+  hint.textContent = `(${data.items.length} available)`;
+  poolSelect.innerHTML = '<option value="">— select one —</option>' +
+    data.items.map(p =>
+      `<option value="${escapeHtml(p.id)}">${escapeHtml(p.id)} — ${escapeHtml(p.url || '(no url)')} ${p.expired ? '[expired]' : ''}</option>`
+    ).join('');
+  poolSelect.style.display = '';
+  poolInput.style.display = 'none';
+  poolInput.value = '';
+}
+
+async function listSessions() {
+  const { ok, data } = await apiCall('/api/v1/sessions');
+  if (!ok || !data?.items) return [];
+  return data.items;
+}
+
+function renderSessionList(sessions) {
+  const el = document.getElementById('sess-list');
+  if (!el) return;
+  if (!sessions.length) {
+    el.innerHTML = '<span class="placeholder">No sessions yet. Create one above.</span>';
+    return;
+  }
+  const rows = sessions.map(s => {
+    const expires = new Date(s.expires_at * 1000).toISOString();
+    const proxy = s.proxy_type === 'none'
+      ? 'none'
+      : `${escapeHtml(s.proxy_type)}${s.proxy_pool_id ? ' / ' + escapeHtml(s.proxy_pool_id) : ''}`;
+    const lastErr = s.last_error
+      ? `<div style="color:var(--color-red);font-size:11px;margin-top:0.25rem">${escapeHtml(s.last_error)}</div>`
+      : '';
+    return `
+      <div class="batch-page">
+        <div class="batch-page-header">
+          <span><code>${escapeHtml(s.session_id)}</code></span>
+          <span class="badge ${s.status === 'ready' ? 'ok' : s.status === 'failed' ? 'error' : ''}">${escapeHtml(s.status)}</span>
+          <span>device: <b>${escapeHtml(s.device)}</b></span>
+          <span>proxy: ${proxy}</span>
+          <span>bytes: <b>${Number(s.storage_state_bytes || 0).toLocaleString()}</b></span>
+          <span>expires: <code>${escapeHtml(expires)}</code></span>
+          <button class="btn-secondary btn-sm" data-copy-sess="${escapeAttr(s.session_id)}" style="margin-left:auto">Copy ID</button>
+          <button class="btn-secondary btn-sm" data-del-sess="${escapeAttr(s.session_id)}">Delete</button>
+        </div>
+        ${lastErr}
+      </div>`;
+  }).join('');
+  el.innerHTML = rows;
+  el.querySelectorAll('[data-copy-sess]').forEach(b => b.addEventListener('click', () => {
+    navigator.clipboard?.writeText(b.dataset.copySess).catch(() => {});
+  }));
+  el.querySelectorAll('[data-del-sess]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm(`Delete session ${b.dataset.delSess}?`)) return;
+    const { ok, data } = await apiCall(`/api/v1/sessions/${encodeURIComponent(b.dataset.delSess)}`, { method: 'DELETE' });
+    if (!ok) {
+      showSessOutput('sess-list', { error: `Failed to delete session: ${data?.detail || data?.message || 'Unknown error'}` });
+      return;
+    }
+    refreshSessionsView();
+  }));
+}
+
+// Cache of the latest sessions list; populated by populateSessionPickers and read
+// by the picker-change handler so it can offer to copy proxy pins to the form.
+let _lastSessions = [];
+
+function _sessionPrefixFromPicker(sel) {
+  // `<select id="s-session-id" data-session-picker>` -> "s"
+  return sel.id.replace(/-session-id$/, '');
+}
+
+function _currentProxyIsCustomized(prefix) {
+  const typeSel = document.getElementById(`${prefix}-proxy-type`);
+  if (typeSel && typeSel.value && typeSel.value !== 'none') return true;
+  const pool = document.getElementById(`${prefix}-proxy-pool`);
+  if (pool && pool.value.trim()) return true;
+  const country = document.getElementById(`${prefix}-geo-country`);
+  if (country && country.value) return true;
+  const region = document.getElementById(`${prefix}-geo-region`);
+  if (region && region.value.trim()) return true;
+  const city = document.getElementById(`${prefix}-geo-city`);
+  if (city && city.value.trim()) return true;
+  return false;
+}
+
+async function _waitForPoolSelectPopulated(prefix, timeoutMs = 3000) {
+  const poolSelect = document.getElementById(`${prefix}-proxy-pool-select`);
+  if (!poolSelect) return;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (poolSelect.options.length > 0) return;
+    await new Promise(r => setTimeout(r, 40));
+  }
+}
+
+async function applySessionProxyToForm(prefix, session) {
+  // 1) proxy_type — dispatch change so the tab's refresh*ProxyPool() fires
+  const typeSel = document.getElementById(`${prefix}-proxy-type`);
+  if (typeSel) {
+    typeSel.value = session.proxy_type || 'none';
+    typeSel.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  // 2) Wait for the pool select to populate (or for the field to be hidden again on "none")
+  await _waitForPoolSelectPopulated(prefix);
+
+  // 3) pool_id
+  const poolSelect = document.getElementById(`${prefix}-proxy-pool-select`);
+  const poolInput = document.getElementById(`${prefix}-proxy-pool`);
+  if (session.proxy_pool_id) {
+    if (poolSelect) {
+      const has = Array.from(poolSelect.options).some(o => o.value === session.proxy_pool_id);
+      if (has) {
+        poolSelect.value = session.proxy_pool_id;
+        poolSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+    if (poolInput) poolInput.value = session.proxy_pool_id;
+  } else {
+    if (poolInput) poolInput.value = '';
+    if (poolSelect) poolSelect.value = '';
+  }
+
+  // 4) Geo
+  const geo = session.proxy_geo || {};
+  const country = document.getElementById(`${prefix}-geo-country`);
+  if (country) country.value = geo.country_code || '';
+  const region = document.getElementById(`${prefix}-geo-region`);
+  if (region) region.value = geo.region || '';
+  const city = document.getElementById(`${prefix}-geo-city`);
+  if (city) city.value = geo.city || '';
+}
+
+function _sessionProxyMatchesForm(prefix, session) {
+  const typeSel = document.getElementById(`${prefix}-proxy-type`);
+  const pool = document.getElementById(`${prefix}-proxy-pool`);
+  const country = document.getElementById(`${prefix}-geo-country`);
+  const region = document.getElementById(`${prefix}-geo-region`);
+  const city = document.getElementById(`${prefix}-geo-city`);
+  if (typeSel && typeSel.value !== (session.proxy_type || 'none')) return false;
+  if (pool && (pool.value.trim() || '') !== (session.proxy_pool_id || '')) return false;
+  const geo = session.proxy_geo || {};
+  if (country && (country.value || '') !== (geo.country_code || '')) return false;
+  if (region && (region.value.trim() || '') !== (geo.region || '')) return false;
+  if (city && (city.value.trim() || '') !== (geo.city || '')) return false;
+  return true;
+}
+
+async function _onSessionPickerChange(ev) {
+  const sel = ev.currentTarget;
+  const sid = sel.value;
+  if (!sid) return;  // user picked "— none —"
+  const session = _lastSessions.find(s => s.session_id === sid);
+  if (!session) return;
+  const prefix = _sessionPrefixFromPicker(sel);
+  if (!prefix) return;
+  if (_sessionProxyMatchesForm(prefix, session)) return;  // already aligned
+  if (_currentProxyIsCustomized(prefix)) {
+    const sessionDesc = `${session.proxy_type || 'none'}${session.proxy_pool_id ? ' / ' + session.proxy_pool_id.slice(0, 8) + '…' : ''}`;
+    if (!confirm(`Session ${sid} is pinned to proxy ${sessionDesc}. Replace your current proxy fields with it?`)) {
+      return;
+    }
+  }
+  await applySessionProxyToForm(prefix, session);
+}
+
+document.querySelectorAll('select[data-session-picker]').forEach(sel => {
+  sel.addEventListener('change', _onSessionPickerChange);
+});
+
+async function populateSessionPickers(sessions) {
+  _lastSessions = sessions;
+  // Scrape / Batch / Crawler pickers — preserve current selection, show "none" first.
+  const opts = ['<option value="">— none —</option>']
+    .concat(sessions.map(s => `<option value="${escapeAttr(s.session_id)}">${escapeHtml(s.session_id)} (${escapeHtml(s.status)})</option>`))
+    .join('');
+  document.querySelectorAll('select[data-session-picker]').forEach(sel => {
+    const prev = sel.value;
+    sel.innerHTML = opts;
+    if (prev && sessions.some(s => s.session_id === prev)) sel.value = prev;
+    else sel.value = '';
+    if (sel.value !== prev) {
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+  // Cookie-injection session select — same shape as login form.
+  const cookieSel = document.getElementById('sess-cookies-session-id');
+  if (cookieSel) {
+    const prev = cookieSel.value;
+    cookieSel.innerHTML = sessions.length
+      ? sessions.map(s => `<option value="${escapeAttr(s.session_id)}">${escapeHtml(s.session_id)} (${escapeHtml(s.status)})</option>`).join('')
+      : '<option value="">— create a session first —</option>';
+    if (prev && sessions.some(s => s.session_id === prev)) cookieSel.value = prev;
+    else cookieSel.value = '';
+  }
+  // Login-form session select — sessions only, no "none".
+  const loginSel = document.getElementById('sess-login-session-id');
+  if (loginSel) {
+    const prev = loginSel.value;
+    loginSel.innerHTML = sessions.length
+      ? sessions.map(s => `<option value="${escapeAttr(s.session_id)}">${escapeHtml(s.session_id)} (${escapeHtml(s.status)})</option>`).join('')
+      : '<option value="">— create a session first —</option>';
+    if (prev && sessions.some(s => s.session_id === prev)) loginSel.value = prev;
+    else loginSel.value = '';
+    if (loginSel.value !== prev) {
+      loginSel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+}
+
+async function refreshSessionsView() {
+  const sessions = await listSessions();
+  renderSessionList(sessions);
+  await populateSessionPickers(sessions);
+}
+
+// ─── Session → proxy-fields auto-fill ────────────────────────────────────────
+// When a session is picked on Scrape / Batch / Crawler, copy its pinned
+// device + proxy_type + pool_id + geo into the form. If the form already has
+// non-default proxy state that differs, ask before overwriting — the scraper
+// 422s any mismatch on submit anyway, so getting the form aligned up-front
+// saves a round trip.
+
+const _SESSION_TAB_PREFIX = {
+  's-session-id': 's',
+  'b-session-id': 'b',
+  'c-session-id': 'c',
+};
+
+function _sessionGetVal(id) {
+  const el = document.getElementById(id);
+  return el ? (el.value || '').trim() : '';
+}
+
+function _proxyFieldsAtDefaults(prefix) {
+  const device = _sessionGetVal(`${prefix}-device`);
+  const isDefaultDevice = device === '' || device === 'desktop';
+  return isDefaultDevice
+    && _sessionGetVal(`${prefix}-proxy-type`) === 'none'
+    && _sessionGetVal(`${prefix}-proxy-pool`) === ''
+    && _sessionGetVal(`${prefix}-geo-country`) === ''
+    && _sessionGetVal(`${prefix}-geo-region`) === ''
+    && _sessionGetVal(`${prefix}-geo-city`) === '';
+}
+
+function _proxyMatchesSession(prefix, session) {
+  const sessGeo = session.proxy_geo || {};
+  return _sessionGetVal(`${prefix}-device`) === session.device
+    && _sessionGetVal(`${prefix}-proxy-type`) === session.proxy_type
+    && _sessionGetVal(`${prefix}-proxy-pool`) === (session.proxy_pool_id || '')
+    && _sessionGetVal(`${prefix}-geo-country`) === (sessGeo.country_code || '')
+    && _sessionGetVal(`${prefix}-geo-region`) === (sessGeo.region || '')
+    && _sessionGetVal(`${prefix}-geo-city`) === (sessGeo.city || '');
+}
+
+function _describeSessionPin(session) {
+  const parts = [`device=${session.device}`, `proxy_type=${session.proxy_type}`];
+  if (session.proxy_pool_id) parts.push(`pool=${session.proxy_pool_id}`);
+  const geo = session.proxy_geo || {};
+  const geoBits = [];
+  if (geo.country_code) geoBits.push(`country=${geo.country_code}`);
+  if (geo.region) geoBits.push(`region=${geo.region}`);
+  if (geo.city) geoBits.push(`city=${geo.city}`);
+  if (geoBits.length) parts.push(`geo[${geoBits.join(', ')}]`);
+  return parts.join(', ');
+}
+
+// Map tab-prefix to the corresponding refresh function so we can await the
+// API-driven pool repopulation directly instead of polling. The functions
+// already exist for the scrape/batch/crawler tab proxy blocks.
+const _REFRESH_PROXY_POOL_BY_PREFIX = {
+  's': () => (typeof refreshProxyPool === 'function' ? refreshProxyPool() : null),
+  'b': () => (typeof refreshBatchProxyPool === 'function' ? refreshBatchProxyPool() : null),
+  'c': () => (typeof refreshCrawlerProxyPool === 'function' ? refreshCrawlerProxyPool() : null),
+};
+
+async function _applySessionPinToProxyFields(prefix, session) {
+  const setAndFire = (id, val) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = val;
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  setAndFire(`${prefix}-device`, session.device);
+  // proxy_type's change listener also runs the same refresh function, but the
+  // event-dispatch path doesn't give us a Promise to await. Set the value
+  // first, then explicitly await the named refresh to know the select is
+  // populated before we try to pick the matching option.
+  const proxyTypeEl = document.getElementById(`${prefix}-proxy-type`);
+  if (proxyTypeEl) {
+    proxyTypeEl.value = session.proxy_type;
+    proxyTypeEl.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  const refresh = _REFRESH_PROXY_POOL_BY_PREFIX[prefix];
+  if (refresh) {
+    try {
+      await refresh();
+    } catch (_) {
+      // Refresh failures are surfaced by the hint span; fall through to the
+      // poll loop as a safety net.
+    }
+  }
+
+  const poolSelect = document.getElementById(`${prefix}-proxy-pool-select`);
+  const poolInput = document.getElementById(`${prefix}-proxy-pool`);
+  const targetPool = session.proxy_pool_id || '';
+
+  if (poolSelect && targetPool) {
+    // Belt-and-braces poll loop. await refresh() already guarantees the
+    // populate ran, but a sibling refresh dispatched from the change event
+    // could race against it on slow paths — keep the poll as a fallback.
+    for (let i = 0; i < 50; i++) {
+      if (Array.from(poolSelect.options).some(o => o.value === targetPool)) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (Array.from(poolSelect.options).some(o => o.value === targetPool)) {
+      poolSelect.value = targetPool;
+      // Two dispatches: 'change' for the mirror handler that updates the
+      // hidden text input, 'input' for any listener that reacts on input
+      // (none today, but cheap insurance). The custom-select wrapper's
+      // setLabel runs on 'change' and via its options-childList observer.
+      poolSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      poolSelect.dispatchEvent(new Event('input', { bubbles: true }));
+    } else if (poolInput) {
+      // Fall back to the text input if the select didn't get populated
+      // (e.g. no API key, or the pool was deleted upstream).
+      poolInput.value = targetPool;
+    }
+  } else if (poolInput) {
+    poolInput.value = targetPool;
+  }
+
+  const geo = session.proxy_geo || {};
+  const geoCountry = document.getElementById(`${prefix}-geo-country`);
+  if (geoCountry) {
+    geoCountry.value = geo.country_code || '';
+    geoCountry.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  const geoRegion = document.getElementById(`${prefix}-geo-region`);
+  if (geoRegion) geoRegion.value = geo.region || '';
+  const geoCity = document.getElementById(`${prefix}-geo-city`);
+  if (geoCity) geoCity.value = geo.city || '';
+}
+
+function _wireSessionPickerProxyAutofill() {
+  document.querySelectorAll('select[data-session-picker]').forEach(sel => {
+    if (sel._proxyAutofillWired) return;
+    sel._proxyAutofillWired = true;
+    sel.addEventListener('change', async () => {
+      const sessionId = sel.value;
+      if (!sessionId) return; // user cleared the picker
+      const session = _lastSessions.find(s => s.session_id === sessionId);
+      if (!session) return;
+      const prefix = _SESSION_TAB_PREFIX[sel.id];
+      if (!prefix) return;
+      if (_proxyMatchesSession(prefix, session)) return; // already aligned
+      if (!_proxyFieldsAtDefaults(prefix)) {
+        const ok = confirm(
+          `Session ${sessionId} is pinned to:\n  ${_describeSessionPin(session)}\n\n` +
+          `Your current proxy settings differ. Replace them with the session's pins?\n\n` +
+          `(The scraper will 422 a submit that diverges from the session pin.)`
+        );
+        if (!ok) return;
+      }
+      await _applySessionPinToProxyFields(prefix, session);
+    });
+  });
+}
+
+_wireSessionPickerProxyAutofill();
+
+document.getElementById('sess-proxy-type')?.addEventListener('change', refreshSessProxyPool);
+document.getElementById('sess-proxy-pool-select')?.addEventListener('change', () => {
+  document.getElementById('sess-proxy-pool').value =
+    document.getElementById('sess-proxy-pool-select').value;
+});
+refreshSessProxyPool();
+
+document.getElementById('btnSessAddStep')?.addEventListener('click', () => addLoginStep());
+
+document.getElementById('btnSessRefresh')?.addEventListener('click', refreshSessionsView);
+
+document.getElementById('btnSessCreate')?.addEventListener('click', async () => {
+  const device = document.getElementById('sess-device').value;
+  const proxyType = document.getElementById('sess-proxy-type').value;
+  const poolId = document.getElementById('sess-proxy-pool').value.trim();
+  const ttl = Number(document.getElementById('sess-ttl').value) || 86400;
+
+  if (proxyType !== 'none' && !poolId) {
+    alert(`Select a Pool ID for proxy type "${proxyType}" (or switch back to "none").`);
+    return;
+  }
+
+  const body = { device, proxy_type: proxyType, ttl_seconds: ttl };
+  if (poolId) body.proxy_pool_id = poolId;
+  if (proxyType === 'res_rotating') {
+    const cc = document.getElementById('sess-geo-country').value.trim();
+    const region = document.getElementById('sess-geo-region').value.trim();
+    const city = document.getElementById('sess-geo-city').value.trim();
+    if (cc || region || city) {
+      body.proxy_geo = {};
+      if (cc) body.proxy_geo.country_code = cc.toUpperCase();
+      if (region) body.proxy_geo.region = region;
+      if (city) body.proxy_geo.city = city;
+    }
+  }
+
+  const { data, ok } = await apiCall('/api/v1/sessions', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  showSessOutput('sess-create-result', data);
+  if (ok) refreshSessionsView();
+});
+
+// Translate the common browser-extension cookie export shapes (EditThisCookie /
+// Cookie-Editor) into Playwright's storage_state cookies. The differences are
+// small but every one of them would crash add_cookies if passed raw:
+//   - expirationDate (float) → expires (int)
+//   - sameSite lowercase ("lax") → Capitalized ("Lax")
+//   - drop extension-only keys: hostOnly, session, storeId, id
+function _normalizeBrowserCookies(input) {
+  if (!Array.isArray(input)) {
+    throw new Error('expected a JSON array of cookies');
+  }
+  const sameSiteMap = { strict: 'Strict', lax: 'Lax', none: 'None', no_restriction: 'None', unspecified: null };
+  return input.map((raw, i) => {
+    if (!raw || typeof raw !== 'object') {
+      throw new Error(`cookie #${i} is not an object`);
+    }
+    const out = {};
+    if (typeof raw.name !== 'string') throw new Error(`cookie #${i} missing name`);
+    if (raw.value === undefined || raw.value === null) throw new Error(`cookie #${i} missing value`);
+    out.name = raw.name;
+    out.value = String(raw.value);
+    if (raw.domain) out.domain = raw.domain;
+    if (raw.path) out.path = raw.path;
+    // expirationDate (extensions) vs expires (Playwright); drop session cookies.
+    const exp = raw.expirationDate ?? raw.expires;
+    if (typeof exp === 'number' && isFinite(exp) && exp > 0) {
+      out.expires = Math.floor(exp);
+    }
+    if (typeof raw.httpOnly === 'boolean') out.httpOnly = raw.httpOnly;
+    if (typeof raw.secure === 'boolean') out.secure = raw.secure;
+    if (typeof raw.sameSite === 'string') {
+      const ss = sameSiteMap[raw.sameSite.toLowerCase()];
+      if (ss) out.sameSite = ss;
+    }
+    return out;
+  });
+}
+
+document.getElementById('btnSessInjectCookies')?.addEventListener('click', async () => {
+  const sessionId = document.getElementById('sess-cookies-session-id').value.trim();
+  if (!sessionId) {
+    alert('Pick a session first (create one above if the list is empty).');
+    return;
+  }
+  const raw = document.getElementById('sess-cookies-json').value.trim();
+  if (!raw) {
+    alert('Paste a JSON array of cookies (export them from your browser).');
+    return;
+  }
+  let cookies;
+  try {
+    const parsed = JSON.parse(raw);
+    cookies = _normalizeBrowserCookies(parsed);
+  } catch (e) {
+    showSessOutput('sess-cookies-result', { error: `JSON / cookie format error: ${e.message}` });
+    return;
+  }
+  const { ok, data } = await apiCall(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/cookies`,
+    { method: 'POST', body: JSON.stringify({ cookies }) },
+  );
+  showSessOutput('sess-cookies-result', ok ? data : { error: data?.detail || data?.message || 'unknown error', raw: data });
+  if (ok) {
+    document.getElementById('sess-cookies-json').value = '';
+    refreshSessionsView();
+  }
+});
+
+document.getElementById('btnSessRunLogin')?.addEventListener('click', async () => {
+  const sessionId = document.getElementById('sess-login-session-id').value.trim();
+  if (!sessionId) {
+    alert('Pick a session first (create one above if the list is empty).');
+    return;
+  }
+  const steps = readLoginSteps();
+  if (!steps.length) {
+    alert('Add at least one login step.');
+    return;
+  }
+  const script = { steps };
+  const successSel = document.getElementById('sess-success-selector').value.trim();
+  const successRe = document.getElementById('sess-success-url-regex').value.trim();
+  if (successSel) script.success_selector = successSel;
+  if (successRe) script.success_url_regex = successRe;
+
+  const creds = {};
+  const email = document.getElementById('sess-creds-email').value;
+  const password = document.getElementById('sess-creds-password').value;
+  const totp = document.getElementById('sess-creds-totp').value;
+  if (email) creds.email = email;
+  if (password) creds.password = password;
+  if (totp) creds.totp_secret = totp;
+
+  // `creds` is required server-side (may be empty if the login script doesn't
+  // reference any $creds_* placeholders).
+  const body = { script, creds };
+
+  showSessOutput('sess-login-result', { status: 'running login script...' });
+  const { data, ok } = await apiCall(`/api/v1/sessions/${encodeURIComponent(sessionId)}/login`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  showSessOutput('sess-login-result', data);
+  if (ok) {
+    // Clear credential inputs from DOM after successful login — RAM-only, never persisted.
+    document.getElementById('sess-creds-email').value = '';
+    document.getElementById('sess-creds-password').value = '';
+    const totp = document.getElementById('sess-creds-totp');
+    if (totp) totp.value = '';
+    refreshSessionsView();
+  }
+});
+
+// Refresh the sessions tab whenever the user activates it.
+document.querySelectorAll('.tab-btn[data-tab="sessions"]').forEach(btn => {
+  btn.addEventListener('click', () => { refreshSessionsView(); });
+});
+
+// Initial load — populate the picker selects so the live UI shows current sessions.
+// Best-effort; ignore failures (server down).
+refreshSessionsView().catch(() => {});
+
 restoreState();
+
+// After restoreState the Scraper URL points at the real target — only now
+// can the preset dropdown load (the preset endpoints don't exist on a stock
+// scraper). Refresh it whenever the target changes too.
+populateScrapePresetSelect();
+document.getElementById('scraperUrl').addEventListener('change', () => {
+  loadCountries();
+  populateScrapePresetSelect();
+});

@@ -53,6 +53,7 @@ class FetchResult:
     applied_locale: str | None = None
     applied_timezone: str | None = None
     applied_accept_language: str | None = None
+    storage_state: dict | None = None
 
 
 class PlaywrightRunner:
@@ -95,6 +96,41 @@ class PlaywrightRunner:
             self._browser = None
             self._playwright = None
 
+    async def resolve_proxy(self, proxy: Optional[ProxyConfig]):
+        """Translate a possibly-authenticated SOCKS5 proxy into a Playwright-safe one.
+
+        Chromium does not support SOCKS5 with username/password. When the caller
+        hands us an authenticated socks5:// URL we spawn a local HTTP-to-SOCKS5
+        bridge and hand Playwright the local HTTP URL instead. Callers must
+        ``await bridge_cm.__aexit__(None, None, None)`` in their finally clause
+        when the returned bridge is not None.
+
+        Returns:
+            (effective_proxy, bridge_cm) — pass-through when no bridge is needed.
+        """
+        if proxy is None:
+            return None, None
+        needs_bridge = (
+            proxy.server.lower().startswith("socks5://")
+            and (proxy.username or proxy.password)
+        )
+        if not needs_bridge:
+            return proxy, None
+
+        from urllib.parse import urlparse, quote
+        parsed = urlparse(proxy.server)
+        auth = ""
+        if proxy.username:
+            auth = quote(proxy.username, safe="")
+            if proxy.password:
+                auth += ":" + quote(proxy.password, safe="")
+            auth += "@"
+        socks_url = f"socks5://{auth}{parsed.hostname}:{parsed.port}"
+        bridge_cm = open_socks_to_http_bridge(socks_url)
+        local_url = await bridge_cm.__aenter__()
+        log.info("routing SOCKS5 proxy %s via local bridge %s", proxy.server, local_url)
+        return ProxyConfig(server=local_url, username=None, password=None), bridge_cm
+
     async def _new_context(
         self,
         device: str,
@@ -103,6 +139,7 @@ class PlaywrightRunner:
         block_assets: bool | None = None,
         proxy_geo: dict[str, str] | None = None,
         render: bool = True,
+        storage_state: dict | None = None,
     ) -> BrowserContext:
         assert self._browser is not None
         preset = DESKTOP if device == "desktop" else MOBILE
@@ -151,6 +188,7 @@ class PlaywrightRunner:
             java_script_enabled=render,
             proxy=proxy_arg,
             extra_http_headers=effective_headers or None,
+            storage_state=storage_state,
         )
         # Stash applied fingerprint on the context so fetch() can surface it
         # in FetchResult without needing to re-derive the values.
@@ -249,35 +287,23 @@ class PlaywrightRunner:
         proxy_geo: dict[str, str] | None = None,
         render: bool = True,
         cookies: list[dict[str, Any]] | None = None,
+        storage_state: dict | None = None,
     ) -> FetchResult:
         await self.start()
         assert self._browser is not None
 
+        if storage_state and cookies:
+            log.warning("both storage_state and cookies provided — ignoring cookies")
+            cookies = None
+
         effective_block_assets = self.block_assets if block_assets is None else block_assets
 
-        # Chromium doesn't support SOCKS5 with authentication. If we are asked
-        # to use an authenticated socks5:// proxy, spin up a local HTTP-to-
-        # SOCKS5 bridge and hand Playwright the local HTTP URL instead.
-        bridge_cm = None
-        effective_proxy = proxy
-        if proxy is not None and proxy.server.lower().startswith("socks5://") and (proxy.username or proxy.password):
-            from urllib.parse import urlparse, quote
-            parsed = urlparse(proxy.server)
-            auth = ""
-            if proxy.username:
-                auth = quote(proxy.username, safe="")
-                if proxy.password:
-                    auth += ":" + quote(proxy.password, safe="")
-                auth += "@"
-            socks_url = f"socks5://{auth}{parsed.hostname}:{parsed.port}"
-            bridge_cm = open_socks_to_http_bridge(socks_url)
-            local_url = await bridge_cm.__aenter__()
-            log.info("routing SOCKS5 proxy %s via local bridge %s", proxy.server, local_url)
-            effective_proxy = ProxyConfig(server=local_url, username=None, password=None)
+        effective_proxy, bridge_cm = await self.resolve_proxy(proxy)
 
         context = await self._new_context(
             device=device, proxy=effective_proxy, headers=headers,
             block_assets=block_assets, proxy_geo=proxy_geo, render=render,
+            storage_state=storage_state,
         )
 
         if cookies:
@@ -287,11 +313,11 @@ class PlaywrightRunner:
             default_domain = urlparse(url).hostname or ""
             prepared_cookies = []
             for cookie in cookies:
-                c = dict(cookie)
-                if not c.get("domain") and not c.get("url"):
-                    c["domain"] = default_domain
-                    c.setdefault("path", "/")
-                prepared_cookies.append(c)
+                cookie_dict = dict(cookie)
+                if not cookie_dict.get("domain") and not cookie_dict.get("url"):
+                    cookie_dict["domain"] = default_domain
+                    cookie_dict.setdefault("path", "/")
+                prepared_cookies.append(cookie_dict)
             try:
                 await context.add_cookies(prepared_cookies)
             except Exception as exc:  # pylint: disable=broad-except
@@ -325,14 +351,14 @@ class PlaywrightRunner:
             # domcontentloaded, so page.content() can race with a redirect.
             # Retry a few times, optionally waiting for the DOM to settle.
             html = ""
-            last_err: PWError | None = None
+            last_error: PWError | None = None
             for _ in range(4):
                 try:
                     html = await page.content()
-                    last_err = None
+                    last_error = None
                     break
                 except PWError as exc:
-                    last_err = exc
+                    last_error = exc
                     msg = str(exc).lower()
                     if "navigating" in msg or "changing the content" in msg:
                         try:
@@ -343,8 +369,8 @@ class PlaywrightRunner:
                             pass
                         continue
                     raise
-            if last_err is not None:
-                raise last_err
+            if last_error is not None:
+                raise last_error
             captcha_detected = self._looks_like_captcha_or_block(html)
 
             final_url = page.url
@@ -388,6 +414,13 @@ class PlaywrightRunner:
                 screenshot_png = await page.screenshot(full_page=True)
                 screenshot_b64 = base64.b64encode(screenshot_png).decode("ascii")
 
+            new_storage_state = None
+            if storage_state is not None:
+                try:
+                    new_storage_state = await context.storage_state()
+                except PWError as exc:
+                    log.warning("failed to capture storage_state: %s", exc)
+
             return _with_applied(FetchResult(
                 html=html,
                 final_url=final_url,
@@ -395,6 +428,7 @@ class PlaywrightRunner:
                 screenshot_b64=screenshot_b64,
                 ok=not captcha_detected,
                 error="Captcha/block detected by heuristic" if captcha_detected else None,
+                storage_state=new_storage_state,
             ))
 
         except PWError as e:

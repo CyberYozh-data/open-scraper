@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import HTTPException
-
 from src.proxy.base import ProxySession
 from src.proxy.countries import COUNTRIES
 from src.proxy.cyberyozh.client import CyberYozhClient
@@ -23,6 +21,13 @@ from src.schemas import (
 from src.settings import settings
 
 log = logging.getLogger(__name__)
+
+
+class CyberYozhAPIError(Exception):
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(detail)
+
 
 _ACCESS_FILTER: dict[str, str] = {
     "mobile_shared": "shared",
@@ -90,7 +95,7 @@ class ProxyResolver:
             proxies = await self._client.proxy_history(category=category, expired=False)
         except Exception as exc:
             log.exception("failed to fetch proxy_history for category=%s", category)
-            raise HTTPException(status_code=502, detail=f"cyberyozh_api_error: {exc}") from exc
+            raise CyberYozhAPIError(f"cyberyozh_api_error: {exc}") from exc
 
         access_filter = _ACCESS_FILTER.get(proxy_type)
         items = [

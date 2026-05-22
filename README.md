@@ -7,7 +7,7 @@ tester and MCP exposure on both services.
 
 | Service | Port | Docs | What it does |
 |---|---|---|---|
-| **Scraper** ([`src/`](src/README.md)) | `8000` | [src/README.md](src/README.md) | Async job API — renders a URL in a real browser, returns extracted fields / raw HTML / full-page screenshot. Built-in CyberYozh proxy integration. |
+| **Scraper** ([`src/`](src/README.md)) | `8000` | [src/README.md](src/README.md) | Async job API — renders a URL in a real browser, returns extracted fields / raw HTML / full-page screenshot. Built-in CyberYozh proxy integration + session API for authenticated targets. |
 | **Crawler** ([`open-crawler/`](yozh-crawler/README.md)) | `8001` | [open-crawler/README.md](yozh-crawler/README.md) | Walks a site from a seed URL; fetches every page through the scraper over HTTP; streams results via SSE. Dedup, scope, rate-limiting, retries. |
 | **Tester** ([`scraper-tester/`](scraper-tester/README.md)) | `7000` | [scraper-tester/README.md](scraper-tester/README.md) | Node.js + vanilla HTML UI for both services — every knob as a form, live progress, MCP explorer. |
 
@@ -40,7 +40,7 @@ python3 scripts/e2e_smoke.py
 ### Individual services
 
 - **Scraper only**: `docker compose up --build web-scraper`
-- **Crawler only**: `docker compose up --build yozh-crawler`
+- **Crawler only**: `docker compose up --build open-crawler`
   (depends on `web-scraper`; compose starts it too)
 
 ### Visual tester
@@ -184,9 +184,9 @@ dropdown to switch between scraper and crawler.
 ## Top-level layout
 
 ```
-yozh-scraper-clone/
+yozh-scraper/
 ├── src/                      # scraper service
-├── yozh-crawler/             # crawler service
+├── open-crawler/             # crawler service
 ├── scraper-tester/           # Web UI (Node.js)
 ├── examples/                 # Python examples (incl. MCP agent)
 ├── scripts/                  # e2e_smoke.py etc.

@@ -514,6 +514,97 @@ Each result in `results[]` contains:
 | `screenshot_base64` | string | Base64 PNG (if `screenshot: true`) |
 | `warnings` | array | Non-fatal warnings (`["cancelled"]` for pages skipped by a cancel) |
 
+## Presets
+
+A **preset** is a named bundle of three things so you don't hand-assemble a
+`ScrapeRequest` per target site: a request profile (proxy/device/wait), a
+per-locale URL template, and a parsing recipe (deterministic CSS/XPath with
+optional LLM self-heal / AI extraction). Built-ins ship read-only;
+user-defined presets persist under `data/presets/` (mount the volume — see
+`docker-compose.yml`).
+
+### Built-in presets
+
+| name | source | params | locales |
+|------|--------|--------|---------|
+| `amazon_product` | amazon | `asin` | us, uk, de, fr, jp |
+| `amazon_search` | amazon | `query` | us, uk, de |
+| `google_search` | google | `query` | us, uk, de, fr, ru, jp |
+| `google_shopping` | google | `query` | us, uk, de |
+| `ebay_search` | ebay | `query` | us, uk, de |
+| `walmart_product` | walmart | `product_id` | us |
+| `youtube_video` | youtube | `video_id` | global |
+| `linkedin_profile` | linkedin | `username` | global (needs auth session) |
+
+### Scrape with a preset
+
+```bash
+curl -X POST http://localhost:8000/api/v1/scrape/preset/page \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "source": "amazon_product",
+    "preset_params": {"asin": "B08N5WRWNW"},
+    "locale": "us",
+    "llm": {"model": "openai/gpt-5.4-mini"}
+  }'
+# -> {"job_id": "..."}  then GET /api/v1/scrape/<job_id>/results
+```
+
+`llm` is optional. Without it the deterministic parser runs alone. With it,
+self-heal regenerates selectors when markup drifts — but only when a
+**required** field comes back empty (that's the trigger). Every shipped
+built-in marks its schema-critical field required, so a drift that empties
+it engages self-heal; non-required fields just return null. Healed
+selectors are persisted back for *user* presets (built-ins are read-only,
+regenerated per-request). Batch: `POST /api/v1/scrape/preset/pages` with
+`{"pages": [<PresetScrapeRequest>...]}`.
+
+`preset_meta`/`parser_plan` are materializer-internal — setting them on the
+raw `/api/v1/scrape/page` is rejected with 422.
+
+### Preset CRUD & generation
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/presets?kind=&source=` | List built-in + user presets |
+| `GET /api/v1/presets/{name}` | Full preset |
+| `POST /api/v1/presets` | Create a user preset (name must start `user_`) |
+| `PUT /api/v1/presets/{name}` | Replace a user preset |
+| `DELETE /api/v1/presets/{name}` | Delete a user preset |
+| `POST /api/v1/presets/generate` | `manual` \| `from_schema` \| `from_prompt` |
+| `POST /api/v1/presets/{name}/test` | Dry-run on `sample_url` or `sample_html` |
+| `GET /api/v1/presets/llm-models` | Models the configured keys can call |
+
+`generate` modes:
+
+```bash
+# AI builds selectors from a schema you supply
+curl -X POST .../api/v1/presets/generate -d '{
+  "name":"user_books","mode":"from_schema","source":"custom",
+  "sample_url":"https://books.toscrape.com/",
+  "schema":{"title":"string","price":"number"}}'
+
+# AI infers the schema from a natural-language description, then selectors
+curl -X POST .../api/v1/presets/generate -d '{
+  "name":"user_books","mode":"from_prompt","source":"custom",
+  "sample_url":"https://books.toscrape.com/",
+  "description":"list each book title and price"}'
+```
+
+LLM keys are server-side in `.env` (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, or a custom OpenAI-compatible
+endpoint via `CUSTOM_LLM_BASE_URL`/`CUSTOM_LLM_API_KEY`). Callers pick only
+the model string; the default is `DEFAULT_LLM_MODEL` (`openai/gpt-5.4-mini`).
+`sample_url` fetches are SSRF-guarded (no private/loopback/metadata targets).
+
+### post_process
+
+`FieldRule.post_process` is an ordered transform chain applied to matched
+values (per-item when `all: true`): `regex` (args `[pattern, group?]`),
+`parse_int`, `parse_float`, `parse_price` (args `["us"|"eu"]` for separator
+disambiguation), `strip`, `lowercase`, `uppercase`, `replace` (args
+`[old, new]`). A field may also override the rule's `type` (css/xpath).
+
 ## MCP Integration
 
 Yozh Scraper exposes all its API tools via the
@@ -571,6 +662,143 @@ the full job lifecycle: submit → poll → fetch → summarize.
 npx @modelcontextprotocol/inspector http://localhost:8000/mcp
 # Opens at http://localhost:6274
 ```
+
+## Sessions
+
+Server-managed sessions let you authenticate once, then reuse cookies +
+localStorage across subsequent scrape requests. Lifetime is in-memory only —
+sessions evaporate on process restart.
+
+### Lifecycle
+
+1. `POST /api/v1/sessions` — create. Body pins `device`, `proxy_type`,
+   `proxy_pool_id`, `proxy_geo`, `ttl_seconds` (default 86400, clamped
+   `[300, 7×86400]`). Returns `{session_id, expires_at}`.
+2. `POST /api/v1/sessions/{id}/login` — replay a declarative login script
+   with `creds` in the request body. Body: `{script: LoginScript, creds: dict}`.
+   Credentials live in RAM only — never persisted.
+3. `POST /api/v1/scrape/page` with `session_id` set — scrape an authenticated
+   page using the session's cookie jar.
+4. `DELETE /api/v1/sessions/{id}` — clean up.
+
+### Login DSL
+
+The script is a list of steps, each one of:
+
+| op                  | required fields                      | maps to                             |
+| ------------------- | ------------------------------------ | ----------------------------------- |
+| `goto`              | `url`                                | `page.goto(url)`                    |
+| `fill`              | `selector`, `value`                  | `page.fill(selector, value)`        |
+| `click`             | `selector`                           | `page.click(selector)`              |
+| `wait_for_selector` | `selector` (optional `timeout_ms`)   | `page.wait_for_selector(...)`       |
+| `wait_for_timeout`  | `ms`                                 | `page.wait_for_timeout(ms)`         |
+| `press_key`         | `selector`, `key`                    | `page.press(selector, key)`         |
+| `type_text`         | `selector`, `value`                  | `page.type(selector, value)`        |
+| `hover`             | `selector`                           | `page.hover(selector)`              |
+
+`value` and `url` support `$creds_<key>` substitution from the `creds` dict
+(`$creds_email`, `$creds_password`, etc.). Unknown tokens stay literal.
+
+### Error rules
+
+- `session_id` + `cookies` together → **422 cannot pass both**.
+- `session_id` + mismatched `device` / `proxy_type` / `proxy_pool_id` /
+  `proxy_geo` → **422**.
+- `proxy_type=res_rotating` without `proxy_pool_id` on create → **422**
+  (rotating exit IPs invalidate the server-side session).
+- TTL expired → **410 Gone**.
+- Login script step failure → response carries `failed_step_index` +
+  `failed_step` + base64 screenshot (always-on-failure, never-on-success).
+
+### Example
+
+```bash
+# 1. Create
+curl -X POST http://localhost:8000/api/v1/sessions \
+  -H 'content-type: application/json' \
+  -d '{"device":"desktop","proxy_type":"none","ttl_seconds":3600}'
+# {"session_id":"sess_...","expires_at":...}
+
+# 2. Login (creds in body)
+curl -X POST http://localhost:8000/api/v1/sessions/$ID/login \
+  -H 'content-type: application/json' \
+  -d '{
+    "creds":{"email":"tomsmith","password":"SuperSecretPassword!"},
+    "script":{
+      "steps":[
+        {"op":"goto","url":"https://the-internet.herokuapp.com/login"},
+        {"op":"fill","selector":"#username","value":"$creds_email"},
+        {"op":"fill","selector":"#password","value":"$creds_password"},
+        {"op":"click","selector":"button[type=submit]"},
+        {"op":"wait_for_selector","selector":".flash.success"}
+      ],
+      "success_selector":".flash.success"
+    }
+  }'
+
+# 3. Authenticated scrape
+curl -X POST http://localhost:8000/api/v1/scrape/page \
+  -d '{"url":"https://the-internet.herokuapp.com/secure","session_id":"'$ID'","raw_html":true}'
+```
+
+End-to-end runnable example: [`../examples/login_session_scraping.py`](../examples/login_session_scraping.py).
+
+### Cookie injection — escape hatch for CAPTCHA / 2FA / MFA
+
+When the login flow hits a CAPTCHA, device-verification challenge, or 2FA
+prompt that the Phase 1 DSL can't solve, skip the login script and inject
+cookies you exported from your own logged-in browser:
+
+```bash
+# 1. Log in manually in your real Chrome on the target site.
+# 2. Export cookies via an extension like Cookie-Editor or EditThisCookie
+#    (right-click → Export → JSON copies an array to the clipboard).
+# 3. Create the session as usual:
+curl -X POST http://localhost:8000/api/v1/sessions \
+  -d '{"device":"desktop","proxy_type":"none","ttl_seconds":86400}'
+# 4. Paste the cookie array into the session:
+curl -X POST http://localhost:8000/api/v1/sessions/$ID/cookies \
+  -H 'content-type: application/json' \
+  -d '{"cookies":[{"name":"sessionid","value":"abc","domain":".example.com","path":"/","expires":1800000000,"httpOnly":true,"secure":true,"sameSite":"Lax"}, ...]}'
+# 5. Scrape with session_id; the session's storage_state carries your
+#    authenticated cookies into every fetch.
+```
+
+The Tester UI has the same flow under **Sessions → Inject Cookies** —
+it accepts the raw extension-export JSON and converts `expirationDate` (float)
+to `expires` (int), normalizes `sameSite` casing, and drops extension-only
+keys (`hostOnly`, `storeId`, `session`).
+
+The cookie endpoint is also useful when you already have a long-lived API
+session cookie (CI service account, partner-supplied token) and want to skip
+the login flow entirely.
+
+### Tester UX niceties
+
+- **Pool ID** in the Sessions tab is populated from `/api/v1/proxies/available`
+  just like the Scrape / Batch / Crawler tabs do — pick the pool from the
+  dropdown instead of typing a UUID. Visible only when `proxy_type != none`.
+- **Picking a session** on Scrape Page / Batch / Crawler auto-copies its
+  pinned `device`, `proxy_type`, `proxy_pool_id`, and `proxy_geo` into the
+  form. If the form already has non-default values that differ from the pin,
+  a confirm dialog asks before overwriting (the scraper would 422 a mismatched
+  submit anyway).
+- **Authenticated SOCKS5 proxies** — the login worker shares the same
+  HTTP-to-SOCKS5 bridge that the scrape path uses, so CyberYozh residential /
+  mobile pools that present as `socks5://user:pass@host:port` work for login
+  as well as scrape.
+
+### Known limitations (Phase 1)
+
+- In-memory only — sessions are lost on container restart. Persistence is a
+  future operational-pack feature.
+- IndexedDB / Service Worker state is invisible to Playwright's
+  `storage_state` — sites that store JWT in IndexedDB (Dexie, Firebase Auth)
+  will appear logged-in mid-session but lose state on restore.
+- Per-session storage_state cap is 2 MB; SPA-heavy targets may hit this.
+- `res_rotating` requires `proxy_pool_id` (see above).
+- No auto re-login on 401 / cookie expiry — Phase 2.
+- No CAPTCHA / MFA hooks — Phase 3.
 
 ## Tests
 

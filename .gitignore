@@ -156,3 +156,6 @@ cython_debug/
 # temp
 temp/
 output
+
+parallel-mapping-teapot.md
+sessions-phase1-plan.md

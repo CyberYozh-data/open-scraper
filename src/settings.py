@@ -98,6 +98,20 @@ class Settings(BaseSettings):
     )
 
     # =====================
+    # Sessions (Phase 1)
+    # =====================
+    sessions_max: int = Field(
+        default=256,
+        alias="SESSIONS_MAX",
+        description="Soft cap on simultaneous sessions per process. LRU-evicted on overflow.",
+    )
+    session_storage_state_max_bytes: int = Field(
+        default=2 * 1024 * 1024,
+        alias="SESSION_STORAGE_STATE_MAX_BYTES",
+        description="Per-session storage_state byte cap. Rejected on overflow.",
+    )
+
+    # =====================
     # Proxy (CyberYozh)
     # =====================
     cyberyozh_api_key: SecretStr | None = Field(
@@ -109,6 +123,59 @@ class Settings(BaseSettings):
         default="https://app.cyberyozh.com",
         alias="CYBERYOZH_BASE_URL",
         description="Base URL for CyberYozh API.",
+    )
+
+    # =====================
+    # LLM (presets)
+    # =====================
+    openai_api_key: SecretStr | None = Field(
+        default=None,
+        alias="OPENAI_API_KEY",
+        description="Server-side OpenAI key for openai/* models.",
+    )
+    anthropic_api_key: SecretStr | None = Field(
+        default=None,
+        alias="ANTHROPIC_API_KEY",
+        description="Server-side Anthropic key for anthropic/* models.",
+    )
+    gemini_api_key: SecretStr | None = Field(
+        default=None,
+        alias="GEMINI_API_KEY",
+        description="Server-side Gemini key for gemini/* models.",
+    )
+    openrouter_api_key: SecretStr | None = Field(
+        default=None,
+        alias="OPENROUTER_API_KEY",
+        description="Server-side OpenRouter key for openrouter/* models.",
+    )
+    custom_llm_base_url: str | None = Field(
+        default=None,
+        alias="CUSTOM_LLM_BASE_URL",
+        description="OpenAI-compatible base URL for custom/* models.",
+    )
+    custom_llm_api_key: SecretStr | None = Field(
+        default=None,
+        alias="CUSTOM_LLM_API_KEY",
+        description="API key for the custom OpenAI-compatible endpoint.",
+    )
+    default_llm_model: str = Field(
+        default="openai/gpt-5.4-mini",
+        alias="DEFAULT_LLM_MODEL",
+        description="Model used when a preset/request doesn't specify one.",
+    )
+    preset_llm_max_tokens: int = Field(
+        default=4000,
+        alias="PRESET_LLM_MAX_TOKENS",
+        description="Token ceiling for a single self-heal / extraction call.",
+    )
+    preset_llm_timeout_s: float = Field(
+        default=30.0,
+        alias="PRESET_LLM_TIMEOUT_S",
+        description=(
+            "Hard timeout for a single LLM call. Bounds the in-worker "
+            "self-heal/extract round-trip so a hung provider socket can't "
+            "wedge a worker process past the job timeout."
+        ),
     )
 
 

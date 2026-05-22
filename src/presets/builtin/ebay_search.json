@@ -1,0 +1,64 @@
+{
+  "name": "ebay_search",
+  "source": "ebay",
+  "description": "eBay search results (sorted newest). Selectors verified against examples/ebay_scraping.py. Note eBay injects a dummy first 'Shop on eBay' card the caller should drop.",
+  "kind": "builtin",
+  "url_template": "https://www.ebay.{domain}/sch/i.html?_nkw={query}&_sop=12",
+  "request_defaults": {
+    "device": "desktop",
+    "proxy_type": "res_rotating",
+    "stealth": true,
+    "wait_until": "domcontentloaded",
+    "timeout_ms": 60000,
+    "block_assets": false
+  },
+  "locales": {
+    "us": { "domain": "com",   "country": "US" },
+    "uk": { "domain": "co.uk", "country": "GB" },
+    "de": { "domain": "de",    "country": "DE" }
+  },
+  "default_locale": "us",
+  "parsing_instructions": {
+    "type": "css",
+    "fields": {
+      "titles": {
+        "selector": ".s-item__title",
+        "all": true,
+        "required": true,
+        "post_process": [{ "op": "strip" }]
+      },
+      "prices": {
+        "selector": ".s-item__price",
+        "all": true
+      },
+      "conditions": {
+        "selector": ".SECONDARY_INFO",
+        "all": true
+      },
+      "shipping": {
+        "selector": ".s-item__shipping",
+        "all": true
+      },
+      "urls": {
+        "selector": ".s-item__link",
+        "attr": "href",
+        "all": true
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "titles":     { "type": "array", "items": { "type": "string" } },
+      "prices":     { "type": "array", "items": { "type": "string" } },
+      "conditions": { "type": "array", "items": { "type": "string" } },
+      "shipping":   { "type": "array", "items": { "type": "string" } },
+      "urls":       { "type": "array", "items": { "type": "string" } }
+    }
+  },
+  "self_heal": true,
+  "prompt_schema": null,
+  "llm_extract_prompt": null,
+  "version": 1,
+  "updated_at": 1747267200.0
+}

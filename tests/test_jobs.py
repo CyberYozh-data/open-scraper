@@ -6,6 +6,13 @@ from unittest.mock import Mock, AsyncMock
 
 from src.jobs import JobRecord, InMemoryJobQueue, JobRunner, get_job_queue
 from src.schemas import ScrapeRequest, ScrapeResponse, ScrapeMeta
+from src.sessions.models import SessionCreateRequest
+from src.sessions.store import InMemorySessionStore
+
+
+@pytest.fixture
+def fresh_session_store():
+    return InMemorySessionStore(max_sessions=4)
 
 
 class TestJobRecord:
@@ -162,13 +169,13 @@ class TestInMemoryJobQueue:
         """request_cancel sets JobRecord.cancelled and returns True for active jobs."""
         queue = InMemoryJobQueue()
         job_id = await queue.submit([ScrapeRequest(url="https://example.com")])
-        rec = await queue.get(job_id)
-        assert rec.cancelled is False
+        job_record = await queue.get(job_id)
+        assert job_record.cancelled is False
 
         ok = await queue.request_cancel(job_id)
         assert ok is True
-        rec2 = await queue.get(job_id)
-        assert rec2.cancelled is True
+        updated_record = await queue.get(job_id)
+        assert updated_record.cancelled is True
 
     @pytest.mark.asyncio
     async def test_request_cancel_idempotent_on_already_cancelled(self):
@@ -805,3 +812,248 @@ class TestGetJobQueue:
         queue2 = get_job_queue()
 
         assert queue1 is queue2
+
+
+class TestJobRunnerSession:
+    @pytest.mark.asyncio
+    async def test_process_page_with_session_loads_and_writes_storage_state(
+        self, fresh_session_store, monkeypatch
+    ):
+        session_record = await fresh_session_store.create(SessionCreateRequest())
+        await fresh_session_store.update_storage_state(
+            session_record.session_id,
+            {"cookies": [{"name": "sid", "value": "abc"}], "origins": []},
+        )
+
+        monkeypatch.setattr("src.jobs.get_session_store", lambda: fresh_session_store)
+
+        captured: dict = {}
+
+        async def fake_submit(job, *, job_timeout_ms=None):
+            captured.update(job)
+            return {
+                "ok": True,
+                "result": {
+                    "request_id": "req_1",
+                    "took_ms": 10,
+                    "meta": {
+                        "url": "https://x.com",
+                        "device": "desktop",
+                        "proxy_type": "none",
+                        "proxy_pool_id": None,
+                        "status_code": 200,
+                        "retries": 0,
+                    },
+                    "data": None,
+                    "raw_html": None,
+                    "screenshot_base64": None,
+                    "warnings": [],
+                },
+                "storage_state": {
+                    "cookies": [
+                        {"name": "sid", "value": "abc"},
+                        {"name": "new", "value": "xyz"},
+                    ],
+                    "origins": [],
+                },
+            }
+
+        monkeypatch.setattr("src.jobs.worker_pool.submit", fake_submit)
+
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=1)
+
+        page = ScrapeRequest(url="https://x.com", session_id=session_record.session_id)
+        import asyncio as _asyncio
+        response = await runner._process_page(_asyncio.Semaphore(1), page)
+
+        assert response.warnings == []
+        # storage_state from worker was written back
+        updated = await fresh_session_store.get(session_record.session_id)
+        cookies = {c["name"] for c in updated.storage_state["cookies"]}
+        assert cookies == {"sid", "new"}
+        # The job dict carried storage_state to the worker
+        assert captured["request"]["session_id"] == session_record.session_id
+        assert captured["storage_state"]["cookies"][0]["name"] == "sid"
+
+    @pytest.mark.asyncio
+    async def test_process_page_skips_state_write_on_non_success_status(
+        self, fresh_session_store, monkeypatch
+    ):
+        """Don't clobber session state with a captcha-page state — gate by status_code."""
+        session_record = await fresh_session_store.create(SessionCreateRequest())
+        original_state = {"cookies": [{"name": "sid", "value": "good"}], "origins": []}
+        await fresh_session_store.update_storage_state(session_record.session_id, original_state)
+
+        monkeypatch.setattr("src.jobs.get_session_store", lambda: fresh_session_store)
+
+        async def fake_submit(job, *, job_timeout_ms=None):
+            return {
+                "ok": True,
+                "result": {
+                    "request_id": "req_1",
+                    "took_ms": 10,
+                    "meta": {
+                        "url": "https://x.com",
+                        "device": "desktop",
+                        "proxy_type": "none",
+                        "proxy_pool_id": None,
+                        "status_code": 403,  # blocked / captcha — don't persist this state
+                        "retries": 0,
+                    },
+                    "data": None,
+                    "raw_html": None,
+                    "screenshot_base64": None,
+                    "warnings": ["captcha detected"],
+                },
+                "storage_state": {
+                    "cookies": [{"name": "sid", "value": "bad_captcha_state"}],
+                    "origins": [],
+                },
+            }
+
+        monkeypatch.setattr("src.jobs.worker_pool.submit", fake_submit)
+
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=1)
+
+        page = ScrapeRequest(url="https://x.com", session_id=session_record.session_id)
+        import asyncio as _asyncio
+        await runner._process_page(_asyncio.Semaphore(1), page)
+
+        updated = await fresh_session_store.get(session_record.session_id)
+        assert updated.storage_state == original_state
+
+    @pytest.mark.asyncio
+    async def test_process_page_without_session_skips_lock(
+        self, fresh_session_store, monkeypatch
+    ):
+        """Plain scrape (no session_id) bypasses the session_store entirely."""
+        monkeypatch.setattr("src.jobs.get_session_store", lambda: fresh_session_store)
+
+        async def fake_submit(job, *, job_timeout_ms=None):
+            assert "storage_state" not in job  # no session → no storage_state in envelope
+            return {
+                "ok": True,
+                "result": {
+                    "request_id": "req_1",
+                    "took_ms": 10,
+                    "meta": {
+                        "url": "https://x.com",
+                        "device": "desktop",
+                        "proxy_type": "none",
+                        "proxy_pool_id": None,
+                        "status_code": 200,
+                        "retries": 0,
+                    },
+                    "data": None,
+                    "raw_html": None,
+                    "screenshot_base64": None,
+                    "warnings": [],
+                },
+            }
+
+        monkeypatch.setattr("src.jobs.worker_pool.submit", fake_submit)
+
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=1)
+
+        page = ScrapeRequest(url="https://x.com")  # no session_id
+        import asyncio as _asyncio
+        response = await runner._process_page(_asyncio.Semaphore(1), page)
+        assert response.warnings == []
+
+    @pytest.mark.asyncio
+    async def test_process_page_with_unknown_session_id_returns_warning(
+        self, fresh_session_store, monkeypatch
+    ):
+        """SessionNotFound → ScrapeResponse with warning, not exception."""
+        monkeypatch.setattr("src.jobs.get_session_store", lambda: fresh_session_store)
+
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=1)
+
+        page = ScrapeRequest(url="https://x.com", session_id="sess_nonexistent")
+        response = await runner._process_page(asyncio.Semaphore(1), page)
+
+        assert any("session_not_found" in w for w in response.warnings)
+
+    @pytest.mark.asyncio
+    async def test_process_page_with_expired_session_returns_warning(
+        self, fresh_session_store, monkeypatch
+    ):
+        """SessionExpired → ScrapeResponse with warning, not exception."""
+        # Create + immediately expire via mutable clock
+        clock_ref = [1000.0]
+        fresh_session_store.set_clock(lambda: clock_ref[0])
+        session_record = await fresh_session_store.create(SessionCreateRequest(ttl_seconds=600))
+        clock_ref[0] += 1000  # past TTL
+
+        monkeypatch.setattr("src.jobs.get_session_store", lambda: fresh_session_store)
+
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=1)
+
+        page = ScrapeRequest(url="https://x.com", session_id=session_record.session_id)
+        response = await runner._process_page(asyncio.Semaphore(1), page)
+
+        assert any("session_expired" in w for w in response.warnings)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_processes_for_same_session_serialize(
+        self, fresh_session_store, monkeypatch
+    ):
+        """Two parallel _process_page calls against the same session must NOT overlap inside
+        the worker_pool.submit. The per-session lock enforces this."""
+        session_record = await fresh_session_store.create(SessionCreateRequest())
+        await fresh_session_store.update_storage_state(
+            session_record.session_id, {"cookies": [], "origins": []}
+        )
+
+        monkeypatch.setattr("src.jobs.get_session_store", lambda: fresh_session_store)
+
+        inside = 0
+        max_inside_observed = 0
+
+        async def fake_submit(job, *, job_timeout_ms=None):
+            nonlocal inside, max_inside_observed
+            inside += 1
+            max_inside_observed = max(max_inside_observed, inside)
+            await asyncio.sleep(0.02)  # hold the "inside" window
+            inside -= 1
+            return {
+                "ok": True,
+                "result": {
+                    "request_id": "req",
+                    "took_ms": 10,
+                    "meta": {
+                        "url": "https://x.com",
+                        "device": "desktop",
+                        "proxy_type": "none",
+                        "proxy_pool_id": None,
+                        "status_code": 200,
+                        "retries": 0,
+                    },
+                    "data": None, "raw_html": None,
+                    "screenshot_base64": None, "warnings": [],
+                },
+                "storage_state": {"cookies": [], "origins": []},
+            }
+
+        monkeypatch.setattr("src.jobs.worker_pool.submit", fake_submit)
+
+        queue = InMemoryJobQueue()
+        runner = JobRunner(queue, concurrency=4)
+        sema = asyncio.Semaphore(4)
+
+        page = ScrapeRequest(url="https://x.com", session_id=session_record.session_id)
+        await asyncio.gather(
+            runner._process_page(sema, page),
+            runner._process_page(sema, page),
+            runner._process_page(sema, page),
+        )
+
+        # If the per-session lock works, max_inside_observed must be 1 — never 2 or 3.
+        assert max_inside_observed == 1, (
+            f"per-session lock failed: {max_inside_observed} concurrent worker calls for same session"
+        )

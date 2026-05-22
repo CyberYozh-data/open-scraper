@@ -1,0 +1,68 @@
+{
+  "name": "youtube_video",
+  "source": "youtube",
+  "description": "YouTube watch page. Title/channel/published come from stable <meta>/JSON-LD; views/likes are JS-rendered and self_heal-leaning. Uses mobile_shared proxy; domcontentloaded avoids hanging on YouTube's constant polling (late-hydrated views/likes lean on self_heal).",
+  "kind": "builtin",
+  "url_template": "https://www.youtube.com/watch?v={video_id}",
+  "request_defaults": {
+    "device": "desktop",
+    "proxy_type": "mobile_shared",
+    "stealth": true,
+    "wait_until": "domcontentloaded",
+    "timeout_ms": 60000,
+    "block_assets": true
+  },
+  "locales": {
+    "global": { "domain": "com", "country": "US" }
+  },
+  "default_locale": "global",
+  "parsing_instructions": {
+    "type": "css",
+    "fields": {
+      "title": {
+        "selector": "meta[name='title']",
+        "attr": "content",
+        "required": true
+      },
+      "channel": {
+        "selector": "link[itemprop='name'], span[itemprop='author'] link[itemprop='name']",
+        "attr": "content"
+      },
+      "published_at": {
+        "selector": "meta[itemprop='datePublished'], meta[itemprop='uploadDate']",
+        "attr": "content"
+      },
+      "views": {
+        "selector": "meta[itemprop='interactionCount']",
+        "attr": "content",
+        "post_process": [{ "op": "parse_int" }]
+      },
+      "likes": {
+        "selector": "button[aria-label*='like'] .yt-spec-button-shape-next__button-text-content",
+        "post_process": [{ "op": "parse_int" }]
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "title":        { "type": "string" },
+      "channel":      { "type": "string" },
+      "published_at": { "type": "string" },
+      "views":        { "type": "integer" },
+      "likes":        { "type": "integer" }
+    },
+    "required": ["title"]
+  },
+  "self_heal": true,
+  "prompt_schema": {
+    "title": "video title",
+    "channel": "channel / uploader name",
+    "published_at": "publish date ISO string",
+    "views": "view count as integer",
+    "likes": "like count as integer"
+  },
+  "llm_extract_prompt": null,
+  "version": 1,
+  "updated_at": 1747267200.0
+}

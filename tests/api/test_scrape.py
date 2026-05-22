@@ -42,7 +42,7 @@ def mock_job_queue(mocker):
         ],
     ))
 
-    mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+    mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
     return queue
 
 
@@ -206,7 +206,7 @@ class TestScrapeStatusEndpoint:
             total=1,
             done=0,
         ))
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/job_123")
 
@@ -226,7 +226,7 @@ class TestScrapeStatusEndpoint:
             total=5,
             done=2,
         ))
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/job_123")
 
@@ -246,7 +246,7 @@ class TestScrapeStatusEndpoint:
             total=1,
             done=1,
         ))
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/job_123")
 
@@ -267,7 +267,7 @@ class TestScrapeStatusEndpoint:
             done=0,
             error="Worker error",
         ))
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/job_123")
 
@@ -280,7 +280,7 @@ class TestScrapeStatusEndpoint:
         """GET /scrape/{job_id} for not exists task"""
         queue = AsyncMock()
         queue.get = AsyncMock(return_value=None)
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/non_existent")
 
@@ -298,7 +298,7 @@ class TestScrapeStatusEndpoint:
             total=10,
             done=5,
         ))
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/job_123")
 
@@ -335,7 +335,7 @@ class TestScrapeResultsEndpoint:
             done=1,
             results=results,
         ))
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/job_123/results")
 
@@ -349,7 +349,7 @@ class TestScrapeResultsEndpoint:
         """GET /scrape/{job_id}/results for not exists job"""
         queue = AsyncMock()
         queue.get = AsyncMock(return_value=None)
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/non_existent/results")
 
@@ -365,7 +365,7 @@ class TestScrapeResultsEndpoint:
             total=1,
             done=0,
         ))
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/job_123/results")
 
@@ -383,7 +383,7 @@ class TestScrapeResultsEndpoint:
             total=1,
             done=0,
         ))
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/job_123/results")
 
@@ -400,7 +400,7 @@ class TestScrapeResultsEndpoint:
             done=0,
             error="Worker crashed",
         ))
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/job_123/results")
 
@@ -435,7 +435,7 @@ class TestScrapeResultsEndpoint:
             done=1,
             results=results,
         ))
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/job_123/results")
 
@@ -478,7 +478,7 @@ class TestScrapeResultsEndpoint:
             done=2,
             results=results,
         ))
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.get("/api/v1/scrape/job_123/results")
 
@@ -504,7 +504,7 @@ class TestIntegrationFlows:
             done=0,
         ))
 
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         # 1. Submit
         response = client.post(
@@ -580,7 +580,7 @@ class TestIntegrationFlows:
             ],
         ))
 
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         # Submit
         response = client.post(
@@ -607,7 +607,7 @@ class TestScrapeCancelEndpoint:
             job_id="job_run", status="running", pages=[], total=1, done=0,
         ))
         queue.request_cancel = AsyncMock(return_value=True)
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.delete("/api/v1/scrape/job_run")
         assert response.status_code == 200
@@ -621,7 +621,7 @@ class TestScrapeCancelEndpoint:
             job_id="job_done", status="done", pages=[], total=1, done=1,
         ))
         queue.request_cancel = AsyncMock(return_value=False)
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.delete("/api/v1/scrape/job_done")
         assert response.status_code == 200
@@ -630,7 +630,7 @@ class TestScrapeCancelEndpoint:
     def test_cancel_unknown_job_returns_404(self, client, mocker):
         queue = AsyncMock()
         queue.get = AsyncMock(return_value=None)
-        mocker.patch("src.api.scrape.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
 
         response = client.delete("/api/v1/scrape/job_missing")
         assert response.status_code == 404

@@ -11,3 +11,6 @@ lxml>=5.2
 cssselect>=1.2
 fastapi-mcp>=0.4.0,<0.5.0
 python-socks[asyncio]>=2.8
+# Floor >=1.83.7: excludes CVE-2026-42208 (SQLi, CVSS 9.3) and the
+# compromised 1.82.7/1.82.8 supply-chain releases (March 2026 incident).
+litellm>=1.83.7
