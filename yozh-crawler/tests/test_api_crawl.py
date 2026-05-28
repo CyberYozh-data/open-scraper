@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from typing import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -175,3 +177,139 @@ def test_cancel_already_done_returns_cancelled_false():
 
     assert resp.status_code == 200
     assert resp.json()["cancelled"] is False
+
+
+# ─── GET /crawl/{job_id}/events?slim=… ────────────────────────────────────────
+
+
+def _heavy_page_event() -> dict:
+    """SSE page event that mirrors a real scrape — large base64 PNG + HTML."""
+    return {
+        "type": "page",
+        "page": {
+            "url": "https://example.com/",
+            "parent_url": None,
+            "depth": 0,
+            "fetched_at": 0.0,
+            "took_ms": 100,
+            "status_code": 200,
+            "scrape_response": {
+                "request_id": "r1",
+                "screenshot_base64": "A" * 100_000,
+                "raw_html": "<html>" + ("x" * 50_000) + "</html>",
+                "cleaned_html": "<body>" + ("y" * 50_000) + "</body>",
+                "status_code": 200,
+            },
+            "error": None,
+        },
+    }
+
+
+def _parse_sse_text(text: str) -> list[dict]:
+    """Parse SSE text into a list of {type, data: dict} dicts."""
+    events: list[dict] = []
+    event_type: str | None = None
+    data_lines: list[str] = []
+    for line in text.splitlines():
+        if line == "":
+            if event_type is not None and data_lines:
+                events.append(
+                    {"type": event_type, "data": json.loads("\n".join(data_lines))}
+                )
+            event_type = None
+            data_lines = []
+            continue
+        if line.startswith("event:"):
+            event_type = line[len("event:"):].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[len("data:"):].strip())
+    return events
+
+
+def _events_stream(events: list[dict]) -> AsyncIterator[dict]:
+    """An async generator yielding the given events then closing the stream."""
+    async def _gen() -> AsyncIterator[dict]:
+        for ev in events:
+            yield ev
+
+    return _gen()
+
+
+def test_stream_events_default_keeps_full_payload_for_legacy_consumers():
+    """Default (no ?slim query) must pass the full payload through — the
+    scraper-tester UI depends on screenshot_base64 + raw_html arriving via
+    SSE."""
+    store = MagicMock()
+    store.get.return_value = _make_record("crawl_abc", "running")
+    events = [_heavy_page_event(), {"type": "done", "status": "done"}]
+    store.subscribe = lambda _job_id: _events_stream(events)
+
+    client = _make_client(store)
+    resp = client.get("/crawl/crawl_abc/events")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+
+    parsed = _parse_sse_text(resp.text)
+    page_events = [e for e in parsed if e["type"] == "page"]
+    assert len(page_events) == 1
+    sr = page_events[0]["data"]["page"]["scrape_response"]
+    # Heavy fields survive — backward compatible with scraper-tester UI.
+    assert sr["screenshot_base64"] == "A" * 100_000
+    assert sr["raw_html"].startswith("<html>")
+    assert sr["cleaned_html"].startswith("<body>")
+
+
+def test_stream_events_slim_strips_heavy_payload_fields():
+    """`?slim=true` drops screenshot_base64 / raw_html / cleaned_html so
+    consumers that only need page metadata (like yozh-law-checker's worker)
+    don't get multi-MB SSE frames."""
+    store = MagicMock()
+    store.get.return_value = _make_record("crawl_abc", "running")
+    events = [_heavy_page_event(), {"type": "done", "status": "done"}]
+    store.subscribe = lambda _job_id: _events_stream(events)
+
+    client = _make_client(store)
+    resp = client.get("/crawl/crawl_abc/events?slim=true")
+    assert resp.status_code == 200
+
+    parsed = _parse_sse_text(resp.text)
+    page_events = [e for e in parsed if e["type"] == "page"]
+    assert len(page_events) == 1
+    sr = page_events[0]["data"]["page"]["scrape_response"]
+    assert "screenshot_base64" not in sr
+    assert "raw_html" not in sr
+    assert "cleaned_html" not in sr
+    # Lightweight metadata survives.
+    assert sr["request_id"] == "r1"
+    assert page_events[0]["data"]["page"]["url"] == "https://example.com/"
+
+
+def test_stream_events_slim_passes_non_page_events_through():
+    """stats / done events are already small; slim must not corrupt them."""
+    store = MagicMock()
+    store.get.return_value = _make_record("crawl_abc", "running")
+    events = [
+        {"type": "stats", "stats": {"visited": 5, "queued": 0}},
+        {"type": "done", "status": "done"},
+    ]
+    store.subscribe = lambda _job_id: _events_stream(events)
+
+    client = _make_client(store)
+    resp = client.get("/crawl/crawl_abc/events?slim=true")
+    assert resp.status_code == 200
+
+    parsed = _parse_sse_text(resp.text)
+    by_type = {e["type"]: e["data"] for e in parsed}
+    assert by_type["stats"] == {"type": "stats", "stats": {"visited": 5, "queued": 0}}
+    assert by_type["done"] == {"type": "done", "status": "done"}
+
+
+def test_stream_events_not_found_returns_404():
+    store = MagicMock()
+    store.get.return_value = None
+
+    client = _make_client(store)
+    resp = client.get("/crawl/does_not_exist/events")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "job_not_found"
+

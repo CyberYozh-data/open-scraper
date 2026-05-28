@@ -21,6 +21,37 @@ from .settings import Settings
 log = logging.getLogger(__name__)
 
 
+# Fields too large to include in SSE page events when a slim consumer
+# requests them. They still reach `get_results` via the stored job record.
+_HEAVY_SCRAPE_RESPONSE_FIELDS = ("screenshot_base64", "raw_html", "cleaned_html")
+
+
+def to_slim_page_event(event: dict) -> dict:
+    """Return a copy of `event` with the heavy scrape_response fields removed.
+
+    Multi-MB SSE frames (full-page screenshots base64-encoded, full HTML
+    documents) blow past line-buffer limits in some consumers and starve
+    progress updates. Consumers that only need page metadata can ask for a
+    slim event stream via `?slim=true` on the /events endpoint; the stored
+    job record (served by /results) is unaffected and still carries the
+    full data.
+
+    Non-`page` events and pages without a `scrape_response` pass through
+    unchanged.
+    """
+    if event.get("type") != "page":
+        return event
+    page = event.get("page")
+    if not isinstance(page, dict):
+        return event
+    scrape_response = page.get("scrape_response")
+    if not isinstance(scrape_response, dict):
+        return event
+    slim_sr = {k: v for k, v in scrape_response.items() if k not in _HEAVY_SCRAPE_RESPONSE_FIELDS}
+    slim_page = {**page, "scrape_response": slim_sr}
+    return {**event, "page": slim_page}
+
+
 def _new_job_id() -> str:
     return f"crawl_{secrets.token_hex(12)}"
 

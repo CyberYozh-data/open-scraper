@@ -88,13 +88,23 @@ class PlaywrightRunner:
             )
 
     async def stop(self) -> None:
+        # Must only be called from the worker's own coroutine (between jobs):
+        # the lock is held across browser.close(), so an outside watchdog
+        # invoking stop() while a fetch is in flight would deadlock against
+        # the start() call that fetch performs internally.
         async with self._lock:
-            if self._browser:
-                await self._browser.close()
-            if self._playwright:
-                await self._playwright.stop()
-            self._browser = None
-            self._playwright = None
+            browser, self._browser = self._browser, None
+            playwright, self._playwright = self._playwright, None
+            # Always null the handles first so that even if close() raises
+            # (wedged Chromium, broken WS pipe) the next start() will rebuild
+            # the runner from scratch instead of reusing a dead Browser.
+            if browser:
+                await browser.close()
+            if playwright:
+                await playwright.stop()
+
+    def is_started(self) -> bool:
+        return self._browser is not None
 
     async def resolve_proxy(self, proxy: Optional[ProxyConfig]):
         """Translate a possibly-authenticated SOCKS5 proxy into a Playwright-safe one.

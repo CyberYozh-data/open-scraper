@@ -48,3 +48,86 @@ async def test_subscribe_unknown_job_returns_empty_stream():
     async for ev in store.subscribe("crawl_unknown"):
         events.append(ev)
     assert events == []
+
+
+# ─── slim page-event transform ────────────────────────────────────────────────
+
+
+def testto_slim_page_event_strips_heavy_scrape_response_fields():
+    """SSE consumers that only need page metadata can request a slim variant
+    that drops the multi-MB fields (screenshot_base64, raw_html, cleaned_html)
+    — the full payload still reaches get_results."""
+    from src.jobs import to_slim_page_event
+
+    event = {
+        "type": "page",
+        "page": {
+            "url": "https://example.com/",
+            "took_ms": 1234,
+            "status_code": 200,
+            "scrape_response": {
+                "request_id": "r1",
+                "screenshot_base64": "A" * 100_000,
+                "raw_html": "<html>" + ("x" * 50_000) + "</html>",
+                "cleaned_html": "<body>" + ("y" * 50_000) + "</body>",
+                "status_code": 200,
+            },
+        },
+    }
+    slim = to_slim_page_event(event)
+    sr = slim["page"]["scrape_response"]
+    assert "screenshot_base64" not in sr
+    assert "raw_html" not in sr
+    assert "cleaned_html" not in sr
+    # Lightweight metadata survives
+    assert sr["request_id"] == "r1"
+    assert sr["status_code"] == 200
+    # Top-level page metadata survives
+    assert slim["page"]["url"] == "https://example.com/"
+    assert slim["page"]["took_ms"] == 1234
+
+
+def testto_slim_page_event_is_a_copy_not_a_mutation():
+    """The original event must not be mutated — other subscribers might
+    still need the full payload."""
+    from src.jobs import to_slim_page_event
+
+    event = {
+        "type": "page",
+        "page": {
+            "url": "https://example.com/",
+            "scrape_response": {
+                "screenshot_base64": "A" * 10,
+                "raw_html": "<html/>",
+            },
+        },
+    }
+    _ = to_slim_page_event(event)
+    assert event["page"]["scrape_response"]["screenshot_base64"] == "A" * 10
+    assert event["page"]["scrape_response"]["raw_html"] == "<html/>"
+
+
+def testto_slim_page_event_handles_event_without_scrape_response():
+    """Some pages fail to scrape and have no scrape_response — must not crash."""
+    from src.jobs import to_slim_page_event
+
+    event = {
+        "type": "page",
+        "page": {"url": "https://example.com/", "scrape_response": None, "error": "timeout"},
+    }
+    slim = to_slim_page_event(event)
+    assert slim["page"]["scrape_response"] is None
+    assert slim["page"]["error"] == "timeout"
+
+
+def testto_slim_page_event_passes_through_non_page_events_unchanged():
+    """stats / done / cancelled events are already small; the helper must
+    leave them untouched (and not assume a `page` key exists)."""
+    from src.jobs import to_slim_page_event
+
+    for ev in [
+        {"type": "stats", "stats": {"visited": 3}},
+        {"type": "done", "status": "done"},
+        {"type": "cancelled"},
+    ]:
+        assert to_slim_page_event(ev) == ev

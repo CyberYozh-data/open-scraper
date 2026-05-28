@@ -127,6 +127,30 @@ class TestPlaywrightRunner:
         assert runner._playwright is None
 
     @pytest.mark.asyncio
+    async def test_runner_stop_nulls_handles_even_if_close_raises(self):
+        """A wedged browser.close() must still leave the runner ready to rebuild.
+
+        Without this guarantee an idle-shutdown that hits a broken Chromium
+        would keep ._browser set, and the next idempotent start() would skip
+        re-launching, so the next fetch() reuses a dead Browser handle.
+        """
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+
+        mock_browser = AsyncMock()
+        mock_browser.close.side_effect = RuntimeError("wedged Chromium")
+        mock_playwright = AsyncMock()
+        runner._browser = mock_browser
+        runner._playwright = mock_playwright
+
+        with pytest.raises(RuntimeError, match="wedged Chromium"):
+            await runner.stop()
+
+        # Handles cleared before close() ran, so the next start() will rebuild.
+        assert runner._browser is None
+        assert runner._playwright is None
+        assert runner.is_started() is False
+
+    @pytest.mark.asyncio
     async def test_runner_start_idempotent(self):
         """Double start not create new browser"""
         runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)

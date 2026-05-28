@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Query, Request as FastapiRequest
 from fastapi.responses import StreamingResponse
 
+from ..jobs import to_slim_page_event
 from ..schemas import (
     CancelResponse,
     CrawlJobRecord,
@@ -50,7 +51,18 @@ async def get_crawl_results(job_id: str, app_req: FastapiRequest) -> CrawlJobRec
 
 
 @router.get("/{job_id}/events", operation_id="stream_crawl_events")
-async def stream_events(job_id: str, app_req: FastapiRequest) -> StreamingResponse:
+async def stream_events(
+    job_id: str,
+    app_req: FastapiRequest,
+    slim: bool = Query(
+        default=False,
+        description=(
+            "If true, drop heavy fields (screenshot_base64, raw_html, "
+            "cleaned_html) from page events. Lightweight consumers should "
+            "set this; the full payload remains available via /results."
+        ),
+    ),
+) -> StreamingResponse:
     store = app_req.app.state.job_store
     rec = store.get(job_id)
     if rec is None:
@@ -59,8 +71,9 @@ async def stream_events(job_id: str, app_req: FastapiRequest) -> StreamingRespon
     async def gen():
         try:
             async for event in store.subscribe(job_id):
-                yield f"event: {event.get('type', 'message')}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-                if event.get("type") in ("done", "cancelled"):
+                payload = to_slim_page_event(event) if slim else event
+                yield f"event: {payload.get('type', 'message')}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                if payload.get("type") in ("done", "cancelled"):
                     return
         except asyncio.CancelledError:
             return
