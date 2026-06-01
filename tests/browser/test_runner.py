@@ -651,3 +651,128 @@ class TestCaptchaDetection:
 
         html = "<html><body><h1>Welcome</h1><p>Content</p></body></html>"
         assert runner._looks_like_captcha_or_block(html) is False
+
+
+class TestFetchResultElementStatus:
+    def test_default_is_none(self):
+        result = FetchResult(
+            html="",
+            final_url=None,
+            status_code=None,
+            screenshot_b64=None,
+            ok=True,
+            error=None,
+        )
+        assert result.element_status is None
+
+    def test_can_be_set_to_literal_value(self):
+        result = FetchResult(
+            html="",
+            final_url=None,
+            status_code=None,
+            screenshot_b64=None,
+            ok=True,
+            error=None,
+            element_status="not_requested",
+        )
+        assert result.element_status == "not_requested"
+
+
+class TestCaptureScreenshotLegacyPaths:
+    @pytest.mark.asyncio
+    async def test_screenshot_false_returns_no_screenshot(self):
+        from src.browser.runner import _capture_screenshot
+        page = AsyncMock()
+        png, status = await _capture_screenshot(
+            page,
+            screenshot=False,
+            element_selector=None,
+            effective_block_assets=False,
+        )
+        assert png is None
+        assert status == "no_screenshot"
+        page.screenshot.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_screenshot_true_no_selector_returns_not_requested(self):
+        from src.browser.runner import _capture_screenshot
+        page = AsyncMock()
+        page.screenshot = AsyncMock(return_value=b"\x89PNG fake bytes")
+        page.evaluate = AsyncMock()
+        page.wait_for_load_state = AsyncMock()
+        png, status = await _capture_screenshot(
+            page,
+            screenshot=True,
+            element_selector=None,
+            effective_block_assets=True,  # block_assets on => skip scroll pass
+        )
+        assert png == b"\x89PNG fake bytes"
+        assert status == "not_requested"
+        page.screenshot.assert_called_once()
+        # full_page=True is the load-bearing assertion
+        assert page.screenshot.call_args.kwargs.get("full_page") is True
+
+
+class TestCaptureScreenshotFallbackFailure:
+    @pytest.mark.asyncio
+    async def test_fallback_capture_failure_returns_no_screenshot(self):
+        """Element capture fails (selector matches nothing) and then the
+        full-page fallback ITSELF raises: the helper must still NOT raise — it
+        returns (None, "no_screenshot"). This is the one failure branch the
+        real-Chromium e2e suite cannot trigger."""
+        from src.browser.runner import _capture_screenshot
+        from playwright.async_api import Error as PWError
+
+        page = AsyncMock()
+        locator = MagicMock()
+        locator.count = AsyncMock(return_value=0)  # -> fallback_not_found
+        page.locator = MagicMock(return_value=locator)
+        page.screenshot = AsyncMock(side_effect=PWError("boom"))
+
+        png, status = await _capture_screenshot(
+            page,
+            screenshot=True,
+            element_selector="#x",
+            effective_block_assets=True,  # skip scroll pass -> straight to screenshot
+        )
+        assert png is None
+        assert status == "no_screenshot"
+
+
+class TestComputeElementClip:
+    @pytest.mark.asyncio
+    async def test_rejects_nan_geometry(self):
+        """A NaN coordinate must be rejected (returns None), not slip past the
+        `<= 0` guards into an invalid clip rect that would crash the driver."""
+        from src.browser.runner import _compute_element_clip
+
+        locator = MagicMock()
+        locator.evaluate = AsyncMock(return_value={
+            "x": float("nan"), "y": 0.0, "w": 200.0, "h": 100.0,
+            "docW": 1280.0, "docH": 800.0,
+        })
+        assert await _compute_element_clip(locator) is None
+
+    @pytest.mark.asyncio
+    async def test_rejects_infinite_geometry(self):
+        from src.browser.runner import _compute_element_clip
+
+        locator = MagicMock()
+        locator.evaluate = AsyncMock(return_value={
+            "x": 0.0, "y": 0.0, "w": float("inf"), "h": 100.0,
+            "docW": 1280.0, "docH": 800.0,
+        })
+        assert await _compute_element_clip(locator) is None
+
+    @pytest.mark.asyncio
+    async def test_valid_geometry_returns_clip(self):
+        from src.browser.runner import _compute_element_clip
+
+        locator = MagicMock()
+        locator.evaluate = AsyncMock(return_value={
+            "x": 50.0, "y": 50.0, "w": 200.0, "h": 100.0,
+            "docW": 1280.0, "docH": 800.0,
+        })
+        clip = await _compute_element_clip(locator)
+        assert clip is not None
+        assert clip["width"] > 0 and clip["height"] > 0

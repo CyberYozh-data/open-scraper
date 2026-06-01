@@ -369,10 +369,32 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
             block_assets=settings.block_assets,
             timeout_ms=settings.request_timeout_ms,
         )
+        idle_s = settings.browser_idle_shutdown_s
 
         try:
             while True:
-                job = task_q.get()
+                try:
+                    if idle_s > 0:
+                        job = task_q.get(timeout=idle_s)
+                    else:
+                        job = task_q.get()
+                except pyqueue.Empty:
+                    if runner.is_started():
+                        log.info(
+                            "worker %d idle for %.0fs, closing browser",
+                            worker_id,
+                            idle_s,
+                        )
+                        try:
+                            await runner.stop()
+                        except Exception:  # pylint: disable=broad-except
+                            # A wedged Chromium close() must not kill the
+                            # worker — log and let runner.start() recover
+                            # on the next job. Without this guard a single
+                            # broken browser would crash the worker process
+                            # every idle interval and silently shrink the pool.
+                            log.exception("worker %d failed to close browser cleanly", worker_id)
+                    continue
                 if isinstance(job, dict) and job.get("type") == "STOP":
                     break
 
@@ -445,6 +467,7 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
                             wait_for_selector=request.get("wait_for_selector"),
                             timeout_ms=request.get("timeout_ms"),
                             screenshot=request.get("screenshot", False),
+                            element_selector=request.get("element_selector"),
                             stealth=request.get("stealth", True),
                             block_assets=request.get("block_assets"),
                             proxy_geo=proxy_geo,
@@ -566,6 +589,7 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
                                 "data": data,
                                 "raw_html": raw_html,
                                 "screenshot_base64": screenshot_b64,
+                                "element_screenshot_status": fetch_result.element_status,
                                 "warnings": warnings,
                             },
                             "storage_state": fetch_result.storage_state,

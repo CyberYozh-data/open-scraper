@@ -305,3 +305,70 @@ class TestJobResponses:
         assert response.status == "failed"
         assert response.error == "Worker crashed"
         assert response.results is None
+
+
+class TestScrapeRequestElementSelector:
+    def test_element_selector_defaults_to_none(self):
+        scrape_request = ScrapeRequest(url="https://example.com")
+        assert scrape_request.element_selector is None
+
+    def test_element_selector_accepts_empty_string(self):
+        scrape_request = ScrapeRequest(url="https://example.com", element_selector="")
+        assert scrape_request.element_selector == ""
+
+    def test_element_selector_accepts_valid_css(self):
+        scrape_request = ScrapeRequest(url="https://example.com", element_selector="#main .alert")
+        assert scrape_request.element_selector == "#main .alert"
+
+    def test_element_selector_rejects_too_long(self):
+        with pytest.raises(ValidationError):
+            ScrapeRequest(url="https://example.com", element_selector="x" * 2049)
+
+    def test_element_selector_max_length_boundary(self):
+        scrape_request = ScrapeRequest(url="https://example.com", element_selector="x" * 2048)
+        assert len(scrape_request.element_selector) == 2048
+
+
+class TestScrapeResponseElementStatus:
+    def _meta(self):
+        return ScrapeMeta(
+            url="https://example.com",
+            device="desktop",
+            proxy_type="none",
+        )
+
+    def test_status_defaults_to_none(self):
+        resp = ScrapeResponse(request_id="r1", took_ms=10, meta=self._meta())
+        assert resp.element_screenshot_status is None
+
+    def test_status_accepts_element_value(self):
+        resp = ScrapeResponse(
+            request_id="r1", took_ms=10, meta=self._meta(),
+            element_screenshot_status="element",
+        )
+        assert resp.element_screenshot_status == "element"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "fallback_not_found",
+            "fallback_invalid",
+            "fallback_zero_size",
+            "fallback_timeout",
+            "not_requested",
+            "no_screenshot",
+        ],
+    )
+    def test_status_accepts_all_literal_values(self, value):
+        resp = ScrapeResponse(
+            request_id="r1", took_ms=10, meta=self._meta(),
+            element_screenshot_status=value,
+        )
+        assert resp.element_screenshot_status == value
+
+    def test_status_rejects_bogus_value(self):
+        with pytest.raises(ValidationError):
+            ScrapeResponse(
+                request_id="r1", took_ms=10, meta=self._meta(),
+                element_screenshot_status="bogus",
+            )

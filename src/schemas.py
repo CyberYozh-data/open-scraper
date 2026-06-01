@@ -22,6 +22,15 @@ ScrapeProxyType = Literal["none", "mobile_shared", "mobile", "res_static", "res_
 WaitUntil = Literal["domcontentloaded", "networkidle"]
 Device = Literal["desktop", "mobile"]
 JobStatus = Literal["queued", "running", "done", "failed", "cancelled"]
+ElementScreenshotStatus = Literal[
+    "element",
+    "fallback_not_found",
+    "fallback_invalid",
+    "fallback_zero_size",
+    "fallback_timeout",
+    "not_requested",
+    "no_screenshot",
+]
 
 
 class ProxyItem(BaseModel):
@@ -121,6 +130,19 @@ class ScrapeRequest(BaseModel):
             "block_assets is on."
         ),
     )
+    element_selector: str | None = Field(
+        default=None,
+        max_length=2048,
+        description=(
+            "Optional CSS selector. When set together with `screenshot=true`, "
+            "the returned `screenshot_base64` captures only the matching "
+            "element (plus 24px padding) instead of the full page. If the "
+            "selector does not match, is invalid, or matches a zero-size "
+            "element, the response falls back to the full-page screenshot "
+            "and `element_screenshot_status` reports the reason. Ignored "
+            "when `screenshot=false`."
+        ),
+    )
     stealth: bool = Field(
         default=True,
         description=(
@@ -167,6 +189,19 @@ class ScrapeResponse(BaseModel):
     data: Dict[str, Any] | None = None
     raw_html: str | None = None
     screenshot_base64: str | None = None
+    element_screenshot_status: ElementScreenshotStatus | None = Field(
+        default=None,
+        description=(
+            "Diagnostic field for the element-screenshot mode. None on "
+            "responses produced before the field existed; legacy clients "
+            "that never read it are unaffected. `element` means "
+            "screenshot_base64 is the element crop. Any `fallback_*` value "
+            "means full-page was returned because the element capture "
+            "failed for the named reason. `not_requested` means no selector "
+            "was passed. `no_screenshot` means screenshot=false or capture "
+            "failed entirely (in that case screenshot_base64 is also None)."
+        ),
+    )
     warnings: list[str] = Field(default_factory=list)
 
 

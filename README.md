@@ -232,3 +232,7 @@ yozh-scraper/
 ├── Dockerfile                # scraper image (Playwright base)
 └── .env.example              # scraper env template
 ```
+
+## License
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 CyberYozh.

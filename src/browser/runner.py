@@ -4,6 +4,8 @@ import asyncio
 import base64
 import contextlib
 import logging
+import math
+import time
 from dataclasses import dataclass
 from typing import Any, Optional, Literal
 
@@ -39,6 +41,194 @@ MOBILE = {
     "has_touch": True,
 }
 
+# Element-screenshot timing/padding constants. Not in Settings — per-deploy
+# variation has no realistic use case.
+_ELEMENT_SCROLL_TIMEOUT_MS = 3000
+_ELEMENT_NETWORKIDLE_TIMEOUT_MS = 2000
+_ELEMENT_PADDING_PX = 24
+
+
+async def _fullpage_screenshot(page, *, effective_block_assets: bool) -> bytes:
+    """Scroll-for-lazy-load (when assets aren't blocked) then full-page snap.
+
+    Identical to the inline block that lived in `PlaywrightRunner.fetch` before
+    the Phase D1 refactor.
+    """
+    if not effective_block_assets:
+        try:
+            await page.evaluate(
+                """
+                async () => {
+                  const el = document.scrollingElement
+                    || document.documentElement
+                    || document.body;
+                  if (!el) return;
+                  const step = Math.max(200, window.innerHeight * 0.8);
+                  let guard = 0;
+                  while (
+                    el.scrollTop + window.innerHeight < el.scrollHeight
+                    && guard++ < 200
+                  ) {
+                    el.scrollBy(0, step);
+                    await new Promise(r => setTimeout(r, 120));
+                  }
+                  await new Promise(r => setTimeout(r, 200));
+                  window.scrollTo(0, 0);
+                }
+                """
+            )
+        except PWError:
+            pass
+        try:
+            await page.wait_for_load_state("networkidle", timeout=5000)
+        except PWError:
+            pass
+    return await page.screenshot(full_page=True)
+
+
+async def _compute_element_clip(locator) -> dict | None:
+    """Document-relative clip rectangle for an element, with 24px padding.
+
+    Uses getBoundingClientRect + window.scrollX/Y because `locator.bounding_box()`
+    returns viewport-relative coordinates that are wrong for `position: fixed`
+    or sticky-parent elements after scroll. Clamps to the document's scrollable
+    bounds so Chromium does not reject the clip rectangle.
+
+    Returns None when the element has zero size or the evaluate fails.
+    """
+    try:
+        geom = await locator.evaluate(
+            """el => {
+                const r = el.getBoundingClientRect();
+                return {
+                    x: r.left + window.scrollX,
+                    y: r.top + window.scrollY,
+                    w: r.width,
+                    h: r.height,
+                    docW: document.documentElement.scrollWidth,
+                    docH: document.documentElement.scrollHeight,
+                };
+            }"""
+        )
+    except PWError:
+        return None
+    if not geom:
+        return None
+    # Defense-in-depth: a non-numeric or non-finite coordinate (NaN/Infinity)
+    # would slip past the `<= 0` guards (NaN comparisons are always False) and
+    # later crash the Playwright driver when serialized into the clip rect as
+    # invalid JSON. Real Chromium clamps getBoundingClientRect to finite floats,
+    # so this is unreachable in practice — but it keeps the helper's "never
+    # raises" contract intact for any pathological page. Must run before the
+    # `<= 0` comparison, which would itself raise on a non-numeric value.
+    if not all(
+        isinstance(geom.get(k), (int, float)) and math.isfinite(geom[k])
+        for k in ("x", "y", "w", "h", "docW", "docH")
+    ):
+        return None
+    if geom["w"] <= 0 or geom["h"] <= 0:
+        return None
+    padding = _ELEMENT_PADDING_PX
+    x = max(0.0, geom["x"] - padding)
+    y = max(0.0, geom["y"] - padding)
+    right = min(geom["docW"], geom["x"] + geom["w"] + padding)
+    bottom = min(geom["docH"], geom["y"] + geom["h"] + padding)
+    width = right - x
+    height = bottom - y
+    if width <= 0 or height <= 0:
+        return None
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
+async def _capture_screenshot(
+    page,
+    *,
+    screenshot: bool,
+    element_selector: str | None,
+    effective_block_assets: bool,
+) -> tuple[bytes | None, str]:
+    """Return (png_bytes, status) for the requested screenshot mode.
+
+    Never raises — every documented failure resolves into a returned status.
+    Status strings match `src.schemas.ElementScreenshotStatus`.
+    """
+    if not screenshot:
+        return (None, "no_screenshot")
+
+    if not element_selector:
+        try:
+            png = await _fullpage_screenshot(
+                page, effective_block_assets=effective_block_assets,
+            )
+        except PWError:
+            return (None, "no_screenshot")
+        return (png, "not_requested")
+
+    # Element branch.
+    _elem_start = time.monotonic_ns()
+    fallback_status: str
+    try:
+        element_locator = page.locator(element_selector)
+        count = await element_locator.count()
+    except PWError:
+        fallback_status = "fallback_invalid"
+    else:
+        if count == 0:
+            fallback_status = "fallback_not_found"
+        else:
+            locator = element_locator.first
+            try:
+                await locator.scroll_into_view_if_needed(
+                    timeout=_ELEMENT_SCROLL_TIMEOUT_MS,
+                )
+            except PWError:
+                # A visibility/scroll timeout raises playwright TimeoutError,
+                # a subclass of PWError; both land here.
+                fallback_status = "fallback_timeout"
+            else:
+                try:
+                    await page.wait_for_load_state(
+                        "networkidle",
+                        timeout=_ELEMENT_NETWORKIDLE_TIMEOUT_MS,
+                    )
+                except PWError:
+                    pass
+                clip = await _compute_element_clip(locator)
+                if clip is None:
+                    fallback_status = "fallback_zero_size"
+                else:
+                    try:
+                        png = await page.screenshot(full_page=True, clip=clip)
+                    except PWError:
+                        fallback_status = "fallback_zero_size"
+                    else:
+                        log.info(
+                            "element_capture: selector=%r status=%s elapsed_ms=%d",
+                            element_selector[:200], "element",
+                            (time.monotonic_ns() - _elem_start) // 1_000_000,
+                        )
+                        return (png, "element")
+
+    # Fallback path: full-page (existing behaviour). If the fallback capture
+    # itself raises, return no_screenshot so the response is internally
+    # consistent.
+    try:
+        png = await _fullpage_screenshot(
+            page, effective_block_assets=effective_block_assets,
+        )
+    except PWError:
+        log.warning(
+            "element_capture: fallback screenshot also failed for selector=%r status=%s",
+            element_selector[:200], fallback_status,
+        )
+        return (None, "no_screenshot")
+    log.info(
+        "element_capture: selector=%r status=%s elapsed_ms=%d",
+        element_selector[:200], fallback_status,
+        (time.monotonic_ns() - _elem_start) // 1_000_000,
+    )
+    return (png, fallback_status)
+
 
 @dataclass
 class FetchResult:
@@ -54,6 +244,7 @@ class FetchResult:
     applied_timezone: str | None = None
     applied_accept_language: str | None = None
     storage_state: dict | None = None
+    element_status: str | None = None
 
 
 class PlaywrightRunner:
@@ -292,6 +483,7 @@ class PlaywrightRunner:
         wait_for_selector: str | None,
         timeout_ms: int | None,
         screenshot: bool,
+        element_selector: str | None = None,
         stealth: bool = True,
         block_assets: bool | None = None,
         proxy_geo: dict[str, str] | None = None,
@@ -387,42 +579,14 @@ class PlaywrightRunner:
             status_code = resp.status if resp is not None else None
 
             screenshot_b64 = None
-            if screenshot:
-                # Only scroll-for-lazy-loading when assets are actually loaded —
-                # otherwise it just wastes time on a page where images are blocked.
-                if not effective_block_assets:
-                    try:
-                        await page.evaluate(
-                            """
-                            async () => {
-                              const el = document.scrollingElement
-                                || document.documentElement
-                                || document.body;
-                              if (!el) return;
-                              const step = Math.max(200, window.innerHeight * 0.8);
-                              let guard = 0;
-                              while (
-                                el.scrollTop + window.innerHeight < el.scrollHeight
-                                && guard++ < 200
-                              ) {
-                                el.scrollBy(0, step);
-                                await new Promise(r => setTimeout(r, 120));
-                              }
-                              await new Promise(r => setTimeout(r, 200));
-                              window.scrollTo(0, 0);
-                            }
-                            """
-                        )
-                    except PWError:
-                        # Page may have navigated away or DOM is not ready —
-                        # screenshot from whatever we have is still useful.
-                        pass
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=5000)
-                    except PWError:
-                        pass
-                screenshot_png = await page.screenshot(full_page=True)
-                screenshot_b64 = base64.b64encode(screenshot_png).decode("ascii")
+            png, element_status = await _capture_screenshot(
+                page,
+                screenshot=screenshot,
+                element_selector=element_selector,
+                effective_block_assets=effective_block_assets,
+            )
+            if png is not None:
+                screenshot_b64 = base64.b64encode(png).decode("ascii")
 
             new_storage_state = None
             if storage_state is not None:
@@ -439,6 +603,7 @@ class PlaywrightRunner:
                 ok=not captcha_detected,
                 error="Captcha/block detected by heuristic" if captcha_detected else None,
                 storage_state=new_storage_state,
+                element_status=element_status,
             ))
 
         except PWError as e:

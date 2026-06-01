@@ -96,6 +96,40 @@ class Settings(BaseSettings):
         alias="JOBS_ENABLED",
         description="Enable background job runner for batch scraping.",
     )
+    job_result_ttl_s: float = Field(
+        default=600.0,
+        ge=0,
+        alias="JOB_RESULT_TTL_S",
+        description=(
+            "Seconds a completed job's result (raw_html + screenshots) is kept "
+            "in memory after it finishes, then evicted by the GC sweep. 0 "
+            "disables time-based eviction. Keep comfortably above how long a "
+            "consumer takes to fetch /results."
+        ),
+    )
+    job_result_max: int = Field(
+        default=1000,
+        ge=0,
+        alias="JOB_RESULT_MAX",
+        description=(
+            "Hard ceiling on retained job records. On overflow the oldest "
+            "finished jobs are evicted first; in-flight jobs are never dropped. "
+            "0 disables the size cap."
+        ),
+    )
+    browser_idle_shutdown_s: float = Field(
+        default=600.0,
+        ge=0,
+        alias="BROWSER_IDLE_SHUTDOWN_S",
+        description=(
+            "Seconds of inactivity after which a worker closes its Chromium "
+            "instance to free memory. The browser is re-launched lazily on "
+            "the next job (cold start adds ~1-2s of latency to that one "
+            "job). Set to 0 to keep browsers warm forever — lower first-job "
+            "latency at the cost of ~400-500 MB RSS per worker held "
+            "permanently."
+        ),
+    )
 
     # =====================
     # Sessions (Phase 1)

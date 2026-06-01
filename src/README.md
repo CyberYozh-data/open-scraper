@@ -265,6 +265,35 @@ curl -s -X POST http://localhost:8000/api/v1/scrape/page \
   }'
 ```
 
+**Element screenshot.** Add `element_selector` to crop the screenshot to a
+single element (plus 24px padding) instead of the full page. Requires
+`screenshot: true` (ignored otherwise). On any failure — no match, invalid
+CSS, zero-size element, or a scroll/visibility timeout — the response falls
+back to a full-page screenshot and reports why in `element_screenshot_status`.
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/scrape/page \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com",
+    "proxy_type": "none",
+    "screenshot": true,
+    "element_selector": "#main .alert"
+  }'
+```
+
+The response carries a diagnostic `element_screenshot_status`:
+
+| `element_screenshot_status` | Meaning |
+|------------------------------|---------|
+| `element`            | `screenshot_base64` is the cropped element                                   |
+| `fallback_not_found` | selector matched nothing → full-page screenshot                             |
+| `fallback_invalid`   | selector was invalid CSS → full-page screenshot                            |
+| `fallback_zero_size` | element had zero rendered size → full-page screenshot                       |
+| `fallback_timeout`   | element could not be scrolled into view in time → full-page screenshot      |
+| `not_requested`      | no `element_selector` given → normal full-page screenshot                   |
+| `no_screenshot`      | `screenshot: false`, or capture failed entirely (`screenshot_base64` is `null`) |
+
 ---
 
 ### 8) Device emulation (mobile)

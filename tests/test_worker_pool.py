@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import queue as pyqueue
+import threading
+
 import pytest
 import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.worker_pool import WorkerPool, WorkerPoolConfig
+from src.worker_pool import WorkerPool, WorkerPoolConfig, _worker_main
 
 
 class TestWorkerPoolConfig:
@@ -251,3 +255,134 @@ class TestWorkerProcess:
         assert looks_like_proxy_failure(None, "tunnel failed") is True
         assert looks_like_proxy_failure(None, "connection timeout") is True
         assert looks_like_proxy_failure(None, "normal error") is False
+
+
+def _make_worker_mocks(element_status: str | None = None):
+    """
+    Build the mock objects needed to run _worker_main in a thread without
+    a real browser or proxy.  Returns (mock_runner_class, mock_runner_instance,
+    mock_proxy_resolver) ready for use with patch().
+    """
+    from src.browser.runner import FetchResult
+
+    fetch_result = FetchResult(
+        html="<html></html>",
+        final_url="https://example.com",
+        status_code=200,
+        screenshot_b64=None,
+        ok=True,
+        error=None,
+        element_status=element_status,
+    )
+
+    mock_runner = MagicMock()
+    mock_runner.is_started.return_value = False
+    mock_runner.fetch = AsyncMock(return_value=fetch_result)
+    mock_runner.stop = AsyncMock()
+    mock_runner_class = MagicMock(return_value=mock_runner)
+
+    mock_session = MagicMock()
+    mock_session.max_attempts.return_value = 1
+    mock_session.current_proxy.return_value = None
+    mock_proxy_resolver = MagicMock()
+    mock_proxy_resolver.open_session = AsyncMock(return_value=mock_session)
+
+    return mock_runner_class, mock_runner, mock_proxy_resolver
+
+
+def _run_worker_with_job(job: dict, mock_runner_class, mock_proxy_resolver) -> dict:
+    """
+    Run _worker_main in a thread with patched dependencies, push *job* followed
+    by a STOP sentinel, and return the first result put on result_q.
+    Raises RuntimeError if the worker produces no output within 10 s.
+    """
+    task_q: pyqueue.Queue = pyqueue.Queue()
+    result_q: pyqueue.Queue = pyqueue.Queue()
+
+    task_q.put(job)
+    task_q.put({"type": "STOP"})
+
+    with (
+        patch("src.browser.runner.PlaywrightRunner", mock_runner_class),
+        patch("src.proxy.resolver.proxy_resolver", mock_proxy_resolver),
+    ):
+        worker_thread = threading.Thread(target=_worker_main, args=(task_q, result_q, 0), daemon=True)
+        worker_thread.start()
+        worker_thread.join(timeout=10)
+
+    if worker_thread.is_alive():
+        raise RuntimeError("Worker thread still alive after 10s — likely hung in _worker_main")
+    if result_q.empty():
+        raise RuntimeError("Worker produced no result within timeout")
+    return result_q.get_nowait()
+
+
+class TestWorkerPoolElementSelectorPropagation:
+    """Verify that element_selector is wired through _worker_main end-to-end."""
+
+    def test_request_element_selector_reaches_runner_fetch(self):
+        """element_selector from the job request is forwarded to runner.fetch()."""
+        mock_runner_class, mock_runner, mock_proxy_resolver = _make_worker_mocks(
+            element_status=None
+        )
+
+        job = {
+            "job_id": "elem-sel-test",
+            "request": {
+                "url": "https://example.com",
+                "proxy_type": "none",
+                "element_selector": "#main",
+            },
+        }
+        _run_worker_with_job(job, mock_runner_class, mock_proxy_resolver)
+
+        assert mock_runner.fetch.called, "runner.fetch was not called"
+        assert mock_runner.fetch.call_args.kwargs["element_selector"] == "#main"
+
+    def test_response_dict_includes_element_screenshot_status(self):
+        """element_status on FetchResult is surfaced as element_screenshot_status in the result."""
+        mock_runner_class, mock_runner, mock_proxy_resolver = _make_worker_mocks(
+            element_status="element"
+        )
+
+        job = {
+            "job_id": "elem-status-test",
+            "request": {
+                "url": "https://example.com",
+                "proxy_type": "none",
+                "element_selector": "#main",
+            },
+        }
+        worker_result = _run_worker_with_job(job, mock_runner_class, mock_proxy_resolver)
+
+        assert worker_result["ok"] is True
+        result = worker_result["result"]
+        assert "element_screenshot_status" in result, (
+            f"element_screenshot_status missing from result dict; keys={list(result.keys())}"
+        )
+        assert result["element_screenshot_status"] == "element"
+
+    def test_element_status_none_surfaces_as_none(self):
+        """A FetchResult with element_status=None must surface
+        element_screenshot_status=None in the result dict — guards against a
+        future `if element_status:` truthiness guard dropping the key."""
+        mock_runner_class, mock_runner, mock_proxy_resolver = _make_worker_mocks(
+            element_status=None
+        )
+
+        job = {
+            "job_id": "elem-status-none-test",
+            "request": {
+                "url": "https://example.com",
+                "proxy_type": "none",
+                "element_selector": "#main",
+            },
+        }
+        worker_result = _run_worker_with_job(job, mock_runner_class, mock_proxy_resolver)
+
+        assert worker_result["ok"] is True
+        result = worker_result["result"]
+        assert "element_screenshot_status" in result, (
+            f"element_screenshot_status key missing from result dict; keys={list(result.keys())}"
+        )
+        assert result["element_screenshot_status"] is None

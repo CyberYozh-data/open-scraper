@@ -39,15 +39,17 @@ async def lifespan(app: FastAPI):
         await job_runner.start()
 
     sessions_gc_task = asyncio.create_task(_sessions_gc_loop())
+    jobs_gc_task = asyncio.create_task(_jobs_gc_loop())
     log.info("started workers=%d queue=%d", settings.workers, settings.queue_maxsize)
 
     yield
 
-    sessions_gc_task.cancel()
-    try:
-        await sessions_gc_task
-    except asyncio.CancelledError:
-        pass
+    for gc_task in (sessions_gc_task, jobs_gc_task):
+        gc_task.cancel()
+        try:
+            await gc_task
+        except asyncio.CancelledError:
+            pass
     if settings.jobs_enabled:
         await job_runner.stop()
     worker_pool.stop()
@@ -62,6 +64,21 @@ async def _sessions_gc_loop() -> None:
             return
         except Exception:  # pylint: disable=broad-except
             logging.getLogger(__name__).exception("sessions GC sweep failed")
+
+
+async def _jobs_gc_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(60)
+            evicted = await job_queue.sweep_expired()
+            if evicted:
+                logging.getLogger(__name__).info(
+                    "jobs GC evicted %d expired result(s)", len(evicted)
+                )
+        except asyncio.CancelledError:
+            return
+        except Exception:  # pylint: disable=broad-except
+            logging.getLogger(__name__).exception("jobs GC sweep failed")
 
 
 def disable_cors(app: FastAPI) -> FastAPI:

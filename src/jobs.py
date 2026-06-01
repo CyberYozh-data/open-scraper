@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
-from typing import Dict
+from typing import Callable, Dict
 
 from src.schemas import JobStatus, ScrapeRequest, ScrapeResponse
 from src.sessions.store import (
@@ -29,6 +30,12 @@ class JobRecord:
     error: str | None = None
     results: list[ScrapeResponse] | None = None
     cancelled: bool = False
+    # Wall-clock time the job reached a terminal status (done/failed/cancelled).
+    # None while queued/running. Drives result-store eviction.
+    finished_at: float | None = None
+
+
+_TERMINAL_STATUSES = ("done", "failed", "cancelled")
 
 
 def _calculate_worker_timeout(page_timeout_ms: int | None) -> int | None:
@@ -61,10 +68,26 @@ def _is_successful_status(status_code: int | None) -> bool:
 
 
 class InMemoryJobQueue:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        result_ttl_s: float | None = None,
+        max_jobs: int | None = None,
+    ) -> None:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._jobs: Dict[str, JobRecord] = {}
         self._lock = asyncio.Lock()
+        self._clock: Callable[[], float] = time.time
+        # Completed job records hold the full payload (raw_html + base64
+        # screenshots). Without eviction the store grows unbounded for the
+        # process lifetime. TTL evicts a record this many seconds after it
+        # *finishes* (not after it's fetched), so consumers must read /results
+        # within the window; max_jobs is a hard ceiling under burst. <=0 disables.
+        self._result_ttl_s = settings.job_result_ttl_s if result_ttl_s is None else result_ttl_s
+        self._max_jobs = settings.job_result_max if max_jobs is None else max_jobs
+
+    def set_clock(self, clock: Callable[[], float]) -> None:
+        self._clock = clock
 
     def clear(self):
         """
@@ -83,8 +106,50 @@ class InMemoryJobQueue:
         job_record = JobRecord(job_id=job_id, status="queued", pages=pages, total=len(pages))
         async with self._lock:
             self._jobs[job_id] = job_record
+            self._evict_over_capacity_locked()
         await self._queue.put(job_id)
         return job_id
+
+    def _evict_over_capacity_locked(self) -> None:
+        """Drop the oldest *terminal* records once the store exceeds max_jobs.
+
+        In-flight (queued/running) jobs are never evicted — the cap may be
+        temporarily exceeded by concurrent in-flight work, which is bounded by
+        worker concurrency. Caller must hold ``self._lock``.
+        """
+        if self._max_jobs <= 0:
+            return
+        overflow = len(self._jobs) - self._max_jobs
+        if overflow <= 0:
+            return
+        terminal = sorted(
+            (job_id for job_id, job_record in self._jobs.items() if job_record.finished_at is not None),
+            key=lambda job_id: self._jobs[job_id].finished_at,
+        )
+        for job_id in terminal[:overflow]:
+            del self._jobs[job_id]
+        if len(terminal) < overflow:
+            # All terminal records dropped but still over the cap: the excess is
+            # in-flight work we must not evict. Surface it — this is the
+            # unbounded-growth scenario the cap exists to prevent.
+            log.warning(
+                "job store over capacity (%d > %d) with %d in-flight jobs unevictable",
+                len(self._jobs), self._max_jobs, len(self._jobs) - len(terminal),
+            )
+
+    async def sweep_expired(self) -> list[str]:
+        """Remove terminal job records whose result has outlived the TTL."""
+        if self._result_ttl_s <= 0:
+            return []
+        cutoff = self._clock() - self._result_ttl_s
+        async with self._lock:
+            expired = [
+                job_id for job_id, job_record in self._jobs.items()
+                if job_record.finished_at is not None and job_record.finished_at <= cutoff
+            ]
+            for job_id in expired:
+                del self._jobs[job_id]
+        return expired
 
     async def get(self, job_id: str) -> JobRecord | None:
         async with self._lock:
@@ -95,7 +160,7 @@ class InMemoryJobQueue:
         are skipped and the job transitions to ``status="cancelled"``."""
         async with self._lock:
             job_record = self._jobs.get(job_id)
-            if job_record is None or job_record.status in ("done", "failed", "cancelled"):
+            if job_record is None or job_record.status in _TERMINAL_STATUSES:
                 log.info("cancel request ignored job_id=%s reason=%s", job_id,
                          "not_found" if job_record is None else f"already_{job_record.status}")
                 return False
@@ -122,6 +187,8 @@ class InMemoryJobQueue:
                 return
             if status is not None:
                 job_record.status = status
+                if status in _TERMINAL_STATUSES and job_record.finished_at is None:
+                    job_record.finished_at = self._clock()
             if done is not None:
                 job_record.done = done
             if error is not None:
