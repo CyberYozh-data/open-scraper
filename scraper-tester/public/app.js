@@ -30,12 +30,16 @@ async function loadServerConfig() {
 }
 
 async function loadCountries() {
-  const selects = ['s-geo-country', 'b-geo-country', 'c-geo-country', 'cp-geo-country', 'pw-geo-country', 'sess-geo-country']
+  const selects = ['s-geo-country', 'b-geo-country', 'c-geo-country', 'cp-geo-country', 'pw-geo-country', 'sess-geo-country', 'se-geo-country']
     .map(id => document.getElementById(id)).filter(Boolean);
   if (!selects.length) return;
 
   const { ok, data } = await apiCall('/api/v1/proxies/countries');
-  if (!ok || !data?.countries) return;
+  if (!ok || !data?.countries) {
+    // Surface the failure: a silent return here is what hid the wrong-host bug.
+    console.warn('loadCountries: could not load proxy countries (geo dropdowns stay empty)');
+    return;
+  }
 
   const sorted = [...data.countries].sort((a, b) => a.name.localeCompare(b.name));
   const optionsHtml = '<option value="">— any —</option>' +
@@ -47,7 +51,9 @@ async function loadCountries() {
     if (prev) sel.value = prev;
   });
 }
-loadCountries();
+// NB: countries are loaded after restoreState() (below), once the Scraper URL
+// points at the real target — calling it here would race the URL restore and
+// hit the wrong host (404), leaving every geo dropdown empty.
 
 // Populate the Scrape Page "Preset" dropdown (loads a preset's CSS/XPath
 // fields into the Extraction form — selectors only; URL/proxy stay the
@@ -189,6 +195,70 @@ function syntaxHighlight(obj) {
   );
 }
 
+// Collapsible markdown block with a Rendered/Source toggle + Copy. Rendered
+// view uses the vendored `marked`; if it's unavailable we degrade to source.
+function makeMarkdownDetails(openKeys, key, label, text) {
+  const wrap = document.createElement('details');
+  wrap.dataset.key = key;
+  if (openKeys.has(key)) wrap.setAttribute('open', '');
+  wrap.style.cssText = 'margin-bottom:0.5rem';
+
+  const summary = document.createElement('summary');
+  summary.className = 'details-summary';
+  summary.style.cssText = 'cursor:pointer;padding:0.5rem 0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:0.5rem;list-style:none';
+  summary.innerHTML = `<span class="details-chevron" style="display:inline-block;transition:transform 0.15s;font-size:10px">▶</span><span style="flex:1">${label} (${text.length} chars)</span>`;
+
+  const rendered = document.createElement('div');
+  rendered.style.cssText = 'max-height:400px;overflow:auto;background:var(--bg-primary);border:1px solid var(--border);border-top:none;padding:0.75rem;font-size:13px;border-radius:0 0 var(--radius-sm) var(--radius-sm);color:var(--text-primary)';
+  const source = document.createElement('pre');
+  source.style.cssText = 'max-height:400px;overflow:auto;background:var(--bg-primary);border:1px solid var(--border);border-top:none;padding:0.75rem;font-size:11px;border-radius:0 0 var(--radius-sm) var(--radius-sm);color:var(--text-primary);white-space:pre-wrap;word-break:break-word;display:none';
+  source.textContent = text;
+  // Markdown is built from arbitrary scraped pages and marked passes raw
+  // HTML through, so the rendered view must go through DOMPurify.
+  if (window.marked && window.DOMPurify) {
+    rendered.innerHTML = window.DOMPurify.sanitize(window.marked.parse(text), {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: ['style'],  // keep hostile pages from restyling the tester UI
+    });
+  } else {
+    rendered.textContent = text;  // graceful fallback when vendor libs are offline
+  }
+
+  const btnToggle = document.createElement('button');
+  btnToggle.textContent = 'Source';
+  btnToggle.className = 'btn-secondary btn-sm';
+  btnToggle.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const showSrc = source.style.display === 'none';
+    source.style.display = showSrc ? 'block' : 'none';
+    rendered.style.display = showSrc ? 'none' : 'block';
+    btnToggle.textContent = showSrc ? 'Rendered' : 'Source';
+  });
+
+  const btnCopy = document.createElement('button');
+  btnCopy.textContent = 'Copy';
+  btnCopy.className = 'btn-secondary btn-sm';
+  btnCopy.addEventListener('click', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+      btnCopy.textContent = 'Copied!';
+      setTimeout(() => { btnCopy.textContent = 'Copy'; }, 1200);
+    } catch (err) {
+      btnCopy.textContent = 'Failed';
+    }
+  });
+
+  summary.appendChild(btnToggle);
+  summary.appendChild(btnCopy);
+  wrap.appendChild(summary);
+  wrap.appendChild(rendered);
+  wrap.appendChild(source);
+  return wrap;
+}
+
 function showResult(elId, data) {
   const el = document.getElementById(elId);
 
@@ -308,6 +378,29 @@ function showResult(elId, data) {
         code.style.cssText = 'max-height:400px;overflow:auto;background:var(--bg-primary);border:1px solid var(--border);border-top:none;padding:0.75rem;font-size:11px;border-radius:0 0 var(--radius-sm) var(--radius-sm);color:var(--text-primary)';
         code.textContent = r.raw_html;
         wrap.appendChild(code);
+        el.appendChild(wrap);
+      }
+
+      // Markdown / Fit Markdown
+      if (r.markdown) {
+        el.appendChild(makeMarkdownDetails(openKeys, `md-${r.request_id}`, 'Markdown', r.markdown));
+      }
+      if (r.fit_markdown) {
+        el.appendChild(makeMarkdownDetails(openKeys, `fitmd-${r.request_id}`, 'Fit Markdown', r.fit_markdown));
+      }
+      if (r.markdown_references) {
+        el.appendChild(makeMarkdownDetails(openKeys, `mdref-${r.request_id}`, 'References', r.markdown_references));
+      }
+      if (Array.isArray(r.links) && r.links.length) {
+        const wrap = document.createElement('details');
+        wrap.dataset.key = `links-${r.request_id}`;
+        if (openKeys.has(wrap.dataset.key)) wrap.setAttribute('open', '');
+        wrap.style.cssText = 'margin-bottom:0.5rem';
+        wrap.innerHTML = `<summary class="details-summary" style="cursor:pointer;padding:0.5rem 0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:0.5rem;list-style:none"><span class="details-chevron" style="display:inline-block;transition:transform 0.15s;font-size:10px">▶</span><span>Links (${r.links.length})</span></summary>`;
+        const pre = document.createElement('pre');
+        pre.style.cssText = 'max-height:400px;overflow:auto;background:var(--bg-primary);border:1px solid var(--border);border-top:none;padding:0.75rem;font-size:11px;border-radius:0 0 var(--radius-sm) var(--radius-sm);color:var(--text-primary);white-space:pre-wrap;word-break:break-word';
+        pre.textContent = r.links.join('\n');
+        wrap.appendChild(pre);
         el.appendChild(wrap);
       }
 
@@ -723,6 +816,25 @@ function buildScrapePayload() {
     proxy_type: document.getElementById('s-proxy-type').value,
   };
 
+  // Markdown-family formats. Server unions these with the raw_html /
+  // screenshot booleans, so we only list the markdown outputs here.
+  const formats = [];
+  if (document.getElementById('s-markdown').checked) formats.push('markdown');
+  if (document.getElementById('s-fit-markdown').checked) formats.push('fit_markdown');
+  if (formats.length) {
+    payload.formats = formats;
+    const mdOpts = {
+      only_main_content: document.getElementById('s-md-only-main').checked,
+      content_filter: document.getElementById('s-md-content-filter').value,
+      citations: document.getElementById('s-md-citations').checked,
+      ignore_links: document.getElementById('s-md-ignore-links').checked,
+      ignore_images: document.getElementById('s-md-ignore-images').checked,
+    };
+    const instruction = document.getElementById('s-md-filter-instruction').value.trim();
+    if (instruction) mdOpts.filter_instruction = instruction;
+    payload.markdown_options = mdOpts;
+  }
+
   const waitSelector = document.getElementById('s-wait-selector').value.trim();
   if (waitSelector) payload.wait_for_selector = waitSelector;
 
@@ -819,6 +931,105 @@ document.getElementById('btnScrape').addEventListener('click', async () => {
 
   await loadServerConfig();
   pollJob(data.job_id, 'scrape-status', 'scrape-result', 1, 'btnCancelScrape');
+});
+
+// ─── Search ───────────────────────────────────────────────────────────────────
+(() => {
+  const scrapeCb = document.getElementById('se-scrape');
+  const optsRow = document.getElementById('se-scrape-options-row');
+  if (scrapeCb && optsRow) {
+    const sync = () => { optsRow.style.display = scrapeCb.checked ? '' : 'none'; };
+    scrapeCb.addEventListener('change', sync);
+    sync();
+  }
+})();
+
+function renderSearchResults(el, data) {
+  el.innerHTML = '';
+  if (!data || !Array.isArray(data.results)) {
+    showResult('search-result', data);
+    return;
+  }
+  const took = typeof data.took_ms === 'number'
+    ? (data.took_ms >= 1000 ? `${(data.took_ms / 1000).toFixed(1)}s` : `${data.took_ms}ms`)
+    : null;
+  const summary = document.createElement('div');
+  summary.style.cssText = 'margin:0 0 0.6rem;font-size:12px;color:var(--text-secondary)';
+  summary.innerHTML = `<b style="color:var(--text-primary)">${data.count}</b> result${data.count === 1 ? '' : 's'} for “${escapeHtml(data.query)}”`
+    + (took ? ` <span style="color:var(--text-muted)">in ${took}</span>` : '');
+  el.appendChild(summary);
+
+  if (Array.isArray(data.warnings) && data.warnings.length) {
+    const w = document.createElement('div');
+    w.style.cssText = 'margin:0 0 0.6rem;padding:0.4rem 0.6rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:11px;color:var(--color-orange,#b45309)';
+    w.textContent = '⚠ ' + data.warnings.join(' · ');
+    el.appendChild(w);
+  }
+
+  data.results.forEach((r) => {
+    const card = document.createElement('div');
+    card.style.cssText = 'margin-bottom:0.6rem;padding:0.5rem 0.7rem;border:1px solid var(--border);border-radius:var(--radius-sm)';
+    const a = document.createElement('a');
+    a.href = r.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    a.textContent = r.title || r.url;
+    a.style.cssText = 'font-weight:600;color:var(--color-blue);text-decoration:none';
+    card.appendChild(a);
+    const urlLine = document.createElement('div');
+    urlLine.style.cssText = 'font-size:11px;color:var(--text-muted);word-break:break-all;margin:0.15rem 0';
+    urlLine.textContent = r.url;
+    card.appendChild(urlLine);
+    if (r.snippet) {
+      const s = document.createElement('div');
+      s.style.cssText = 'font-size:12px;color:var(--text-secondary)';
+      s.textContent = r.snippet;
+      card.appendChild(s);
+    }
+    if (r.scrape) {
+      const det = document.createElement('details');
+      det.style.cssText = 'margin-top:0.4rem';
+      det.innerHTML = '<summary class="details-summary" style="cursor:pointer;font-size:11px;color:var(--text-secondary);list-style:none">▶ scrape response</summary>';
+      const pre = document.createElement('pre');
+      pre.style.cssText = 'max-height:300px;overflow:auto;background:var(--bg-primary);border:1px solid var(--border);padding:0.5rem;font-size:11px;border-radius:var(--radius-sm);white-space:pre-wrap;word-break:break-word';
+      pre.innerHTML = syntaxHighlight(r.scrape);
+      det.appendChild(pre);
+      card.appendChild(det);
+    }
+    el.appendChild(card);
+  });
+}
+
+document.getElementById('btnSearch').addEventListener('click', async () => {
+  const query = document.getElementById('se-query').value.trim();
+  if (!query) { alert('Query is required'); return; }
+  const payload = { query, limit: Number(document.getElementById('se-limit').value) || 10 };
+  payload.engine = document.getElementById('se-engine').value;
+  const locale = document.getElementById('se-locale').value;
+  if (locale) payload.locale = locale;
+  if (document.getElementById('se-scrape').checked) {
+    payload.scrape = true;
+    const raw = document.getElementById('se-scrape-options').value.trim();
+    if (raw) {
+      try { payload.scrape_options = JSON.parse(raw); }
+      catch { alert('Scrape options must be valid JSON'); return; }
+    }
+  }
+  const proxy = collectProxy('se');
+  if (proxy === false) return;   // invalid (missing pool) — already alerted
+  if (proxy) Object.assign(payload, proxy);
+
+  setStatus('search-status', 'queued', 'Searching...');
+  document.getElementById('search-result').innerHTML = '<span class="placeholder">Searching…</span>';
+  const { data, ok } = await apiCall('/api/v1/search', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  if (!ok) {
+    setStatus('search-status', 'failed', 'Search failed');
+    showResult('search-result', data);
+    return;
+  }
+  setStatus('search-status', 'done', `${data.count} result(s)`);
+  renderSearchResults(document.getElementById('search-result'), data);
 });
 
 // ─── Batch Scrape ─────────────────────────────────────────────────────────────
@@ -1025,6 +1236,18 @@ renderRecentJobs();
 
 // Reset MCP session whenever the target or its URL changes — sessions don't
 // port between the two backends.
+// Reveal the LLM filter instruction field only when the llm content filter
+// is selected. Fires on restore too (restoreState re-dispatches `change`).
+(() => {
+  const sel = document.getElementById('s-md-content-filter');
+  const row = document.getElementById('s-md-instruction-row');
+  if (sel && row) {
+    const sync = () => { row.style.display = sel.value === 'llm' ? '' : 'none'; };
+    sel.addEventListener('change', sync);
+    sync();
+  }
+})();
+
 document.getElementById('scraperUrl').addEventListener('change', () => {
   mcpSessionId = null;
 });
@@ -1112,7 +1335,9 @@ async function wireProxyPool(prefix) {
   if (!geoFields || !poolField || !poolSelect || !poolInput || !hint) return;
   const buyEl = ensureBuyButtonEl(poolField, `${prefix}-buy-proxy`);
 
-  if (type === 'none') {
+  // '' is the Search tab's "default (preset)" sentinel — no override, so the
+  // pool/geo controls are as irrelevant as they are for 'none'.
+  if (type === 'none' || type === '') {
     geoFields.style.display = 'none';
     poolField.style.display = 'none';
     buyEl.innerHTML = '';
@@ -1173,6 +1398,37 @@ function initProxyPool(prefix, { onChange } = {}) {
 }
 
 initProxyPool('s');
+
+// Read a proxy block into a {proxy_type, proxy_pool_id?, proxy_geo?} object.
+// Returns null for the Search tab's "default (preset)" sentinel (empty type) so
+// the caller omits proxy entirely; returns false on a validation failure (the
+// user was already alerted) so the caller can abort.
+function collectProxy(prefix) {
+  const $ = (suffix) => document.getElementById(`${prefix}-${suffix}`);
+  const type = $('proxy-type').value;
+  if (!type) return null;
+  const proxy = { proxy_type: type };
+  const poolId = $('proxy-pool').value.trim();
+  if (poolId) proxy.proxy_pool_id = poolId;
+  if (type !== 'none' && !poolId) {
+    alert(`Select a Pool ID for proxy type "${type}". If none available, use the "Buy" button to purchase one on CyberYozh.`);
+    return false;
+  }
+  if (type === 'res_rotating') {
+    const cc = $('geo-country').value.trim();
+    const region = $('geo-region').value.trim();
+    const city = $('geo-city').value.trim();
+    if (cc || region || city) {
+      proxy.proxy_geo = {};
+      if (cc) proxy.proxy_geo.country_code = cc.toUpperCase();
+      if (region) proxy.proxy_geo.region = region;
+      if (city) proxy.proxy_geo.city = city;
+    }
+  }
+  return proxy;
+}
+
+initProxyPool('se');
 
 // ─── MCP helpers ─────────────────────────────────────────────────────────────
 function mcpTarget() {
@@ -1426,6 +1682,95 @@ async function crawlerCall(path, options = {}) {
   try { return { ok: res.ok, status: res.status, data: JSON.parse(text) }; }
   catch { return { ok: res.ok, status: res.status, data: text }; }
 }
+
+// ─── Map (fast URL discovery) ─────────────────────────────────────────────────
+function renderMapResults(el, data) {
+  el.innerHTML = '';
+  if (!data || !Array.isArray(data.urls)) {
+    showResult('map-result', data);
+    return;
+  }
+  const stats = data.stats || {};
+  const took = typeof data.took_ms === 'number'
+    ? (data.took_ms >= 1000 ? `${(data.took_ms / 1000).toFixed(1)}s` : `${data.took_ms}ms`)
+    : null;
+  const summary = document.createElement('div');
+  summary.style.cssText = 'margin:0 0 0.6rem;font-size:12px;color:var(--text-secondary)';
+  summary.innerHTML = `<b style="color:var(--text-primary)">${data.count}</b> URL${data.count === 1 ? '' : 's'} `
+    + (took ? `<span style="color:var(--text-muted)">in ${took}</span> ` : '')
+    + `<span style="color:var(--text-muted)">(sitemap ${stats.from_sitemap ?? 0} · page ${stats.from_page ?? 0} · unique ${stats.unique_in_scope ?? 0})</span>`;
+  el.appendChild(summary);
+
+  if (Array.isArray(data.warnings) && data.warnings.length) {
+    const w = document.createElement('div');
+    w.style.cssText = 'margin:0 0 0.6rem;padding:0.4rem 0.6rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:11px;color:var(--color-orange,#b45309)';
+    w.textContent = '⚠ ' + data.warnings.join(' · ');
+    el.appendChild(w);
+  }
+
+  const list = document.createElement('div');
+  list.style.cssText = 'max-height:520px;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm)';
+  data.urls.forEach((u) => {
+    const row = document.createElement('a');
+    row.href = u; row.target = '_blank'; row.rel = 'noopener noreferrer';
+    row.textContent = u;
+    row.style.cssText = 'display:block;padding:0.3rem 0.6rem;font-size:12px;color:var(--color-blue);text-decoration:none;border-bottom:1px solid var(--border);word-break:break-all';
+    list.appendChild(row);
+  });
+  el.appendChild(list);
+}
+
+document.getElementById('btnMap').addEventListener('click', async () => {
+  const seed = normalizeUrl(document.getElementById('mp-seed').value);
+  if (!seed) { alert('Seed URL is required'); return; }
+  const payload = {
+    seed_url: seed,
+    scope: { mode: document.getElementById('mp-scope').value },
+    include_sitemap: document.getElementById('mp-sitemap').checked,
+    include_page_links: document.getElementById('mp-page-links').checked,
+    render: document.getElementById('mp-render').checked,
+    limit: Number(document.getElementById('mp-limit').value) || 1000,
+  };
+  const search = document.getElementById('mp-search').value.trim();
+  if (search) payload.search = search;
+
+  // Proxy (same convention as the Scrape/Crawler tabs).
+  const proxyType = document.getElementById('mp-proxy-type').value;
+  payload.proxy_type = proxyType;
+  const poolId = document.getElementById('mp-proxy-pool').value.trim();
+  if (poolId) payload.proxy_pool_id = poolId;
+  if (proxyType !== 'none' && !poolId) {
+    alert(`Select a Pool ID for proxy type "${proxyType}". If none available, use the "Buy" button to purchase one on CyberYozh.`);
+    return;
+  }
+  if (proxyType === 'res_rotating') {
+    const cc = document.getElementById('mp-geo-country').value.trim();
+    const region = document.getElementById('mp-geo-region').value.trim();
+    const city = document.getElementById('mp-geo-city').value.trim();
+    if (cc || region || city) {
+      payload.proxy_geo = {};
+      if (cc) payload.proxy_geo.country_code = cc.toUpperCase();
+      if (region) payload.proxy_geo.region = region;
+      if (city) payload.proxy_geo.city = city;
+    }
+  }
+
+  setStatus('map-status', 'queued', 'Mapping...');
+  document.getElementById('map-result').innerHTML = '<span class="placeholder">Mapping…</span>';
+  const { data, ok } = await crawlerCall('/api/v1/map', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  if (!ok) {
+    setStatus('map-status', 'failed', 'Map failed');
+    showResult('map-result', data);
+    return;
+  }
+  setStatus('map-status', 'done', `${data.count} URL(s)`);
+  renderMapResults(document.getElementById('map-result'), data);
+});
+
+initProxyPool('mp');
 
 // ─── Crawler health check ────────────────────────────────────────────────────
 document.getElementById('btnCrawlerHealth').addEventListener('click', async () => {
@@ -2133,11 +2478,49 @@ function enhanceSelect(select) {
     });
   }
 
+  // The dropdown is rendered `position: fixed` (anchored to the trigger via
+  // getBoundingClientRect) rather than absolutely inside the wrapper, so it
+  // escapes the scrollable `.two-col > *` panel that would otherwise clip it.
+  // Flips above the trigger when there isn't room below.
+  function positionDropdown() {
+    // No destroy hook exists: if a panel re-render removed the trigger while we
+    // were open, close so the scroll/resize listeners below are torn down
+    // instead of leaking a closure over the detached node.
+    if (!trigger.isConnected) { closeDropdown(); return; }
+    const r = trigger.getBoundingClientRect();
+    const gap = 8;
+    const vh = window.innerHeight;
+    // Trigger scrolled out of the viewport — close rather than leave the menu
+    // floating detached from its (now off-screen) anchor.
+    if (r.bottom <= 0 || r.top >= vh) { closeDropdown(); return; }
+    dropdown.style.position = 'fixed';
+    dropdown.style.left = r.left + 'px';
+    dropdown.style.width = r.width + 'px';
+    dropdown.style.right = 'auto';
+    const spaceBelow = vh - r.bottom - gap;
+    const spaceAbove = r.top - gap;
+    const flipUp = spaceBelow < Math.min(440, dropdown.scrollHeight)
+      && spaceAbove > spaceBelow;
+    const maxH = Math.max(120, Math.min(440, flipUp ? spaceAbove : spaceBelow));
+    dropdown.style.maxHeight = maxH + 'px';
+    if (flipUp) {
+      dropdown.style.top = 'auto';
+      dropdown.style.bottom = (vh - r.top + gap) + 'px';
+    } else {
+      dropdown.style.bottom = 'auto';
+      dropdown.style.top = (r.bottom + gap) + 'px';
+    }
+  }
+
   function openDropdown() {
     rebuildOptions();
     if (!dropdown.children.length) return;
     wrap.classList.add('open');
     dropdown.style.display = '';
+    positionDropdown();
+    // Keep it anchored while the page or a parent panel scrolls/resizes.
+    window.addEventListener('scroll', positionDropdown, true);
+    window.addEventListener('resize', positionDropdown);
     // Focus the in-dropdown filter (long lists) so the user can type at once.
     const si = dropdown.querySelector('.custom-select-search input');
     if (si) requestAnimationFrame(() => si.focus());
@@ -2149,6 +2532,8 @@ function enhanceSelect(select) {
   function closeDropdown() {
     wrap.classList.remove('open');
     dropdown.style.display = 'none';
+    window.removeEventListener('scroll', positionDropdown, true);
+    window.removeEventListener('resize', positionDropdown);
   }
   wrap.addEventListener('cs:close', closeDropdown);
 
@@ -2326,7 +2711,7 @@ function restoreState() {
 
   // Fire change on selects / toggles so dependent refreshers re-run
   // (proxy pool visibility, Enable-scraping section, custom-select labels).
-  ['s-proxy-type','b-proxy-type','c-proxy-type','cp-proxy-type',
+  ['s-proxy-type','b-proxy-type','c-proxy-type','cp-proxy-type','mp-proxy-type',
    's-extract-type','b-extract-type','c-extract-type',
    'c-enable-scraping','mcp-target']
     .forEach(id => {
@@ -3486,9 +3871,10 @@ refreshSessionsView().catch(() => {});
 
 restoreState();
 
-// After restoreState the Scraper URL points at the real target — only now
-// can the preset dropdown load (the preset endpoints don't exist on a stock
-// scraper). Refresh it whenever the target changes too.
+// After restoreState the Scraper URL points at the real target — only now can
+// the proxy countries and the preset dropdown load (these endpoints don't exist
+// on a stock scraper / wrong host). Refresh them whenever the target changes too.
+loadCountries();
 populateScrapePresetSelect();
 document.getElementById('scraperUrl').addEventListener('change', () => {
   loadCountries();

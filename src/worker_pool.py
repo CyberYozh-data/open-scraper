@@ -90,10 +90,22 @@ class WorkerPool:
             self._pending[job_id] = future
 
         try:
-            self.task_q.put(job, block=True, timeout=1.0)
+            # task_q is bounded; a blocking put would stall the event loop
+            # for up to the full timeout, so run it in a worker thread.
+            await loop.run_in_executor(
+                None, lambda: self.task_q.put(job, block=True, timeout=1.0)
+            )
+        except asyncio.CancelledError:
+            # The executor thread cannot be interrupted and may still finish
+            # the put; _result_pump then finds no pending future and drops
+            # the result, which is safe.
+            with self._pending_lock:
+                self._pending.pop(job_id, None)
+            raise
         except Exception as e:
             with self._pending_lock:
                 self._pending.pop(job_id, None)
+            log.warning("failed to enqueue job %s: %r", job_id, e)
             raise RuntimeError(f"Queue is full / cannot enqueue job: {e}") from e
 
         timeout = (job_timeout_ms or self.config.job_timeout_ms) / 1000.0
@@ -139,6 +151,7 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
     import traceback
 
     from src.browser.runner import PlaywrightRunner, FetchResult
+    from src.markdown_build import apply as apply_markdown, resolve_formats
     from src.presets.worker_parse import apply as apply_parser
     from src.proxy.base import ProxyFailure
     from src.proxy.resolver import proxy_resolver
@@ -442,6 +455,17 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
                     fetch_result: FetchResult | None = None
                     retries_used = 0
 
+                    # raw_html / screenshot can be requested via the legacy
+                    # booleans OR by listing them in `formats` (union). Resolve
+                    # once so capture and output agree.
+                    effective_formats = resolve_formats(
+                        request.get("formats"),
+                        raw_html=request.get("raw_html", False),
+                        screenshot=request.get("screenshot", False),
+                    )
+                    want_raw_html = "raw_html" in effective_formats
+                    want_screenshot = "screenshot" in effective_formats
+
                     for attempt in range(1, attempts + 1):
                         proxy_cfg = session.current_proxy()
                         log.debug(
@@ -466,7 +490,7 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
                             wait_until=request.get("wait_until", "domcontentloaded"),
                             wait_for_selector=request.get("wait_for_selector"),
                             timeout_ms=request.get("timeout_ms"),
-                            screenshot=request.get("screenshot", False),
+                            screenshot=want_screenshot,
                             element_selector=request.get("element_selector"),
                             stealth=request.get("stealth", True),
                             block_assets=request.get("block_assets"),
@@ -559,8 +583,18 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
                         data = parsed_data
                         warnings.extend(parse_warnings)
 
-                    raw_html = fetch_result.html if request.get("raw_html", False) else None
-                    screenshot_b64 = fetch_result.screenshot_b64 if request.get("screenshot") else None
+                    raw_html = fetch_result.html if want_raw_html else None
+                    screenshot_b64 = fetch_result.screenshot_b64 if want_screenshot else None
+
+                    # Markdown-family outputs (markdown / fit_markdown / html /
+                    # links). Best-effort: failures degrade to warnings, never
+                    # fail the scrape. No-op for legacy callers.
+                    markdown_outputs, md_warnings = await apply_markdown(
+                        request,
+                        fetch_result.html,
+                        base_url=fetch_result.final_url or url,
+                    )
+                    warnings.extend(md_warnings)
 
                     took_ms = int((time.perf_counter() - start_time) * 1000)
 
@@ -588,6 +622,11 @@ def _worker_main(task_q, result_q, worker_id: int) -> None:
                                 },
                                 "data": data,
                                 "raw_html": raw_html,
+                                "markdown": markdown_outputs.get("markdown"),
+                                "fit_markdown": markdown_outputs.get("fit_markdown"),
+                                "markdown_references": markdown_outputs.get("markdown_references"),
+                                "links": markdown_outputs.get("links"),
+                                "html": markdown_outputs.get("html"),
                                 "screenshot_base64": screenshot_b64,
                                 "element_screenshot_status": fetch_result.element_status,
                                 "warnings": warnings,

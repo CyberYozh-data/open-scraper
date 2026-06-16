@@ -227,3 +227,32 @@ async def test_health_returns_false_on_network_error(client, mocker):
         AsyncMock(side_effect=httpx.ConnectError("refused")),
     )
     assert await client.health() is False
+
+
+# ─── resolve_proxy ──────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_resolve_proxy_returns_url(client, mocker):
+    get = AsyncMock(return_value=_resp(200, {"proxy_url": "socks5://u:p@h:1080"}))
+    mocker.patch.object(client._client, "get", get)
+    url = await client.resolve_proxy(
+        "res_rotating", proxy_pool_id="pool1", proxy_geo={"country_code": "US"}
+    )
+    assert url == "socks5://u:p@h:1080"
+    _, kwargs = get.call_args
+    assert kwargs["params"]["proxy_type"] == "res_rotating"
+    assert kwargs["params"]["proxy_pool_id"] == "pool1"
+    assert kwargs["params"]["country_code"] == "US"
+
+
+@pytest.mark.asyncio
+async def test_resolve_proxy_null(client, mocker):
+    mocker.patch.object(client._client, "get", AsyncMock(return_value=_resp(200, {"proxy_url": None})))
+    assert await client.resolve_proxy("none") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_proxy_error_raises(client, mocker):
+    mocker.patch.object(client._client, "get", AsyncMock(return_value=_resp(502, "boom")))
+    with pytest.raises(ScraperError):
+        await client.resolve_proxy("res_rotating")

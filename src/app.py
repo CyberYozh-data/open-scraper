@@ -109,7 +109,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(router)
 
-    mcp = FastApiMCP(app)
+    # Exclude resolve_proxy: it returns upstream proxy credentials and is a
+    # service-to-service helper (the crawler's /map), not an agent tool.
+    mcp = FastApiMCP(app, exclude_operations=["resolve_proxy"])
     mcp.mount_http()
 
     return app

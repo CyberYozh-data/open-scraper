@@ -253,6 +253,37 @@ curl -s -X POST http://localhost:8000/api/v1/scrape/page \
 
 ---
 
+### 6b) LLM-ready Markdown (`formats`)
+
+Request output formats with `formats: []` (Firecrawl-style). It's **additive
+and backward compatible** — omit it and the legacy `raw_html` / `screenshot`
+booleans behave exactly as before; when set, the effective outputs are the
+union of the list and those booleans.
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/scrape/page \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com",
+    "proxy_type": "none",
+    "formats": ["markdown", "fit_markdown", "links"],
+    "markdown_options": {"content_filter": "pruning", "citations": true}
+  }'
+```
+
+Formats: `markdown` (clean LLM-ready Markdown), `fit_markdown` (noise-filtered —
+`pruning` heuristic or `llm`), `raw_html`, `html` (cleaned), `links`,
+`screenshot`. The response gains the matching fields: `markdown`,
+`fit_markdown`, `markdown_references` (for `⟨n⟩` citations), `links`, `html`.
+
+`markdown_options`: `only_main_content` (default **off** — keeps header/footer/
+cookie/nav, which compliance consumers need), `content_filter`
+(`none`/`pruning`/`llm`), `filter_instruction` + `filter_model` (for `llm`),
+`citations`, `ignore_links`, `ignore_images`, `body_width`. Markdown is
+best-effort: a filter failure degrades to a `warning`, never fails the scrape.
+
+---
+
 ### 7) Screenshot (base64)
 
 ```bash
@@ -634,6 +665,36 @@ values (per-item when `all: true`): `regex` (args `[pattern, group?]`),
 disambiguation), `strip`, `lowercase`, `uppercase`, `replace` (args
 `[old, new]`). A field may also override the rule's `type` (css/xpath).
 
+## Search
+
+`POST /api/v1/search` runs a web search and returns ranked results in one
+**synchronous** call (no `job_id` to poll). It uses the built-in
+`google_search` preset as the SERP source, parses the organic results, and can
+optionally scrape each result page with the normal pipeline.
+
+```bash
+# SERP only
+curl -s localhost:8000/api/v1/search \
+  -H 'content-type: application/json' \
+  -d '{"query": "open source web scraper", "limit": 5}'
+
+# SERP + scrape each result (forward any ScrapeRequest field via scrape_options)
+curl -s localhost:8000/api/v1/search \
+  -H 'content-type: application/json' \
+  -d '{"query": "privacy policy generator", "limit": 3,
+       "scrape": true, "scrape_options": {"raw_html": true}}'
+```
+
+Request fields: `query` (required), `locale` (`us`/`uk`/`de`/`fr`/`ru`/`jp`,
+default `us`), `limit` (1–50, default 10), `scrape` (bool), `scrape_options`
+(forwarded to each result's scrape; internal fields are stripped, `session_id`
+is validated).
+
+Response: `{query, count, results: [{url, title, snippet, scrape?}], took_ms, warnings}`.
+A blocked/empty SERP degrades to `count: 0` plus a `warnings` entry (HTTP 200)
+rather than an error — results depend on a working residential proxy for the
+SERP fetch.
+
 ## MCP Integration
 
 Yozh Scraper exposes all its API tools via the
@@ -645,8 +706,9 @@ required.
 
 | Tool | Description |
 |------|-------------|
-| `run_scrape_page` | Scrape a single page, returns `job_id` |
+| `run_scrape_page` | Scrape a single page (supports `formats` incl. markdown), returns `job_id` |
 | `run_scrape_pages` | Scrape multiple pages in batch, returns `job_id` |
+| `run_search` | Web search (SERP + optional scrape), returns results inline |
 | `get_job_status` | Poll job status by `job_id` |
 | `get_job_result` | Fetch results for a completed job |
 | `cancel_scrape_job` | Soft-cancel a running job |

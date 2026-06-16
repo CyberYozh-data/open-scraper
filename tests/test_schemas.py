@@ -372,3 +372,29 @@ class TestScrapeResponseElementStatus:
                 request_id="r1", took_ms=10, meta=self._meta(),
                 element_screenshot_status="bogus",
             )
+
+
+class TestMarkdownContract:
+    def _meta(self):
+        return ScrapeMeta(url="https://x.com", device="desktop", proxy_type="none")
+
+    def test_request_accepts_formats_and_options(self):
+        req = ScrapeRequest(
+            url="https://x.com",
+            formats=["markdown", "fit_markdown"],
+            markdown_options={"content_filter": "pruning", "citations": True},
+        )
+        assert req.formats == ["markdown", "fit_markdown"]
+        assert req.markdown_options.content_filter == "pruning"
+
+    def test_request_rejects_bogus_format(self):
+        with pytest.raises(ValidationError):
+            ScrapeRequest(url="https://x.com", formats=["nope"])
+
+    def test_response_markdown_fields_default_none(self):
+        resp = ScrapeResponse(request_id="r1", took_ms=10, meta=self._meta())
+        assert resp.markdown is None
+        assert resp.fit_markdown is None
+        assert resp.markdown_references is None
+        assert resp.links is None
+        assert resp.html is None

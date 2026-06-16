@@ -94,9 +94,39 @@ curl -X DELETE "http://localhost:8001/api/v1/crawl/crawl_abc123?hard=true"
 | `GET`  | `/api/v1/crawl/{id}/results` | Same as above — alias for symmetry with the scraper. |
 | `GET`  | `/api/v1/crawl/{id}/events` | SSE stream of events (`stats`/`page`/`page_error`/`done`/`cancelled`). |
 | `DELETE` | `/api/v1/crawl/{id}?hard=bool` | Cancel the job. |
+| `POST` | `/api/v1/map` | **Fast URL discovery** (sitemap + seed links). Synchronous; returns a URL list. |
 | `GET`  | `/api/v1/health` | Health + scraper reachability. |
 
 OpenAPI schema with all request/response models: `http://localhost:8001/docs`.
+
+### `/map` — fast URL discovery
+
+`/crawl` visits and processes every page (recursive, job-based, slow). `/map`
+just answers *"which URLs exist on this site"* in one quick **synchronous**
+call: it reads robots.txt + sitemap.xml (following `<sitemapindex>`, bounded)
+and the links on a single seed-page fetch, then scope-filters, canonicalizes
+and dedupes. No per-page rendering, no recursion. Typical flow: `/map` to
+discover → pick URLs → feed them to `/scrape` or `/crawl`.
+
+```bash
+curl -s localhost:8001/api/v1/map \
+  -H 'content-type: application/json' \
+  -d '{"seed_url": "https://example.com", "limit": 100}'
+# -> {"seed_url","count","urls":[...],"stats":{from_sitemap,from_page,unique_in_scope},"took_ms","warnings"}
+```
+
+Request fields: `seed_url` (required), `scope` (reuses the crawl scope —
+`mode` + include/exclude patterns; depth/rps ignored), `include_sitemap`,
+`include_page_links`, `render` (fetch the seed via the scraper for SPA links),
+`search` (case-insensitive substring filter), `limit`, and proxy:
+`proxy_type` / `proxy_pool_id` / `proxy_geo` (default `none`). When a proxy is
+set the scraper resolves the upstream URL (`GET /api/v1/proxies/resolve`, reusing
+its CyberYozh integration) and the crawler routes the robots/sitemap/seed
+fetches through it — useful for sites that block datacenter IPs or geo-restrict.
+
+Direct (no-proxy) fetches pass through an SSRF guard that refuses private /
+loopback / link-local / metadata addresses and re-validates every redirect hop;
+when proxied, egress is via the proxy so that guard is skipped.
 
 ## Configuration (env)
 
@@ -116,6 +146,9 @@ OpenAPI schema with all request/response models: `http://localhost:8001/docs`.
 | `SESSION_MAX_USAGE` | `50` | Rotate a session after N uses. |
 | `SESSION_BLOCKED_CODES` | `[401,403,429]` | Codes that retire the session instantly. |
 | `CORS_ALLOW_ORIGINS` | `["*"]` | Crawler is reached directly from the browser (SSE). |
+| `MAP_HTTP_TIMEOUT_MS` | `10_000` | Per-request timeout for `/map` robots/sitemap/seed fetches. |
+| `MAP_MAX_URLS` | `5_000` | Cap on URLs collected from sitemaps in `/map`. |
+| `MAP_MAX_SITEMAPS` | `50` | Cap on sitemap documents fetched per `/map` call. |
 
 See [`.env.example`](.env.example) for the full list.
 
@@ -127,6 +160,7 @@ See [`.env.example`](.env.example) for the full list.
 - `create_crawl` (full JSON-schema for `CrawlRequest`)
 - `get_crawl` / `get_crawl_results`
 - `cancel_crawl`
+- `create_map` (fast URL discovery)
 
 The SSE `stream_crawl_events` endpoint is deliberately excluded — streaming
 responses don't translate well to a request/response MCP tool.

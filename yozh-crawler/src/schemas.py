@@ -136,3 +136,43 @@ class CancelResponse(BaseModel):
     job_id: str
     cancelled: bool
     hard: bool
+
+
+class MapRequest(BaseModel):
+    seed_url: HttpUrl
+    scope: CrawlScope = Field(
+        default_factory=CrawlScope,
+        description="Reuses the crawl scope (mode + include/exclude patterns) to filter results. max_depth/rps fields are ignored — /map is a single fast pass.",
+    )
+    include_sitemap: bool = Field(default=True, description="Discover URLs from robots.txt + sitemap.xml.")
+    include_page_links: bool = Field(default=True, description="Discover URLs from <a> links on the seed page.")
+    render: bool = Field(
+        default=False,
+        description="Fetch the seed page through the scraper (JS render) instead of a plain httpx GET. Slower but sees SPA links. Only affects page-link discovery.",
+    )
+    search: str | None = Field(
+        default=None,
+        description="Case-insensitive substring; keep only URLs containing it.",
+    )
+    limit: int = Field(default=1000, ge=1, le=50_000, description="Max URLs to return.")
+    proxy_type: ScrapeProxyType = Field(
+        default="none",
+        description="Route the robots/sitemap/seed fetches through this proxy (resolved by the scraper). 'none' = direct.",
+    )
+    proxy_pool_id: str | None = None
+    proxy_geo: ProxyGeo | None = None
+
+
+class MapStats(BaseModel):
+    from_sitemap: int = 0  # raw URLs seen in sitemaps (pre scope/dedup)
+    from_page: int = 0  # raw <a> links on the seed page (pre scope/dedup)
+    unique_in_scope: int = 0  # unique, in-scope URLs before the search filter
+
+
+class MapResponse(BaseModel):
+    seed_url: str
+    count: int
+    urls: list[str]
+    stats: MapStats
+    took_ms: int = 0  # wall-clock time spent discovering the URLs
+    warnings: list[str] = Field(default_factory=list)

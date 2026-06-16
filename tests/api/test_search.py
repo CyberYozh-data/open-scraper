@@ -1,0 +1,395 @@
+from __future__ import annotations
+
+import logging
+from typing import get_args
+
+import pytest
+
+from src.api.search import ENGINES, _parse_results, build_search
+from src.presets.store import PresetStore
+from src.schemas import (
+    ProxyGeo,
+    ScrapeMeta,
+    ScrapeResponse,
+    SearchEngine,
+    SearchRequest,
+)
+
+
+def test_engines_cover_search_engine_literal():
+    # Guards ENGINES against drifting from the SearchEngine Literal: pydantic
+    # rejects unknown engines with a 422, so ENGINES[req.engine] can only
+    # KeyError if someone extends the Literal without adding a profile here.
+    assert set(ENGINES) == set(get_args(SearchEngine))
+
+
+def _resp(*, data=None, request_id="r", url="https://www.google.com/search"):
+    return ScrapeResponse(
+        request_id=request_id,
+        took_ms=1,
+        meta=ScrapeMeta(url=url, device="desktop", proxy_type="none"),
+        data=data,
+    )
+
+
+def _block(hveid, title, href, snippet):
+    return (
+        f'<div data-hveid="{hveid}"><h3>{title}</h3>'
+        f'<a href="{href}">link</a>'
+        f'<div class="VwiC3b">{snippet}</div></div>'
+    )
+
+
+_SERP_DATA = {
+    "result_blocks": [
+        _block("1", "First", "https://a.com/1", "snippet one"),
+        _block("2", "Second", "https://b.com/2", "snippet two"),
+        # duplicate URL -> deduped
+        _block("3", "First again", "https://a.com/1", "dupe"),
+        # no <h3> -> not an organic result -> skipped
+        '<div data-hveid="4"><a href="https://ads.com/x">ad</a></div>',
+    ]
+}
+
+
+class _Runner:
+    """Fake run_job: 1st call = SERP, later calls = per-result scrapes."""
+
+    def __init__(self, serp_data, scrape_responses=None):
+        self.serp_data = serp_data
+        self.scrape_responses = scrape_responses or []
+        self.calls = []
+
+    async def __call__(self, pages):
+        self.calls.append(pages)
+        if len(self.calls) == 1:
+            return [_resp(data=self.serp_data)]
+        return self.scrape_responses
+
+
+@pytest.fixture
+def store():
+    return PresetStore()
+
+
+class TestBuildSearch:
+    @pytest.mark.asyncio
+    async def test_parses_blocks_dedups_and_skips_non_organic(self, store):
+        runner = _Runner(_SERP_DATA)
+        res = await build_search(
+            SearchRequest(query="hello"), store=store, run_job=runner
+        )
+        assert [r.url for r in res.results] == ["https://a.com/1", "https://b.com/2"]
+        assert res.results[0].title == "First"
+        assert res.results[0].snippet == "snippet one"
+        assert res.count == 2
+
+    @pytest.mark.asyncio
+    async def test_serp_request_targets_google_with_query(self, store):
+        runner = _Runner(_SERP_DATA)
+        await build_search(SearchRequest(query="open source"), store=store, run_job=runner)
+        serp_pages = runner.calls[0]
+        assert len(serp_pages) == 1
+        assert "google" in str(serp_pages[0].url)
+        assert "open" in str(serp_pages[0].url)  # query encoded into the URL
+
+    @pytest.mark.asyncio
+    async def test_limit_caps_results(self, store):
+        runner = _Runner(_SERP_DATA)
+        res = await build_search(
+            SearchRequest(query="x", limit=1), store=store, run_job=runner
+        )
+        assert res.count == 1
+
+    @pytest.mark.asyncio
+    async def test_no_scrape_leaves_scrape_none(self, store):
+        runner = _Runner(_SERP_DATA)
+        res = await build_search(SearchRequest(query="x"), store=store, run_job=runner)
+        assert all(r.scrape is None for r in res.results)
+        assert len(runner.calls) == 1  # no second job
+
+    @pytest.mark.asyncio
+    async def test_scrape_attaches_responses(self, store):
+        scrapes = [
+            _resp(request_id="s1", url="https://a.com/1"),
+            _resp(request_id="s2", url="https://b.com/2"),
+        ]
+        runner = _Runner(_SERP_DATA, scrape_responses=scrapes)
+        res = await build_search(
+            SearchRequest(query="x", scrape=True), store=store, run_job=runner
+        )
+        assert len(runner.calls) == 2
+        assert res.results[0].scrape.request_id == "s1"
+        assert res.results[1].scrape.request_id == "s2"
+        # scrape options inject url per result
+        scrape_pages = runner.calls[1]
+        assert {str(p.url) for p in scrape_pages} == {"https://a.com/1", "https://b.com/2"}
+
+    @pytest.mark.asyncio
+    async def test_empty_serp_yields_no_results(self, store):
+        runner = _Runner({"result_blocks": []})
+        res = await build_search(SearchRequest(query="x"), store=store, run_job=runner)
+        assert res.count == 0
+        assert res.results == []
+
+    @pytest.mark.asyncio
+    async def test_serp_unavailable_emits_warning(self, store):
+        async def empty_run(pages):
+            return []  # job didn't complete / produced nothing
+
+        res = await build_search(SearchRequest(query="x"), store=store, run_job=empty_run)
+        assert res.count == 0
+        assert any("serp_unavailable" in w for w in res.warnings)
+
+    @pytest.mark.asyncio
+    async def test_partial_scrape_responses_leave_rest_none(self, store):
+        # Scrape stage returns fewer responses than results (e.g. timeout).
+        runner = _Runner(_SERP_DATA, scrape_responses=[_resp(request_id="s1", url="https://a.com/1")])
+        res = await build_search(
+            SearchRequest(query="x", scrape=True), store=store, run_job=runner
+        )
+        assert res.results[0].scrape.request_id == "s1"
+        assert res.results[1].scrape is None  # no response -> stays None, no error
+
+    @pytest.mark.asyncio
+    async def test_none_padded_scrape_responses_warn_incomplete(self, store, caplog):
+        # Mid-job timeout: the queue returns a full-length list padded with
+        # None placeholders (the runner preallocates [None] * len(pages)),
+        # so the incomplete signal must count attached responses, not lengths.
+        runner = _Runner(
+            _SERP_DATA,
+            scrape_responses=[_resp(request_id="s1", url="https://a.com/1"), None],
+        )
+        with caplog.at_level(logging.WARNING):
+            res = await build_search(
+                SearchRequest(query="x", scrape=True), store=store, run_job=runner
+            )
+        assert res.results[0].scrape.request_id == "s1"
+        assert res.results[1].scrape is None
+        assert any("scrape_incomplete" in w for w in res.warnings)
+        assert any("search scrape incomplete" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_internal_fields_stripped_from_scrape_options(self, store):
+        runner = _Runner(_SERP_DATA, scrape_responses=[_resp(), _resp()])
+        await build_search(
+            SearchRequest(query="x", scrape=True, scrape_options={"parser_plan": {"x": 1}, "raw_html": True}),
+            store=store,
+            run_job=runner,
+        )
+        for page in runner.calls[1]:
+            assert page.parser_plan is None
+            assert page.raw_html is True
+
+
+def _bing_block(title, href, snippet):
+    return (
+        f'<li class="b_algo"><h2><a href="{href}">{title}</a></h2>'
+        f'<div class="b_caption"><p>{snippet}</p></div></li>'
+    )
+
+
+def _yandex_block(title, href, snippet):
+    return (
+        f'<li class="serp-item"><div class="OrganicTitle">'
+        f'<a class="OrganicTitle-Link" href="{href}">'
+        f'<span class="OrganicTitle-LinkText">{title}</span></a></div>'
+        f'<div class="OrganicText"><span class="TextContainer">{snippet}</span></div></li>'
+    )
+
+
+class TestMultiEngineParse:
+    def test_parse_bing_block(self):
+        data = {"result_blocks": [_bing_block("First", "https://a.com/1", "snip one")]}
+        res = _parse_results(data, ENGINES["bing"])
+        assert [r.url for r in res] == ["https://a.com/1"]
+        assert res[0].title == "First"
+        assert res[0].snippet == "snip one"
+
+    def test_parse_yandex_block(self):
+        data = {"result_blocks": [_yandex_block("First", "https://a.com/1", "snip one")]}
+        res = _parse_results(data, ENGINES["yandex"])
+        assert [r.url for r in res] == ["https://a.com/1"]
+        assert res[0].title == "First"
+        assert res[0].snippet == "snip one"
+
+    def test_block_without_title_is_skipped(self):
+        # A Bing block with no <h2> is not an organic result.
+        data = {"result_blocks": ['<li class="b_algo"><a href="https://ads.com">ad</a></li>']}
+        assert _parse_results(data, ENGINES["bing"]) == []
+
+    def test_google_profile_still_parses_h3_blocks(self):
+        res = _parse_results(_SERP_DATA, ENGINES["google"])
+        assert [r.url for r in res] == ["https://a.com/1", "https://b.com/2"]
+
+
+def _bing_ck(real_url):
+    """Build a Bing /ck/a redirect wrapping `real_url` like the live SERP does."""
+    import base64
+
+    u = "a1" + base64.urlsafe_b64encode(real_url.encode()).decode().rstrip("=")
+    return f"https://www.bing.com/ck/a?!&&p=abc123&u={u}"
+
+
+class TestBingRedirect:
+    def test_unwrap_decodes_real_url(self):
+        from src.api.search import _unwrap_redirect
+
+        assert (
+            _unwrap_redirect(_bing_ck("https://example.com/page?x=1"))
+            == "https://example.com/page?x=1"
+        )
+
+    def test_unwrap_passes_through_plain_url(self):
+        from src.api.search import _unwrap_redirect
+
+        assert _unwrap_redirect("https://example.com/x") == "https://example.com/x"
+
+    def test_unwrap_rejects_lookalike_host_and_non_http(self):
+        from src.api.search import _unwrap_redirect
+        import base64
+
+        # Lookalike host must not be treated as Bing.
+        evil = "https://bing.com.evil.com/ck/a?u=a1" + base64.urlsafe_b64encode(
+            b"https://real.com"
+        ).decode().rstrip("=")
+        assert _unwrap_redirect(evil) == evil
+        # A non-http(s) payload falls back to the original URL.
+        js = _bing_ck("javascript:alert(1)")
+        assert _unwrap_redirect(js) == js
+
+    def test_bing_block_yields_unwrapped_url(self):
+        block = (
+            f'<li class="b_algo"><h2><a href="{_bing_ck("https://real.com/p")}">T</a>'
+            f'</h2><div class="b_caption"><p>s</p></div></li>'
+        )
+        res = _parse_results({"result_blocks": [block]}, ENGINES["bing"])
+        assert res[0].url == "https://real.com/p"
+
+
+class TestEngineRouting:
+    @pytest.mark.asyncio
+    async def test_default_engine_is_google(self, store):
+        runner = _Runner(_SERP_DATA)
+        await build_search(SearchRequest(query="x"), store=store, run_job=runner)
+        assert "google" in str(runner.calls[0][0].url)
+
+    @pytest.mark.asyncio
+    async def test_engine_bing_uses_bing_preset(self, store):
+        runner = _Runner(_SERP_DATA)
+        await build_search(
+            SearchRequest(query="x", engine="bing"), store=store, run_job=runner
+        )
+        assert "bing" in str(runner.calls[0][0].url)
+
+    @pytest.mark.asyncio
+    async def test_engine_yandex_uses_yandex_preset(self, store):
+        runner = _Runner(_SERP_DATA)
+        await build_search(
+            SearchRequest(query="x", engine="yandex"), store=store, run_job=runner
+        )
+        assert "yandex" in str(runner.calls[0][0].url)
+
+    @pytest.mark.asyncio
+    async def test_blocked_engine_surfaces_warning(self, store):
+        # A blocked SERP (no organic blocks + captcha warning) surfaces the
+        # warning through build_search for a non-default engine too.
+        async def run(pages):
+            return [
+                ScrapeResponse(
+                    request_id="r",
+                    took_ms=1,
+                    meta=ScrapeMeta(
+                        url="https://www.bing.com/search",
+                        device="desktop",
+                        proxy_type="none",
+                    ),
+                    data={"result_blocks": []},
+                    warnings=["Captcha/block detected by heuristic"],
+                )
+            ]
+
+        res = await build_search(
+            SearchRequest(query="x", engine="bing"), store=store, run_job=run
+        )
+        assert res.count == 0
+        assert any("Captcha" in w for w in res.warnings)
+
+
+class TestSearchProxy:
+    @pytest.mark.asyncio
+    async def test_no_override_keeps_preset_proxy(self, store):
+        # Default-off: with no proxy fields, the SERP job keeps the
+        # google_search preset's own proxy (res_rotating) — unchanged behaviour.
+        runner = _Runner(_SERP_DATA)
+        await build_search(SearchRequest(query="x"), store=store, run_job=runner)
+        serp = runner.calls[0][0]
+        assert serp.proxy_type == "res_rotating"
+
+    @pytest.mark.asyncio
+    async def test_override_applied_to_serp(self, store):
+        runner = _Runner(_SERP_DATA)
+        await build_search(
+            SearchRequest(
+                query="x",
+                proxy_type="mobile",
+                proxy_pool_id="pool-123",
+                proxy_geo=ProxyGeo(country_code="DE"),
+            ),
+            store=store,
+            run_job=runner,
+        )
+        serp = runner.calls[0][0]
+        assert serp.proxy_type == "mobile"
+        assert serp.proxy_pool_id == "pool-123"
+        assert serp.proxy_geo.country_code == "DE"
+
+    @pytest.mark.asyncio
+    async def test_override_can_disable_preset_proxy(self, store):
+        # Explicit "none" overrides the preset's res_rotating (distinct from
+        # "field omitted", which keeps the preset default).
+        runner = _Runner(_SERP_DATA)
+        await build_search(
+            SearchRequest(query="x", proxy_type="none"), store=store, run_job=runner
+        )
+        assert runner.calls[0][0].proxy_type == "none"
+
+    @pytest.mark.asyncio
+    async def test_empty_proxy_geo_keeps_locale_default(self, store):
+        # An all-None proxy_geo must NOT wipe the materializer's locale-derived
+        # geo: it should behave as if proxy_geo were omitted.
+        runner = _Runner(_SERP_DATA)
+        await build_search(
+            SearchRequest(query="x", proxy_geo=ProxyGeo()),
+            store=store,
+            run_job=runner,
+        )
+        serp = runner.calls[0][0]
+        assert serp.proxy_geo is not None
+        assert serp.proxy_geo.country_code  # locale default survived
+
+    @pytest.mark.asyncio
+    async def test_override_applied_to_result_scrapes(self, store):
+        runner = _Runner(_SERP_DATA, scrape_responses=[_resp(), _resp()])
+        await build_search(
+            SearchRequest(
+                query="x",
+                scrape=True,
+                proxy_type="mobile",
+                proxy_pool_id="pool-123",
+            ),
+            store=store,
+            run_job=runner,
+        )
+        for page in runner.calls[1]:
+            assert page.proxy_type == "mobile"
+            assert page.proxy_pool_id == "pool-123"
+
+
+class TestSearchTiming:
+    @pytest.mark.asyncio
+    async def test_response_includes_took_ms(self, store):
+        runner = _Runner(_SERP_DATA)
+        res = await build_search(SearchRequest(query="x"), store=store, run_job=runner)
+        assert isinstance(res.took_ms, int)
+        assert res.took_ms >= 0

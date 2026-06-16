@@ -5,6 +5,7 @@ from .presets import router as presets_router
 from .proxies import router as proxies_router
 from .scrape import router as scrape_router
 from .scrape_preset import router as scrape_preset_router
+from .search import router as search_router
 from .sessions import router as sessions_router
 
 
@@ -18,4 +19,5 @@ router.include_router(scrape_preset_router, prefix="/scrape/preset")
 router.include_router(scrape_router, prefix="/scrape")
 router.include_router(proxies_router, prefix="/proxies")
 router.include_router(presets_router, prefix="/presets")
+router.include_router(search_router, prefix="/search")
 router.include_router(sessions_router, prefix="/sessions")

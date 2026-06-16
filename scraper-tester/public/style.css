@@ -155,6 +155,7 @@ header {
 /* Tabs — CyberYozh pill style */
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   background: var(--bg-secondary);
   padding: 1rem 1.5rem 0;
   gap: 0.4rem;
@@ -207,7 +208,10 @@ header {
 }
 
 @media (max-width: 900px) {
-  .two-col { grid-template-columns: 1fr; }
+  .two-col { grid-template-columns: 1fr; gap: 1rem; }
+  /* Stacked columns: let the page scroll instead of nesting a scroll region
+     inside each panel (the 100vh cap is only sensible side-by-side). */
+  .two-col > * { max-height: none; overflow: visible; }
 }
 
 /* Panel */
@@ -752,6 +756,7 @@ button:active { transform: scale(0.98); }
 .info-tooltip {
   position: fixed;
   width: 320px;
+  max-width: calc(100vw - 1.5rem);
   padding: 0.75rem 0.9rem;
   background: var(--bg-primary);
   border: 1px solid var(--border);
@@ -920,4 +925,38 @@ details[open] > .details-summary .details-chevron { transform: rotate(90deg); }
   margin-top: 1rem;
   padding-top: 0.75rem;
   border-top: 1px solid var(--border);
+}
+
+/* ── Mobile / narrow screens ─────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  /* Header: stack brand → server controls → social, instead of the cramped
+     row-wrap that leaves the brand floating beside a tall wrapped bar. */
+  header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.75rem;
+    padding: 0.8rem 1rem;
+  }
+  .server-bar { gap: 0.5rem 0.6rem; }
+  /* Keep the URL inputs usably wide; flex-basis forces each label/input/Check
+     group to wrap onto its own row instead of collapsing to a sliver. */
+  .server-bar input { max-width: none; flex: 1 1 150px; min-width: 130px; }
+  /* Drops the inline `margin-left:1rem` on the "Crawler URL" label (the only
+     inline-styled label in .server-bar) so it doesn't indent when stacked. */
+  .server-bar label[style] { margin-left: 0 !important; }
+  .social-icons { margin-left: 0; }
+
+  .tabs { padding: 0.75rem 1rem 0; }
+  .tab-content { padding: 1rem; }
+  .panel { padding: 1rem; }
+  .field-row { gap: 0.5rem; }
+
+  /* Full-width primary actions are easier to tap. */
+  .actions { flex-direction: column; align-items: stretch; }
+  .actions button { width: 100%; }
+}
+
+/* Very small phones: keep field groups from getting unreadably narrow. */
+@media (max-width: 420px) {
+  .field-row > .field { flex-basis: 100%; }
 }

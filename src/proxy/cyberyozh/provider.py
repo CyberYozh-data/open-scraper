@@ -264,15 +264,16 @@ class CyberYozhProxyProvider:
                 raise RuntimeError("rotating_credentials_empty")
 
             log.info("received %d credentials", len(creds))
-            log.debug("full credential: %s", creds[0])
 
+            # Never embed the raw credential string in errors or logs — these
+            # messages travel into HTTP 502 details and service logs.
             if "@" not in creds[0]:
-                raise RuntimeError(f"Invalid credential format (no @): {creds[0]}")
+                raise RuntimeError("Invalid credential format (no @)")
 
             auth_part, location_part = creds[0].rsplit("@", 1)
 
             if ":" not in auth_part:
-                raise RuntimeError(f"Invalid auth format (no :): {auth_part}")
+                raise RuntimeError("Invalid auth format (no :)")
 
             username, password = auth_part.split(":", 1)
             server = f"http://{location_part}"

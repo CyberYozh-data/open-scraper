@@ -177,6 +177,30 @@ class TestWorkerPool:
         with pytest.raises(RuntimeError, match="Queue is full"):
             await pool.submit(job)
 
+    @pytest.mark.asyncio
+    async def test_submit_cancelled_during_enqueue_clears_pending(self):
+        """Cancelling submit() while the put blocks must not leak _pending."""
+        pool = WorkerPool()
+        config = WorkerPoolConfig(
+            workers=0,  # not start workers, because queue not processed
+            queue_maxsize=1,
+            job_timeout_ms=30000,
+        )
+
+        pool.init(config)
+        pool.task_q.put_nowait({"job_id": "job_1", "request": {}})
+
+        task = asyncio.ensure_future(
+            pool.submit({"job_id": "cancelled_job", "request": {}})
+        )
+        await asyncio.sleep(0.1)  # let submit reach the blocking put
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert "cancelled_job" not in pool._pending
+
 
 class TestWorkerProcess:
     """

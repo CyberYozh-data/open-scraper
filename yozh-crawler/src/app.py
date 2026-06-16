@@ -3,12 +3,14 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi_mcp import FastApiMCP
 
 from .api.crawl import router as crawl_router
 from .api.health import router as health_router
+from .api.map import router as map_router
 from .fetcher import ScraperClient
 from .jobs import JobRunner, JobStore
 from .limiter import domain_limiter
@@ -30,9 +32,18 @@ async def lifespan(app: FastAPI):
     runner = JobRunner(store=store, scraper=scraper, limiter=domain_limiter, settings=settings)
     await runner.start()
 
+    # Lightweight client for /map (robots/sitemap + non-rendered seed fetch).
+    # Redirects are followed manually in ssrf.safe_get so each hop is
+    # re-validated against the private-address blocklist.
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(settings.map_http_timeout_ms / 1000.0),
+        follow_redirects=False,
+    )
+
     app.state.scraper_client = scraper
     app.state.job_store = store
     app.state.job_runner = runner
+    app.state.http_client = http_client
 
     log.info(
         "open-crawler started workers=%d scraper_url=%s",
@@ -44,6 +55,7 @@ async def lifespan(app: FastAPI):
 
     await runner.stop()
     await scraper.close()
+    await http_client.aclose()
 
 
 def create_app() -> FastAPI:
@@ -70,6 +82,7 @@ def create_app() -> FastAPI:
     api = APIRouter(prefix="/api/v1", tags=["api"])
     api.include_router(health_router, prefix="/health")
     api.include_router(crawl_router, prefix="/crawl")
+    api.include_router(map_router, prefix="/map")
     app.include_router(api)
 
     # MCP endpoint at /mcp. Exclude the SSE stream endpoint — streaming

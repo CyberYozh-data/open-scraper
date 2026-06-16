@@ -45,6 +45,36 @@ class ScraperClient:
         except httpx.HTTPError:
             return False
 
+    async def resolve_proxy(
+        self,
+        proxy_type: str,
+        proxy_pool_id: str | None = None,
+        proxy_geo: dict[str, str] | None = None,
+    ) -> str | None:
+        """Ask the scraper to resolve an upstream proxy URL (reuses its CyberYozh
+        resolution). Returns the SOCKS5 URL, or None for proxy_type=none / no
+        proxy configured."""
+        params: dict[str, str] = {"proxy_type": proxy_type}
+        if proxy_pool_id:
+            params["proxy_pool_id"] = proxy_pool_id
+        for key in ("country_code", "region", "city"):
+            value = (proxy_geo or {}).get(key)
+            if value:
+                params[key] = value
+        try:
+            r = await self._client.get("/api/v1/proxies/resolve", params=params)
+        except httpx.HTTPError as e:
+            raise ScraperError(
+                status_code=None, message=f"resolve_proxy unreachable: {e}", retryable=True
+            ) from e
+        if r.status_code != 200:
+            raise ScraperError(
+                status_code=r.status_code,
+                message=f"resolve_proxy returned {r.status_code}: {r.text[:200]}",
+                retryable=False,
+            )
+        return r.json().get("proxy_url")
+
     async def fetch(self, url: str, scrape_options: dict[str, Any]) -> dict[str, Any]:
         body = {"url": url, **scrape_options}
 

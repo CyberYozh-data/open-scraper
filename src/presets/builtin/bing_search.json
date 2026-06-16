@@ -1,0 +1,62 @@
+{
+  "name": "bing_search",
+  "source": "bing",
+  "description": "Bing web search (organic results). Fixed bing.com host; country routed via cc= and language via setlang= (derived from the locale). Materializer lowercases `country` for cc= and derives a language code for setlang= from the locale.",
+  "kind": "builtin",
+  "url_template": "https://www.bing.com/search?q={query}&cc={country}&setlang={lang}",
+  "request_defaults": {
+    "device": "desktop",
+    "proxy_type": "res_rotating",
+    "stealth": true,
+    "wait_until": "domcontentloaded",
+    "timeout_ms": 30000,
+    "block_assets": true
+  },
+  "locales": {
+    "us": { "domain": "com", "country": "US" },
+    "uk": { "domain": "com", "country": "GB" },
+    "de": { "domain": "com", "country": "DE" },
+    "fr": { "domain": "com", "country": "FR" },
+    "ru": { "domain": "com", "country": "RU" },
+    "jp": { "domain": "com", "country": "JP" }
+  },
+  "default_locale": "us",
+  "parsing_instructions": {
+    "type": "css",
+    "fields": {
+      "titles": {
+        "selector": "li.b_algo h2",
+        "all": true,
+        "required": true
+      },
+      "links": {
+        "selector": "li.b_algo h2 a[href^='http']",
+        "attr": "href",
+        "all": true
+      },
+      "snippets": {
+        "selector": "li.b_algo .b_caption p, li.b_algo p.b_lineclamp2",
+        "all": true,
+        "post_process": [{ "op": "strip" }]
+      },
+      "result_blocks": {
+        "selector": "li.b_algo",
+        "attr": "html",
+        "all": true
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "titles":    { "type": "array", "items": { "type": "string" } },
+      "links":     { "type": "array", "items": { "type": "string" } },
+      "snippets":  { "type": "array", "items": { "type": "string" } }
+    }
+  },
+  "self_heal": true,
+  "prompt_schema": null,
+  "llm_extract_prompt": null,
+  "version": 1,
+  "updated_at": 1747267200.0
+}

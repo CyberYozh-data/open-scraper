@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from src.jobs import JobRecord, get_job_queue
-from src.schemas import BatchScrapeRequest, ScrapeRequest
+import asyncio
+
+from src.jobs import TERMINAL_STATUSES, JobRecord, get_job_queue
+from src.schemas import BatchScrapeRequest, ScrapeRequest, ScrapeResponse
+from src.settings import settings
 from src.sessions.store import get_session_store
 
 
@@ -65,6 +68,33 @@ class ScrapeService:
 
     async def request_cancel(self, job_id: str) -> bool:
         return await get_job_queue().request_cancel(job_id)
+
+    async def run_and_wait(
+        self, pages: list[ScrapeRequest], *, timeout_s: float | None = None
+    ) -> list[ScrapeResponse]:
+        """Submit pages and block until the job is terminal, returning results.
+
+        For synchronous endpoints (e.g. /search) that need results in one call
+        rather than the usual submit-then-poll. Uses the queue directly (not
+        submit_job) so materialized preset requests carrying internal fields are
+        accepted, mirroring the preset scrape path. The default deadline budgets
+        for chained stages (SERP then per-result scrapes) plus queue slack; on
+        timeout it returns whatever results have completed so far (the runner
+        writes them incrementally) rather than discarding the partial work.
+        """
+        queue = get_job_queue()
+        job_id = await queue.submit(pages)
+        if timeout_s is None:
+            timeout_s = settings.job_timeout_ms / 1000.0 * 3 + 60
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        record = None
+        while loop.time() < deadline:
+            record = await queue.get(job_id)
+            if record is not None and record.status in TERMINAL_STATUSES:
+                return record.results or []
+            await asyncio.sleep(0.15)
+        return (record.results or []) if record is not None else []
 
 
 scrape_service = ScrapeService()

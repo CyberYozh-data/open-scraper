@@ -53,6 +53,11 @@ class Settings(BaseSettings):
         alias="CORS_ALLOW_ORIGINS",
     )
 
+    # /map fast URL discovery
+    map_http_timeout_ms: int = Field(default=10_000, alias="MAP_HTTP_TIMEOUT_MS")
+    map_max_urls: int = Field(default=5_000, alias="MAP_MAX_URLS")
+    map_max_sitemaps: int = Field(default=50, alias="MAP_MAX_SITEMAPS")
+
 
 settings = Settings()
 

@@ -35,7 +35,7 @@ class JobRecord:
     finished_at: float | None = None
 
 
-_TERMINAL_STATUSES = ("done", "failed", "cancelled")
+TERMINAL_STATUSES = ("done", "failed", "cancelled")
 
 
 def _calculate_worker_timeout(page_timeout_ms: int | None) -> int | None:
@@ -160,7 +160,7 @@ class InMemoryJobQueue:
         are skipped and the job transitions to ``status="cancelled"``."""
         async with self._lock:
             job_record = self._jobs.get(job_id)
-            if job_record is None or job_record.status in _TERMINAL_STATUSES:
+            if job_record is None or job_record.status in TERMINAL_STATUSES:
                 log.info("cancel request ignored job_id=%s reason=%s", job_id,
                          "not_found" if job_record is None else f"already_{job_record.status}")
                 return False
@@ -187,7 +187,7 @@ class InMemoryJobQueue:
                 return
             if status is not None:
                 job_record.status = status
-                if status in _TERMINAL_STATUSES and job_record.finished_at is None:
+                if status in TERMINAL_STATUSES and job_record.finished_at is None:
                     job_record.finished_at = self._clock()
             if done is not None:
                 job_record.done = done
