@@ -8,7 +8,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.api import scrape_preset as sp_module
 from src.api.presets import get_preset_store
 from src.api.scrape_preset import router as scrape_preset_router
 from src.presets.models import LocaleProfile, ParsingInstructions, Preset
@@ -49,15 +48,15 @@ def store(tmp_path: Path) -> PresetStore:
 
 @pytest.fixture
 def client(store: PresetStore, mocker) -> TestClient:
-    queue = AsyncMock()
-    queue.submit = AsyncMock(return_value="job_xyz")
-    mocker.patch.object(sp_module, "get_job_queue", return_value=queue)
+    # Patch submit_job_internal so pages are captured without real Redis/taskiq.
+    submit_mock = AsyncMock(return_value="job_xyz")
+    mocker.patch("src.scrape_service.scrape_service.submit_job_internal", submit_mock)
 
     app = FastAPI()
     app.include_router(scrape_preset_router, prefix="/api/v1/scrape/preset")
     app.dependency_overrides[get_preset_store] = lambda: store
     test_client = TestClient(app)
-    test_client._queue = queue  # type: ignore[attr-defined]
+    test_client._submit = submit_mock  # type: ignore[attr-defined]
     return test_client
 
 
@@ -79,7 +78,7 @@ class TestScrapePresetPage:
             "/api/v1/scrape/preset/page",
             json={"source": "amazon_product", "preset_params": {"asin": "X"}},
         )
-        submitted = client._queue.submit.await_args.args[0]
+        submitted = client._submit.await_args.args[0]
         assert len(submitted) == 1
         page = submitted[0]
         assert str(page.url) == "https://www.amazon.com/dp/X"
@@ -125,7 +124,7 @@ class TestScrapePresetPages:
             },
         )
         assert resp.status_code == 200
-        submitted = client._queue.submit.await_args.args[0]
+        submitted = client._submit.await_args.args[0]
         assert [str(p.url) for p in submitted] == [
             "https://www.amazon.com/dp/A",
             "https://www.amazon.com/dp/B",
@@ -181,9 +180,8 @@ class TestRequestDefaultsBadType:
         )
         store.user.create(bad)
 
-        queue = AsyncMock()
-        queue.submit = AsyncMock(return_value="j")
-        mocker.patch.object(sp_module, "get_job_queue", return_value=queue)
+        submit_mock = AsyncMock(return_value="j")
+        mocker.patch("src.scrape_service.scrape_service.submit_job_internal", submit_mock)
         app = FastAPI()
         app.include_router(scrape_preset_router, prefix="/api/v1/scrape/preset")
         app.dependency_overrides[get_preset_store] = lambda: store
@@ -231,7 +229,7 @@ class TestScrapePresetPageSession:
             },
         )
         assert resp.status_code == 200
-        page = client._queue.submit.await_args.args[0][0]
+        page = client._submit.await_args.args[0][0]
         assert page.session_id == "sess_ok"
 
     def test_unknown_session_404(self, client, session_store):
@@ -332,7 +330,7 @@ class TestScrapePresetPagesSession:
             },
         )
         assert resp.status_code == 200
-        submitted = client._queue.submit.await_args.args[0]
+        submitted = client._submit.await_args.args[0]
         assert [p.session_id for p in submitted] == ["sess_ok", "sess_ok"]
 
     def test_batch_vs_per_page_conflict_422(self, client, session_store):
@@ -399,7 +397,7 @@ class TestScrapePresetPagesSession:
             },
         )
         assert resp.status_code == 200
-        submitted = client._queue.submit.await_args.args[0]
+        submitted = client._submit.await_args.args[0]
         assert [p.session_id for p in submitted] == ["sess_same"]
 
     def test_batch_mixed_pages_all_get_batch_session(self, client, session_store):
@@ -421,5 +419,5 @@ class TestScrapePresetPagesSession:
             },
         )
         assert resp.status_code == 200
-        submitted = client._queue.submit.await_args.args[0]
+        submitted = client._submit.await_args.args[0]
         assert [p.session_id for p in submitted] == ["sess_b", "sess_b"]

@@ -67,7 +67,7 @@ class TestCyberYozhSession:
         result = session.max_attempts()
 
         assert result == 5
-        provider.max_attempts.assert_called_once_with("mobile")
+        provider.max_attempts.assert_called_once_with("mobile", override=None)
 
     def test_session_current_proxy(self):
         """current_proxy return lease.config"""

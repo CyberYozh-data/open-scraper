@@ -5,14 +5,16 @@ from typing import get_args
 
 import pytest
 
-from src.api.search import ENGINES, _parse_results, build_search
+from src.api.search import ENGINES, _engine_override, _parse_results, build_search
 from src.presets.store import PresetStore
 from src.schemas import (
+    PremProxyOptions,
     ProxyGeo,
     ScrapeMeta,
     ScrapeResponse,
     SearchEngine,
     SearchRequest,
+    WarmupOptions,
 )
 
 
@@ -267,6 +269,57 @@ class TestBingRedirect:
         assert res[0].url == "https://real.com/p"
 
 
+class TestYandexRedirect:
+    """_unwrap_redirect handles yabs.yandex.ru click-tracking links."""
+
+    def test_yabs_with_url_param_is_unwrapped(self):
+        from src.api.search import _unwrap_redirect
+
+        yabs = "https://yabs.yandex.ru/count/ABC?q=buy+proxy&url=https%3A%2F%2Fdataimpulse.com%2F"
+        out = _unwrap_redirect(yabs)
+        assert out == "https://dataimpulse.com/"
+
+    def test_yabs_with_u_param_is_unwrapped(self):
+        from src.api.search import _unwrap_redirect
+
+        yabs = "https://yabs.yandex.ru/count/XYZ?u=https%3A%2F%2Fexample.com%2F"
+        out = _unwrap_redirect(yabs)
+        assert out == "https://example.com/"
+
+    def test_yabs_opaque_blob_passthrough(self):
+        from src.api.search import _unwrap_redirect
+
+        # No decodable url= or u= param — pass through unchanged rather than dropping.
+        yabs = "https://yabs.yandex.ru/count/OPAQUEONLY"
+        assert _unwrap_redirect(yabs) == yabs
+
+    def test_yabs_etext_only_passthrough(self):
+        from src.api.search import _unwrap_redirect
+
+        # etext= is opaque and not followed; result is unchanged.
+        yabs = "https://yabs.yandex.ru/count/BLOB?etext=abc123"
+        assert _unwrap_redirect(yabs) == yabs
+
+    def test_yabs_non_http_payload_passthrough(self):
+        from src.api.search import _unwrap_redirect
+
+        # A crafted url= with a non-http(s) scheme must not be returned.
+        yabs = "https://yabs.yandex.ru/count/X?url=javascript%3Aalert%281%29"
+        assert _unwrap_redirect(yabs) == yabs
+
+    def test_plain_https_link_passes_through(self):
+        from src.api.search import _unwrap_redirect
+
+        assert _unwrap_redirect("https://hidemy.name/") == "https://hidemy.name/"
+
+    def test_subdomain_count_path_unwrapped(self):
+        from src.api.search import _unwrap_redirect
+
+        # *.yandex.ru with /count/ in path should also be handled.
+        yabs = "https://an.yandex.ru/count/BLOB?url=https%3A%2F%2Ftarget.com%2F"
+        assert _unwrap_redirect(yabs) == "https://target.com/"
+
+
 class TestEngineRouting:
     @pytest.mark.asyncio
     async def test_default_engine_is_google(self, store):
@@ -320,11 +373,11 @@ class TestSearchProxy:
     @pytest.mark.asyncio
     async def test_no_override_keeps_preset_proxy(self, store):
         # Default-off: with no proxy fields, the SERP job keeps the
-        # google_search preset's own proxy (res_rotating) — unchanged behaviour.
+        # google_search preset's own proxy (prem_res_rotating) — unchanged behaviour.
         runner = _Runner(_SERP_DATA)
         await build_search(SearchRequest(query="x"), store=store, run_job=runner)
         serp = runner.calls[0][0]
-        assert serp.proxy_type == "res_rotating"
+        assert serp.proxy_type == "prem_res_rotating"
 
     @pytest.mark.asyncio
     async def test_override_applied_to_serp(self, store):
@@ -346,7 +399,7 @@ class TestSearchProxy:
 
     @pytest.mark.asyncio
     async def test_override_can_disable_preset_proxy(self, store):
-        # Explicit "none" overrides the preset's res_rotating (distinct from
+        # Explicit "none" overrides the preset's prem_res_rotating (distinct from
         # "field omitted", which keeps the preset default).
         runner = _Runner(_SERP_DATA)
         await build_search(
@@ -393,3 +446,128 @@ class TestSearchTiming:
         res = await build_search(SearchRequest(query="x"), store=store, run_job=runner)
         assert isinstance(res.took_ms, int)
         assert res.took_ms >= 0
+
+
+class TestSearchEngineOverride:
+    """browser_engine + Camoufox premium fields flow through the SERP and result scrapes."""
+
+    def test_engine_override_set_when_engine_provided(self):
+        override = _engine_override(SearchRequest(query="x", browser_engine="firefox"))
+        assert override["browser_engine"] == "firefox"
+
+    def test_engine_override_empty_when_engine_unset(self):
+        # None default -> preset engine wins; override must be empty.
+        override = _engine_override(SearchRequest(query="x"))
+        assert "browser_engine" not in override
+
+    def test_engine_override_camoufox_opts_included_when_set(self):
+        override = _engine_override(
+            SearchRequest(
+                query="x",
+                browser_engine="camoufox",
+                humanize=True,
+                block_webgl=True,
+                spoof_os="windows",
+                addons=["ublock"],
+            )
+        )
+        assert override["browser_engine"] == "camoufox"
+        assert override["humanize"] is True
+        assert override["block_webgl"] is True
+        assert override["spoof_os"] == "windows"
+        assert override["addons"] == ["ublock"]
+
+    def test_engine_override_camoufox_defaults_not_included(self):
+        # Default-off fields must NOT pollute the override dict (preset wins).
+        override = _engine_override(SearchRequest(query="x", browser_engine="camoufox"))
+        assert "humanize" not in override
+        assert "block_webgl" not in override
+        assert "spoof_os" not in override
+        assert "addons" not in override
+
+    @pytest.mark.asyncio
+    async def test_browser_engine_override_applied_to_serp(self, store):
+        runner = _Runner(_SERP_DATA)
+        await build_search(
+            SearchRequest(query="x", browser_engine="firefox"),
+            store=store,
+            run_job=runner,
+        )
+        serp = runner.calls[0][0]
+        assert serp.browser_engine == "firefox"
+
+    @pytest.mark.asyncio
+    async def test_no_browser_engine_keeps_preset_engine(self, store):
+        # Default (None) must NOT inject browser_engine into the override, so
+        # the preset's own engine setting (e.g. camoufox for yandex) survives.
+        runner = _Runner(_SERP_DATA)
+        await build_search(
+            SearchRequest(query="x", engine="yandex"),
+            store=store,
+            run_job=runner,
+        )
+        serp = runner.calls[0][0]
+        # The yandex_search preset defaults to camoufox; the override must not
+        # have clobbered it with chromium (the old hard-coded default).
+        assert serp.browser_engine == "camoufox"
+
+    @pytest.mark.asyncio
+    async def test_browser_engine_override_applied_to_result_scrapes(self, store):
+        runner = _Runner(_SERP_DATA, scrape_responses=[_resp(), _resp()])
+        await build_search(
+            SearchRequest(query="x", scrape=True, browser_engine="firefox"),
+            store=store,
+            run_job=runner,
+        )
+        for page in runner.calls[1]:
+            assert page.browser_engine == "firefox"
+
+
+class TestSearchWarmup:
+    """warmup and prem_proxy_options flow from SearchRequest into the SERP ScrapeRequest."""
+
+    @pytest.mark.asyncio
+    async def test_warmup_forwarded_to_serp(self, store):
+        runner = _Runner(_SERP_DATA)
+        await build_search(
+            SearchRequest(query="x", warmup=WarmupOptions(type="homepage", dwell_ms=500)),
+            store=store,
+            run_job=runner,
+        )
+        serp = runner.calls[0][0]
+        assert serp.warmup is not None
+        assert serp.warmup.type == "homepage"
+        assert serp.warmup.dwell_ms == 500
+
+    @pytest.mark.asyncio
+    async def test_warmup_inherited_from_preset_when_unset(self, store):
+        # google_search ships warmup {type: homepage}; with no request-level warmup
+        # the SERP job inherits it — omitting the field is not the same as disabling.
+        runner = _Runner(_SERP_DATA)
+        await build_search(SearchRequest(query="x"), store=store, run_job=runner)
+        serp = runner.calls[0][0]
+        assert serp.warmup is not None
+        assert serp.warmup.type == "homepage"
+
+    @pytest.mark.asyncio
+    async def test_prem_proxy_options_forwarded_to_serp(self, store):
+        runner = _Runner(_SERP_DATA)
+        await build_search(
+            SearchRequest(
+                query="x",
+                proxy_type="prem_res_rotating",
+                prem_proxy_options=PremProxyOptions(ip_filter="max-speed-security"),
+            ),
+            store=store,
+            run_job=runner,
+        )
+        serp = runner.calls[0][0]
+        assert serp.prem_proxy_options is not None
+        assert serp.prem_proxy_options.ip_filter == "max-speed-security"
+
+    @pytest.mark.asyncio
+    async def test_prem_proxy_options_absent_when_unset(self, store):
+        runner = _Runner(_SERP_DATA)
+        await build_search(SearchRequest(query="x"), store=store, run_job=runner)
+        serp = runner.calls[0][0]
+        assert serp.prem_proxy_options is None

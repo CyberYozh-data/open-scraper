@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from .health import router as health_router
 from .presets import router as presets_router
 from .proxies import router as proxies_router
+from .queue_stats import router as queue_stats_router
 from .scrape import router as scrape_router
 from .scrape_preset import router as scrape_preset_router
 from .search import router as search_router
@@ -21,3 +22,4 @@ router.include_router(proxies_router, prefix="/proxies")
 router.include_router(presets_router, prefix="/presets")
 router.include_router(search_router, prefix="/search")
 router.include_router(sessions_router, prefix="/sessions")
+router.include_router(queue_stats_router, prefix="/queue")

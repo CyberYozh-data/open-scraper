@@ -49,11 +49,13 @@ class CyberYozhProxyProvider:
     client: CyberYozhClient
     geo: dict[str, str] | None = None
 
-    def max_attempts(self, proxy_type_raw: str) -> int:
-        # All proxy types share the same cap now — configurable via MAX_RETRIES.
-        # Static types used to be hard-capped at 2 attempts, but there is no
-        # fundamental reason for that: the same pool rotation logic applies.
-        return max(1, int(settings.max_retries))
+    def max_attempts(self, proxy_type_raw: str, override: int | None = None) -> int:
+        # All proxy types share the same cap now — configurable via MAX_RETRIES,
+        # or per-request via ScrapeRequest.max_retries (override). Static types
+        # used to be hard-capped at 2 attempts, but there is no fundamental
+        # reason for that: the same pool rotation logic applies.
+        base = settings.max_retries if override is None else override
+        return max(1, int(base))
 
     async def acquire(self, proxy_type_raw: str, proxy_pool_id: str | None) -> ProxyLease:
         return await self.rotate_next(

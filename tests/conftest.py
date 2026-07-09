@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("TASKIQ_INMEMORY", "1")
+
 import pytest
 
 from src.settings import Settings
@@ -17,7 +21,6 @@ def test_settings():
         headless=True,
         workers=1,
         queue_maxsize=10,
-        jobs_enabled=False,
         cyberyozh_api_key=None,
     )
 
@@ -98,3 +101,28 @@ def sample_proxy_history():
             "connection_port": 8080,
         },
     ]
+
+
+@pytest.fixture(autouse=True)
+def _fake_redis_store(monkeypatch):
+    """Every app/route test gets a fresh in-process fakeredis job store: the
+    lifespan's init_job_store() builds RedisJobStore around it via this seam.
+
+    We also reset _store to None so that the next call to init_job_store()
+    (triggered by TestClient lifespan startup) always builds a fresh instance
+    around the patched make_redis_client — even when tests run after another
+    test that already ran a lifespan.
+
+    The session store is also reset: since init_session_store() in the app
+    lifespan reuses get_job_store().client, the session store will automatically
+    get the same fakeredis instance once the lifespan starts. Unit tests that
+    construct RedisSessionStore directly (tests/sessions/test_store.py) do so
+    with their own per-test fakeredis fixture and don't rely on this reset."""
+    import fakeredis.aioredis
+    import src.queue.store as store_mod
+    import src.sessions.store as session_store_mod
+    fake = fakeredis.aioredis.FakeRedis()
+    monkeypatch.setattr(store_mod, "make_redis_client", lambda url: fake)
+    monkeypatch.setattr(store_mod, "_store", None)
+    monkeypatch.setattr(session_store_mod, "_store", None)
+    yield

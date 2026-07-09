@@ -111,18 +111,30 @@ discover → pick URLs → feed them to `/scrape` or `/crawl`.
 ```bash
 curl -s localhost:8001/api/v1/map \
   -H 'content-type: application/json' \
-  -d '{"seed_url": "https://example.com", "limit": 100}'
-# -> {"seed_url","count","urls":[...],"stats":{from_sitemap,from_page,unique_in_scope},"took_ms","warnings"}
+  -d '{"seed_url": "https://example.com", "search": "/blog/", "sort": "newest", "limit": 100}'
+# -> {"seed_url","count","urls":[...],"lastmod":{url:"<lastmod>"},
+#     "stats":{from_sitemap,from_page,unique_in_scope,with_lastmod},"took_ms","warnings"}
 ```
 
 Request fields: `seed_url` (required), `scope` (reuses the crawl scope —
 `mode` + include/exclude patterns; depth/rps ignored), `include_sitemap`,
 `include_page_links`, `render` (fetch the seed via the scraper for SPA links),
-`search` (case-insensitive substring filter), `limit`, and proxy:
+`search` (case-insensitive substring filter — also applied *during* sitemap
+collection, so the `MAP_MAX_URLS` cap counts matches rather than starving on a
+huge sitemap), `limit`, and proxy:
 `proxy_type` / `proxy_pool_id` / `proxy_geo` (default `none`). When a proxy is
 set the scraper resolves the upstream URL (`GET /api/v1/proxies/resolve`, reusing
 its CyberYozh integration) and the crawler routes the robots/sitemap/seed
 fetches through it — useful for sites that block datacenter IPs or geo-restrict.
+
+**Recency filter / sort** (sitemap `<lastmod>`): `published_after` (`YYYY-MM-DD`,
+keep URLs modified on/after that date), `recent_days` (shorthand: within the last
+N days; ignored if `published_after` is set), and `sort: "newest"` (order by
+`<lastmod>` descending, undated URLs last). Only sitemap-sourced URLs carry a
+date — `<a>`-link URLs and entries without `<lastmod>` are dropped by a date
+filter and sort last. The returned `lastmod` map echoes the raw `<lastmod>` for
+each returned URL that has one; if a date filter is requested but the sitemap
+exposes no dates, that's surfaced in `warnings`.
 
 Direct (no-proxy) fetches pass through an SSRF guard that refuses private /
 loopback / link-local / metadata addresses and re-validates every redirect hop;

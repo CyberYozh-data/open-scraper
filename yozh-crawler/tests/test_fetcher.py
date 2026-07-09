@@ -256,3 +256,24 @@ async def test_resolve_proxy_error_raises(client, mocker):
     mocker.patch.object(client._client, "get", AsyncMock(return_value=_resp(502, "boom")))
     with pytest.raises(ScraperError):
         await client.resolve_proxy("res_rotating")
+
+
+@pytest.mark.asyncio
+async def test_resolve_proxy_forwards_prem_options(client, mocker):
+    spy = AsyncMock(return_value=_resp(200, {"proxy_url": "http://gate:10000"}))
+    mocker.patch.object(client._client, "get", spy)
+    await client.resolve_proxy(
+        "prem_res_rotating",
+        proxy_geo={"country_code": "RU"},
+        prem_proxy_options={
+            "ip_filter": "quality-security", "zip": "101000",
+            "session_type": "sticky", "rotation_minutes": 10,
+        },
+    )
+    params = spy.call_args.kwargs["params"]
+    assert params["proxy_type"] == "prem_res_rotating"
+    assert params["country_code"] == "RU"
+    assert params["ip_filter"] == "quality-security"
+    assert params["zip_code"] == "101000"          # zip -> zip_code for the helper
+    assert params["session_type"] == "sticky"
+    assert params["rotation_minutes"] == "10"      # stringified for the query

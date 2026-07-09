@@ -16,12 +16,12 @@ _FALLBACK_SITEMAP_PATHS = ("/sitemap.xml", "/sitemap_index.xml")
 _MAX_XML_BYTES = 10 * 1024 * 1024  # guard against giant sitemaps
 
 
-def parse_sitemap_xml(xml: str) -> tuple[list[str], list[str]]:
-    """Parse a sitemap document into (page_urls, child_sitemap_urls).
+def parse_sitemap_xml(xml: str) -> tuple[list[tuple[str, str | None]], list[str]]:
+    """Parse a sitemap document into (page_entries, child_sitemap_urls).
 
-    Handles both <urlset> (pages) and <sitemapindex> (nested sitemaps),
-    namespace-agnostic. A <loc> under a <sitemap> element is a child sitemap;
-    any other <loc> is a page. Returns empty lists on malformed input.
+    A page entry is ``(loc, lastmod)`` where ``lastmod`` is the raw ``<lastmod>``
+    text (or None if absent). Handles both <urlset> (pages) and <sitemapindex>
+    (nested sitemaps), namespace-agnostic. Returns empty lists on malformed input.
     """
     try:
         root = etree.fromstring(xml.encode("utf-8"))
@@ -29,15 +29,31 @@ def parse_sitemap_xml(xml: str) -> tuple[list[str], list[str]]:
         return [], []
 
     # A sitemap doc is either a <urlset> (pages) or a <sitemapindex> (child
-    # sitemaps) — never mixed — so the root tag decides which bucket the <loc>
-    # values belong to.
-    is_index = etree.QName(root).localname.lower() == "sitemapindex"
-    locs = [
-        loc
-        for el in root.iter()
-        if etree.QName(el).localname.lower() == "loc" and (loc := (el.text or "").strip())
-    ]
-    return ([], locs) if is_index else (locs, [])
+    # sitemaps) — never mixed — so the root tag decides which bucket applies.
+    if etree.QName(root).localname.lower() == "sitemapindex":
+        child = [
+            loc
+            for el in root.iter()
+            if etree.QName(el).localname.lower() == "loc" and (loc := (el.text or "").strip())
+        ]
+        return [], child
+
+    # <urlset>: pair each <loc> with its sibling <lastmod> inside the <url> entry.
+    pages: list[tuple[str, str | None]] = []
+    for url_el in root.iter():
+        if etree.QName(url_el).localname.lower() != "url":
+            continue
+        loc: str | None = None
+        lastmod: str | None = None
+        for child_el in url_el:
+            name = etree.QName(child_el).localname.lower()
+            if name == "loc":
+                loc = (child_el.text or "").strip()
+            elif name == "lastmod":
+                lastmod = (child_el.text or "").strip() or None
+        if loc:
+            pages.append((loc, lastmod))
+    return pages, []
 
 
 def parse_robots_sitemaps(robots_txt: str, base_url: str) -> list[str]:
@@ -87,10 +103,18 @@ async def collect_sitemap_urls(
     max_urls: int,
     max_sitemaps: int,
     check_ssrf: bool = True,
-) -> list[str]:
+    match: str | None = None,
+) -> list[tuple[str, str | None]]:
     """Breadth-first walk of sitemaps (following <sitemapindex>) collecting page
-    URLs, bounded by max_urls and the number of sitemap docs fetched."""
-    pages: list[str] = []
+    entries ``(loc, lastmod)``, bounded by max_urls and the number of sitemap
+    docs fetched.
+
+    When ``match`` is given, only locs containing it (case-insensitive) are
+    collected, so ``max_urls`` bounds *matching* pages rather than all pages —
+    otherwise a substring search on a big sitemap is starved by the cap.
+    """
+    needle = match.lower() if match else None
+    pages: list[tuple[str, str | None]] = []
     queue = list(sitemap_urls)
     seen: set[str] = set()
     fetched = 0
@@ -104,6 +128,8 @@ async def collect_sitemap_urls(
             continue
         fetched += 1
         found_pages, child_sitemaps = parse_sitemap_xml(xml)
-        pages.extend(found_pages)
+        for loc, lastmod in found_pages:
+            if needle is None or needle in loc.lower():
+                pages.append((loc, lastmod))
         queue.extend(s for s in child_sitemaps if s not in seen)
     return pages[:max_urls]

@@ -5,11 +5,13 @@ import logging
 from src.proxy.base import ProxySession
 from src.proxy.countries import COUNTRIES
 from src.proxy.cyberyozh.client import CyberYozhClient
+from src.proxy.cyberyozh.client_v2 import CyberYozhV2Client
 from src.proxy.cyberyozh.provider import (
     CyberYozhProxyProvider,
     get_category_proxy,
     normalize_proxy_raw_type,
 )
+from src.proxy.cyberyozh.provider_v2 import PremProxyProvider, PremProxySession
 from src.proxy.cyberyozh.session import CyberYozhSession
 from src.schemas import (
     CountriesResponse,
@@ -56,17 +58,35 @@ class ProxyResolver:
                 base_url=f"{settings.cyberyozh_base_url.rstrip('/')}/api/v1",
                 api_key=api_key,
             )
+            self._client_v2 = CyberYozhV2Client(
+                base_url=f"{settings.cyberyozh_base_url.rstrip('/')}/api/v2/rotating-proxies",
+                api_key=api_key,
+            )
         else:
             self._client = None
+            self._client_v2 = None
 
     async def open_session(
         self,
         proxy_type: str | None,
         proxy_pool_id: str | None,
-        proxy_geo: dict[str, str] | None = None
+        proxy_geo: dict[str, str] | None = None,
+        max_retries: int | None = None,
+        prem_proxy_options: dict | None = None,
     ) -> ProxySession:
         if not proxy_type or proxy_type == "none" or self._client is None:
             return DirectSession()
+
+        if proxy_type == "prem_res_rotating":
+            if self._client_v2 is None:
+                return DirectSession()
+            provider = PremProxyProvider(
+                client=self._client_v2,
+                proxy_geo=proxy_geo,
+                prem_opts=prem_proxy_options,
+            )
+            session = PremProxySession(provider=provider, max_retries=max_retries)
+            return await session.init()
 
         provider = CyberYozhProxyProvider(
             client=self._client,
@@ -77,6 +97,7 @@ class ProxyResolver:
             provider=provider,
             proxy_type_raw=str(proxy_type),
             proxy_pool_id=proxy_pool_id,
+            max_retries=max_retries,
         )
         return await session.init()
 
@@ -86,6 +107,15 @@ class ProxyResolver:
                 proxy_type=proxy_type,
                 category="",
                 configured=False,
+                items=[],
+            )
+
+        # prem_res_rotating uses the v2 gateway and carries no legacy pool IDs.
+        if proxy_type == "prem_res_rotating":
+            return ProxyListResponse(
+                proxy_type=proxy_type,
+                category="prem_res_rotating",
+                configured=True,
                 items=[],
             )
 

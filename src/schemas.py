@@ -1,6 +1,7 @@
 from __future__ import annotations
+import re
 from typing import Any, Literal, Dict
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 # Single source of truth for extraction models. `FieldRule`/`ExtractRule`
 # (and `PostProcess`) live in src.extract.models — the worker validates the
@@ -17,10 +18,10 @@ from src.presets.models import ParserPlan, PresetMeta
 
 # pylint: enable=unused-import
 
-ProxyType = Literal["mobile_shared", "mobile", "res_static", "res_rotating", "dc_static"]
-ScrapeProxyType = Literal["none", "mobile_shared", "mobile", "res_static", "res_rotating", "dc_static"]
+ProxyType = Literal["mobile_shared", "mobile", "res_static", "res_rotating", "dc_static", "prem_res_rotating"]
+ScrapeProxyType = Literal["none", "mobile_shared", "mobile", "res_static", "res_rotating", "dc_static", "prem_res_rotating"]
 SearchEngine = Literal["google", "bing", "yandex"]
-WaitUntil = Literal["domcontentloaded", "networkidle"]
+WaitUntil = Literal["domcontentloaded", "load", "networkidle"]
 Device = Literal["desktop", "mobile"]
 OutputFormat = Literal["markdown", "fit_markdown", "raw_html", "html", "links", "screenshot"]
 ContentFilter = Literal["none", "pruning", "llm"]
@@ -34,6 +35,8 @@ ElementScreenshotStatus = Literal[
     "not_requested",
     "no_screenshot",
 ]
+BrowserEngine = Literal["chromium", "firefox", "webkit", "camoufox"]
+SpoofOS = Literal["windows", "macos", "linux"]
 
 
 class ProxyItem(BaseModel):
@@ -82,8 +85,112 @@ class Cookie(BaseModel):
 
 class ProxyGeo(BaseModel):
     country_code: str | None = None
-    region: str | None = None
-    city: str | None = None
+    region: str | None = Field(default=None, max_length=128)
+    city: str | None = Field(default=None, max_length=128)
+
+    @field_validator("country_code")
+    @classmethod
+    def _validate_country_code(cls, v: str | None) -> str | None:
+        # country_code is templated raw into the proxy username (c-<iso>), so a
+        # stray '-' would inject extra gateway targeting tokens. Constrain it to
+        # an ISO-3166 alpha-2 code; blank means "no country" (kept for the legacy
+        # `(country_code or "").strip()` behaviour downstream).
+        if v is None or not v.strip():
+            return None
+        v = v.strip()
+        if not re.fullmatch(r"[A-Za-z]{2}", v):
+            raise ValueError("country_code must be an ISO-3166 alpha-2 code")
+        return v
+
+
+class PremProxyOptions(BaseModel):
+    """Targeting options for the v2 premium rotating gateway (prem_res_rotating).
+
+    country/region/city are read from proxy_geo. All fields optional; defaults
+    reproduce a plain rotating RU-agnostic exit. Suffixes are resolved from the
+    CyberYozh v2 /geo and /session-options endpoints at runtime, never hardcoded.
+    """
+
+    sub_user_id: str | None = Field(
+        default=None,
+        description="Which v2 sub-user to authenticate as. Defaults to the first/primary sub-user.",
+    )
+    ip_filter: Literal[
+        "max-size-security", "max-speed-security",
+        "quality-security", "speed-quality-security",
+    ] = "max-size-security"
+    zip: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Target by ZIP. Mutually exclusive with proxy_geo.region / proxy_geo.city.",
+    )
+    isp: str | None = Field(default=None, max_length=64)
+    session_type: Literal["rotating", "sticky"] = "rotating"
+    sticky_id: str | None = Field(
+        default=None,
+        description="Sticky-session id (reuse = same exit until ttl). Auto-generated (8 chars) for sticky if unset. Distinct from the top-level session_id.",
+    )
+    rotation_minutes: int | None = Field(default=None, ge=1, le=1440)
+    protocol: Literal["http", "socks5"] = "http"
+
+    @field_validator("sticky_id")
+    @classmethod
+    def _validate_sticky_id(cls, v: str | None) -> str | None:
+        # sticky_id is templated raw into the username token "s-<id>", so a '-'
+        # would inject extra gateway targeting tokens. Constrain to the same
+        # alphabet gen_sticky_id uses; blank means "auto-generate downstream".
+        if v is None or not v.strip():
+            return None
+        v = v.strip()
+        if not re.fullmatch(r"[A-Za-z0-9]{1,64}", v):
+            raise ValueError("sticky_id must be 1-64 alphanumeric characters")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_sticky(self) -> "PremProxyOptions":
+        if self.session_type != "sticky":
+            if self.rotation_minutes is not None:
+                raise ValueError("rotation_minutes requires session_type='sticky'")
+            if self.sticky_id is not None:
+                raise ValueError("sticky_id requires session_type='sticky'")
+        return self
+
+
+class WarmupOptions(BaseModel):
+    """Pre-navigation warmup: visit a page and dwell before the real fetch, in
+    the same browser context (seeds cookies/session). Works on all engines.
+    'homepage' visits the target's own origin; 'custom' visits an explicit URL."""
+
+    type: Literal["homepage", "custom"] = "homepage"
+    url: str | None = Field(
+        default=None,
+        description="Warmup URL for type='custom' (visited before the target). Ignored for 'homepage'.",
+    )
+    dwell_ms: int | None = Field(
+        default=None, ge=0, le=60000,
+        description="Override the server's WARMUP_DWELL_MS for this request.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_warmup(self) -> "WarmupOptions":
+        if self.type == "custom":
+            if not self.url:
+                raise ValueError("warmup type='custom' requires a url")
+            if not self.url.startswith(("http://", "https://")):
+                raise ValueError("warmup url must start with http:// or https://")
+        return self
+
+
+class AppliedWarmup(BaseModel):
+    """What the pre-navigation warmup ACTUALLY did (response side). Distinct from
+    WarmupOptions (the request input): `url` is the URL actually visited (the
+    resolved origin for type='homepage') and `dwell_ms` is the real dwell, which
+    may be the server's configured WARMUP_DWELL_MS. It carries NO request-side
+    bounds — this records reality, so it must always validate on read-back."""
+
+    type: str
+    url: str
+    dwell_ms: int
 
 
 class MarkdownOptions(BaseModel):
@@ -138,6 +245,23 @@ class ScrapeRequest(BaseModel):
     proxy_type: ScrapeProxyType = "none"
     proxy_pool_id: str | None = None
     proxy_geo: ProxyGeo | None = None
+    prem_proxy_options: PremProxyOptions | None = Field(
+        default=None,
+        description="Targeting for proxy_type='prem_res_rotating'. Ignored for other types.",
+    )
+
+    max_retries: int | None = Field(
+        default=None,
+        ge=1,
+        le=10,
+        description=(
+            "Max fetch attempts for this request when a failure looks like a "
+            "proxy issue or a captcha/block (the proxy is rotated each attempt). "
+            "1 means a single attempt with no retry. Ignored for direct "
+            "(proxy_type=none) requests, which never retry. When unset, the "
+            "server's MAX_RETRIES default is used."
+        ),
+    )
 
     session_id: str | None = Field(
         default=None,
@@ -212,6 +336,33 @@ class ScrapeRequest(BaseModel):
             "Canvas fingerprint, chrome runtime) to reduce bot detection."
         ),
     )
+    browser_engine: BrowserEngine = Field(
+        default="chromium",
+        description=(
+            "Rendering engine. 'camoufox' is an anti-detect Firefox used for "
+            "engines that fingerprint Chromium (e.g. Yandex SmartCaptcha)."
+        ),
+    )
+    humanize: bool = Field(
+        default=False,
+        description="Camoufox only: human-like cursor movement. No-op on other engines.",
+    )
+    spoof_os: SpoofOS | None = Field(
+        default=None,
+        description="Camoufox only: spoof the OS fingerprint. No-op on other engines.",
+    )
+    block_webgl: bool = Field(
+        default=False,
+        description="Camoufox only: disable WebGL. No-op on other engines.",
+    )
+    addons: list[str] | None = Field(
+        default=None,
+        description="Camoufox only: Firefox addon ids/paths to load (e.g. uBlock Origin).",
+    )
+    warmup: WarmupOptions | None = Field(
+        default=None,
+        description="Optional pre-navigation warmup (visit origin + dwell). Off when unset.",
+    )
     preset_meta: PresetMeta | None = Field(
         default=None,
         description=(
@@ -228,6 +379,28 @@ class ScrapeRequest(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _validate_engine_device(self) -> "ScrapeRequest":
+        if self.device == "mobile" and self.browser_engine in ("firefox", "camoufox"):
+            raise ValueError(
+                f"device='mobile' is not supported with browser_engine='{self.browser_engine}' "
+                "(Playwright Firefox has no mobile emulation); use chromium or webkit."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_prem_zip(self) -> "ScrapeRequest":
+        if (
+            self.prem_proxy_options is not None
+            and self.prem_proxy_options.zip
+            and self.proxy_geo is not None
+            and (self.proxy_geo.region or self.proxy_geo.city)
+        ):
+            raise ValueError(
+                "prem_proxy_options.zip is mutually exclusive with proxy_geo.region/city"
+            )
+        return self
+
 
 class ScrapeMeta(BaseModel):
     url: str
@@ -237,11 +410,40 @@ class ScrapeMeta(BaseModel):
     proxy_type: ScrapeProxyType
     proxy_pool_id: str | None = None
     retries: int = 0
+    fetch_ok: bool = Field(
+        default=True,
+        description=(
+            "Whether the underlying page fetch succeeded. False means the "
+            "render failed or was blocked (captcha/timeout) — the response "
+            "still carries any partial data, but screenshots/markdown may be "
+            "degraded or absent. Defaults True so legacy responses are "
+            "unaffected."
+        ),
+    )
     applied_user_agent: str | None = None
     applied_locale: str | None = None
     applied_timezone: str | None = None
     applied_accept_language: str | None = None
     applied_preset: PresetMeta | None = None
+    applied_prem_targeting: str | None = Field(
+        default=None,
+        description=(
+            "For proxy_type='prem_res_rotating': the resolved CyberYozh v2 username "
+            "targeting suffix (country/region/city/zip/isp/session/ttl/filter tokens, "
+            "e.g. 'c-us-filter-iqs-s-ab12cd34'). The account login is stripped, so no "
+            "credentials are exposed. Null for other proxy types."
+        ),
+    )
+    applied_warmup: AppliedWarmup | None = Field(
+        default=None,
+        description=(
+            "What the pre-navigation warmup actually did, if it ran: type, the URL "
+            "actually visited (the resolved origin for type='homepage'), and the "
+            "dwell. Null when no warmup was requested, it had no usable URL, or it "
+            "failed (warmup is non-fatal) — so this reflects what was applied, not "
+            "merely what was requested."
+        ),
+    )
 
 
 class ScrapeResponse(BaseModel):
@@ -317,7 +519,7 @@ class JobResultsResponse(BaseModel):
     total: int
     done: int = 0
     error: str | None = None
-    results: list[ScrapeResponse] | None = None
+    results: list[ScrapeResponse | None] | None = None
 
 
 class SearchRequest(BaseModel):
@@ -355,6 +557,47 @@ class SearchRequest(BaseModel):
     )
     proxy_geo: ProxyGeo | None = Field(
         default=None, description="Pin proxy geo (country_code/region/city)."
+    )
+    prem_proxy_options: PremProxyOptions | None = Field(
+        default=None,
+        description="Targeting for proxy_type='prem_res_rotating' on the SERP fetch.",
+    )
+    browser_engine: BrowserEngine | None = Field(
+        default=None,
+        description=(
+            "Rendering engine override. None (default) means inherit the preset's engine. "
+            "'camoufox' is an anti-detect Firefox used for engines that fingerprint Chromium "
+            "(e.g. Yandex SmartCaptcha)."
+        ),
+    )
+    max_retries: int | None = Field(
+        default=None,
+        ge=1,
+        le=10,
+        description=(
+            "Override the SERP preset's max fetch attempts on a proxy/captcha "
+            "failure (1-10; 1 = no retry); preset/server default if unset."
+        ),
+    )
+    humanize: bool = Field(
+        default=False,
+        description="Camoufox only: human-like cursor movement. No-op on other engines.",
+    )
+    spoof_os: SpoofOS | None = Field(
+        default=None,
+        description="Camoufox only: spoof the OS fingerprint. No-op on other engines.",
+    )
+    block_webgl: bool = Field(
+        default=False,
+        description="Camoufox only: disable WebGL. No-op on other engines.",
+    )
+    addons: list[str] | None = Field(
+        default=None,
+        description="Camoufox only: Firefox addon ids/paths to load (e.g. uBlock Origin).",
+    )
+    warmup: WarmupOptions | None = Field(
+        default=None,
+        description="Optional pre-navigation warmup for the SERP fetch. Off when unset.",
     )
 
 

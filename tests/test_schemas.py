@@ -15,6 +15,7 @@ from src.schemas import (
     JobCreateResponse,
     JobStatusResponse,
     JobResultsResponse,
+    WarmupOptions,
 )
 
 
@@ -134,6 +135,22 @@ class TestProxyGeo:
         assert geo.region == "California"
         assert geo.city == "Los Angeles"
 
+    def test_proxy_geo_rejects_country_code_injection(self):
+        # A hyphenated/over-long country_code would inject extra '-'-delimited
+        # targeting tokens into the CyberYozh proxy username — reject at the
+        # boundary (must be an ISO-3166 alpha-2 code).
+        with pytest.raises(ValidationError):
+            ProxyGeo(country_code="ru-r-77-ct-moscow")
+        with pytest.raises(ValidationError):
+            ProxyGeo(country_code="USA")
+
+    def test_proxy_geo_country_code_normalizes_blank(self):
+        # Blank means "no country" (preserves the legacy `or ""` behaviour);
+        # a valid code is accepted in either case and trimmed.
+        assert ProxyGeo(country_code="").country_code is None
+        assert ProxyGeo(country_code="  ").country_code is None
+        assert ProxyGeo(country_code=" us ").country_code == "us"
+
 
 class TestScrapeRequest:
     def test_scrape_request_minimal(self):
@@ -226,6 +243,26 @@ class TestScrapeResponse:
         assert response.took_ms == 1500
         assert response.warnings == []
 
+    def test_applied_warmup_accepts_server_dwell_over_request_bound(self):
+        # applied_warmup records what the warmup ACTUALLY did. The server's
+        # WARMUP_DWELL_MS has no upper bound, so the read-back model must not
+        # impose the request-side le=60000 on dwell_ms — otherwise a successful
+        # scrape would 500 on /results (store.get_full -> ScrapeResponse.model_validate).
+        resp = ScrapeResponse.model_validate({
+            "request_id": "r1",
+            "took_ms": 1,
+            "meta": {
+                "url": "https://e.com",
+                "device": "desktop",
+                "proxy_type": "none",
+                "applied_warmup": {
+                    "type": "homepage", "url": "https://e.com/", "dwell_ms": 70000,
+                },
+            },
+        })
+        assert resp.meta.applied_warmup.dwell_ms == 70000
+        assert resp.meta.applied_warmup.url == "https://e.com/"
+
     def test_scrape_response_with_data(self):
         """ScrapeResponse with datas"""
         response = ScrapeResponse(
@@ -305,6 +342,19 @@ class TestJobResponses:
         assert response.status == "failed"
         assert response.error == "Worker crashed"
         assert response.results is None
+
+    def test_job_results_response_allows_unfinished_slots(self):
+        # While a batch runs, results is seeded [None] * n and filled per page
+        # (jobs.py); the response model must serialize that snapshot instead of
+        # 500ing on anyone who polls /results before terminal status.
+        resp = JobResultsResponse(
+            job_id="req_test",
+            status="running",
+            pages=[ScrapeRequest(url="https://example.com")],
+            total=1,
+            results=[None],
+        )
+        assert resp.results == [None]
 
 
 class TestScrapeRequestElementSelector:
@@ -398,3 +448,109 @@ class TestMarkdownContract:
         assert resp.markdown_references is None
         assert resp.links is None
         assert resp.html is None
+
+
+def test_scrape_request_accepts_wait_until_load():
+    # yozh-law-checker retries timed-out seed renders with wait_until="load";
+    # rejecting it turns the rescue path into a 422 (audit H1).
+    req = ScrapeRequest(url="https://example.com", wait_until="load")
+    assert req.wait_until == "load"
+
+
+# ---------------------------------------------------------------------------
+# Task A1: prem_res_rotating proxy type + PremProxyOptions schema
+# ---------------------------------------------------------------------------
+
+from src.schemas import PremProxyOptions  # noqa: E402
+
+
+def test_prem_proxy_options_defaults():
+    o = PremProxyOptions()
+    assert o.ip_filter == "max-size-security"
+    assert o.session_type == "rotating"
+    assert o.protocol == "http"
+    assert o.zip is None and o.sticky_id is None
+
+
+def test_prem_rotation_minutes_requires_sticky():
+    with pytest.raises(ValidationError):
+        PremProxyOptions(session_type="rotating", rotation_minutes=5)
+    # sticky is fine
+    PremProxyOptions(session_type="sticky", rotation_minutes=5)
+
+
+def test_prem_sticky_id_requires_sticky_session():
+    # A sticky_id with the default rotating session was silently dropped before;
+    # surface it as an error (mirrors the rotation_minutes guard).
+    with pytest.raises(ValidationError):
+        PremProxyOptions(session_type="rotating", sticky_id="abc123")
+    assert PremProxyOptions(session_type="sticky", sticky_id="abc123").sticky_id == "abc123"
+    # blank sticky_id normalizes to None, so it's fine with the default session
+    assert PremProxyOptions(sticky_id="").sticky_id is None
+
+
+def test_prem_sticky_id_rejects_token_injection():
+    # sticky_id is templated raw into the username token "s-<id>"; a '-' would
+    # open new gateway targeting tokens. Must be alphanumeric and bounded.
+    with pytest.raises(ValidationError):
+        PremProxyOptions(session_type="sticky", sticky_id="x-filter-iqs-ttl-1m")
+    with pytest.raises(ValidationError):
+        PremProxyOptions(session_type="sticky", sticky_id="a" * 65)
+    # plain alphanumeric is accepted; blank normalizes to None (auto-generated)
+    assert PremProxyOptions(session_type="sticky", sticky_id="Ab3xK9pQ").sticky_id == "Ab3xK9pQ"
+    assert PremProxyOptions(session_type="sticky", sticky_id="").sticky_id is None
+
+
+def test_scrape_request_accepts_prem_type_and_options():
+    req = ScrapeRequest(
+        url="https://yandex.ru/search/?text=x",
+        proxy_type="prem_res_rotating",
+        prem_proxy_options=PremProxyOptions(ip_filter="quality-security"),
+    )
+    assert req.proxy_type == "prem_res_rotating"
+    assert req.prem_proxy_options.ip_filter == "quality-security"
+
+
+def test_zip_excludes_region_and_city():
+    with pytest.raises(ValidationError):
+        ScrapeRequest(
+            url="https://yandex.ru/search/?text=x",
+            proxy_type="prem_res_rotating",
+            proxy_geo={"country_code": "RU", "city": "Moscow"},
+            prem_proxy_options=PremProxyOptions(zip="101000"),
+        )
+
+
+def test_zip_excludes_region():
+    with pytest.raises(ValidationError):
+        ScrapeRequest(
+            url="https://yandex.ru/search/?text=x",
+            proxy_type="prem_res_rotating",
+            proxy_geo={"country_code": "RU", "region": "Moscow Oblast"},
+            prem_proxy_options=PremProxyOptions(zip="101000"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Task C1: WarmupOptions schema + settings.warmup_dwell_ms
+# ---------------------------------------------------------------------------
+
+def test_warmup_options_defaults():
+    w = WarmupOptions()
+    assert w.type == "homepage" and w.dwell_ms is None
+    req = ScrapeRequest(url="https://yandex.ru/search/?text=x", warmup={"type": "homepage"})
+    assert req.warmup.type == "homepage"
+
+
+def test_warmup_custom_requires_valid_url():
+    # custom without a url is rejected
+    with pytest.raises(ValidationError):
+        WarmupOptions(type="custom")
+    # custom with a non-http url is rejected
+    with pytest.raises(ValidationError):
+        WarmupOptions(type="custom", url="notaurl")
+    # custom with a proper url is accepted
+    w = WarmupOptions(type="custom", url="https://example.com/seed")
+    assert w.type == "custom" and w.url == "https://example.com/seed"
+    # homepage ignores url (no requirement)
+    assert WarmupOptions(type="homepage").url is None

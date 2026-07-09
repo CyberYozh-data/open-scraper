@@ -2,21 +2,75 @@ services:
   web-scraper:
     build: .
     restart: unless-stopped
+    # Memory cap so a single service can't exhaust the host (or, when several
+    # stacks share one box, starve its neighbours). The API only enqueues jobs
+    # and reads Redis, so it's light. Override per host if needed.
+    mem_limit: 1g
     ports:
       - "8000:8000"
     env_file:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
     # Persist user-defined / self-healed presets across restarts. Built-in
     # presets ship read-only inside the image (src/presets/builtin).
     volumes:
       - ./data/presets:/app/data/presets
+    # No shm_size / browsers here anymore — the API only enqueues jobs and
+    # reads Redis. Browsers live in the scraper-worker containers below.
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # Browser workers: consume the taskiq stream and run Playwright. Scale out
+  # with `docker compose up -d --scale scraper-worker=N`.
+  # Do not raise --max-async-tasks: _browser_guard (src/queue/tasks.py) relies
+  # on one task per process; scale with WORKERS / --scale instead.
+  scraper-worker:
+    build: .
+    restart: unless-stopped
+    # Browser-heavy (Playwright/Camoufox per request). Cap memory so a leak or
+    # a burst of heavy pages gets OOM-killed inside this container instead of
+    # eating the whole host / co-located stacks. Note the shm_size below is a
+    # fixed ~1g tax that counts against this cap and does NOT scale with
+    # WORKERS, so the real budget is (mem_limit - 1g) / WORKERS (~1.5g/worker
+    # here). Default sized for WORKERS=2; bump per host when raising WORKERS.
+    mem_limit: 4g
+    command: ["sh", "-c", "taskiq worker src.queue.worker:broker --workers ${WORKERS:-2} --max-async-tasks 1"]
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
     shm_size: "1gb"
+    stop_grace_period: 120s
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # Periodic-task scheduler (currently the stale-pending reclaim, every 60s).
+  # Run exactly ONE instance — multiple schedulers enqueue each periodic task
+  # once per instance. Only enqueues; workers execute the tasks.
+  scheduler:
+    build: .
+    restart: unless-stopped
+    mem_limit: 512m
+    command: ["taskiq", "scheduler", "src.queue.scheduler:scheduler", "src.queue.tasks"]
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      redis:
+        condition: service_healthy
 
   open-crawler:
     build: yozh-crawler
     restart: unless-stopped
+    # lxml + httpx, no browser — light. Cap anyway as host-safety insurance.
+    mem_limit: 1g
     ports:
       - "8001:8001"
     environment:
@@ -26,3 +80,21 @@ services:
       - PORT=8001
     depends_on:
       - web-scraper
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    mem_limit: 768m
+    # maxmemory sits below the cgroup cap so redis enforces noeviction itself
+    # (reject writes, keep data) instead of being OOM-killed by the kernel.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "640mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  redis-data:

@@ -75,6 +75,27 @@ def _playwright_available() -> bool:
     return True
 
 
+async def _setup_inmemory_broker_state() -> None:
+    """Register a real PlaywrightRunner in the InMemoryBroker's state so that
+    login_task (which runs immediately in-process via InMemoryBroker) can access
+    context.state.runners[engine]. Mirrors what worker.py's WORKER_STARTUP hook
+    does in production; needed because the API process's broker.startup() does
+    NOT fire WORKER_STARTUP for InMemoryBroker."""
+    from src.browser.runner import PlaywrightRunner
+    from src.queue.broker import broker
+    from src.settings import settings
+
+    runner = PlaywrightRunner(
+        headless=settings.headless,
+        block_assets=settings.block_assets,
+        timeout_ms=settings.request_timeout_ms,
+    )
+    broker.state.runners = {"chromium": runner}
+    broker.state.browser_lock = asyncio.Lock()
+    broker.state.pages_since_launch = {"chromium": 0}
+    broker.state.last_activity = {"chromium": asyncio.get_running_loop().time()}
+
+
 @pytest.mark.skipif(
     not _playwright_available(),
     reason="Playwright not installed locally",
@@ -110,6 +131,10 @@ async def test_session_login_and_authenticated_scrape():
                 await asyncio.sleep(0.5)
         else:
             pytest.fail("services did not start in time")
+
+    # Initialise the InMemoryBroker's state with a real runner so that the
+    # login_task (executed in-process by InMemoryBroker) can access the browser.
+    await _setup_inmemory_broker_state()
 
     try:
         async with httpx.AsyncClient(

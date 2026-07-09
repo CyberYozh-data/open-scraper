@@ -1,3 +1,33 @@
+// ─── Proxy component constants ───────────────────────────────────────────────
+// Declared at the very top because the first renderProxyComponent() call runs at
+// top level in the Batch-tab init (well before the factory section); a `const`
+// next to the factory would be in its temporal dead zone at that call and throw
+// "Cannot access 'PROXY_TYPES' before initialization", aborting all init.
+//
+// Canonical proxy-type option list. Legacy types keep their plain values (the
+// server still accepts them); labels mark the v2 premium gateway and tag the
+// legacy CyberYozh pools so it's obvious which one needs a purchased pool id.
+// Only res_rotating is legacy — it's superseded by the premium gateway
+// (prem_res_rotating). res_static / mobile / mobile_shared / dc_static are
+// still current products, so they carry no marker.
+const PROXY_TYPES = [
+  { value: 'none', label: 'none' },
+  { value: 'prem_res_rotating', label: 'prem_res_rotating (premium)' },
+  { value: 'res_rotating', label: 'res_rotating (legacy)' },
+  { value: 'res_static', label: 'res_static' },
+  { value: 'mobile', label: 'mobile' },
+  { value: 'mobile_shared', label: 'mobile_shared' },
+  { value: 'dc_static', label: 'dc_static' },
+];
+
+// Fallback ip_filter set — the canonical PremProxyOptions.ip_filter enum. Used
+// only when /session-options is unreachable or omits `ip_filters`, so the
+// dropdown is never empty (loadPremCatalogs prefers the live list).
+const PREM_IP_FILTER_FALLBACK = [
+  'max-size-security', 'max-speed-security',
+  'quality-security', 'speed-quality-security',
+];
+
 // ─── State ───────────────────────────────────────────────────────────────────
 const JOBS_STORAGE_KEY = 'scraper-tester:recent-jobs';
 let recentJobs = [];
@@ -8,6 +38,50 @@ try {
 
 function saveRecentJobs() {
   try { localStorage.setItem(JOBS_STORAGE_KEY, JSON.stringify(recentJobs)); }
+  catch {}
+}
+
+// Request payloads we submitted this client, keyed by job_id. Lets the result
+// view echo the exact request that produced a job — including params the
+// response meta doesn't carry back (e.g. session_id, extract rules). Capped to
+// match the recent-jobs window so localStorage doesn't grow unbounded.
+const SENT_PAYLOADS_KEY = 'scraper-tester:sent-payloads';
+let sentPayloads = {};
+try {
+  const saved = localStorage.getItem(SENT_PAYLOADS_KEY);
+  if (saved) sentPayloads = JSON.parse(saved);
+} catch {}
+
+// Strip credential-bearing values (cookies, header values) before a payload is
+// persisted to localStorage — keep the keys/shape visible for debugging, but
+// don't write auth tokens / cookies to disk-backed storage.
+function redactSensitive(payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+  const clone = Array.isArray(payload) ? payload.map(redactSensitive) : { ...payload };
+  if (Array.isArray(clone.pages)) clone.pages = clone.pages.map(redactSensitive);
+  if (clone.headers && typeof clone.headers === 'object') {
+    clone.headers = Object.fromEntries(
+      Object.keys(clone.headers).map(k => [k, '[redacted]'])
+    );
+  }
+  if (clone.cookies != null) {
+    const n = Array.isArray(clone.cookies) ? clone.cookies.length : 1;
+    clone.cookies = `[${n} cookie(s) redacted]`;
+  }
+  return clone;
+}
+
+function rememberSentPayload(jobId, payload) {
+  if (!jobId) return;
+  sentPayloads[jobId] = redactSensitive(payload);
+  // Keep only the payloads for jobs still in the recent-jobs list (plus this
+  // one), so the two stores stay roughly in sync and bounded.
+  const keep = new Set(recentJobs.map(j => j.id));
+  keep.add(jobId);
+  for (const id of Object.keys(sentPayloads)) {
+    if (!keep.has(id)) delete sentPayloads[id];
+  }
+  try { localStorage.setItem(SENT_PAYLOADS_KEY, JSON.stringify(sentPayloads)); }
   catch {}
 }
 
@@ -29,10 +103,65 @@ async function loadServerConfig() {
   } catch {}
 }
 
+// The country dropdown is shared by all proxy types, but its source depends on
+// the type: res_rotating targets the v1 residential pool (full ISO list from
+// /api/v1/proxies/countries, ~250), while prem_res_rotating targets the v2
+// premium catalog (~230). Filling the prem dropdown from v1 offered countries
+// the premium pool has no regions/cities for, so picking one left the cascade
+// empty — so a prem block draws from the v2 catalog instead, falling back to
+// the v1 list only if v2 is unavailable (e.g. no premium API key).
+const PREM_GEO = '/api/v2/prem-proxies/geo';
+let _v1CountryOptionsHtml = null;
+let _v2CountryOptionsPromise = null;
+
+// Replace a <select>'s options, keeping the current value if it's still one.
+function replaceOptions(sel, html) {
+  const prev = sel.value;
+  sel.innerHTML = html;
+  if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+}
+
+// v2 premium country <option> HTML, fetched once per session. Caches the
+// in-flight Promise so the concurrent startup burst (one syncType per proxy
+// block) collapses to a single request. Resolves to '' on error/empty and does
+// NOT cache that, so a later call (e.g. after the Scraper URL is restored)
+// retries; loadCountries clears the cache when the target changes.
+function v2CountryOptions() {
+  if (_v2CountryOptionsPromise == null) {
+    _v2CountryOptionsPromise = apiCall(`${PREM_GEO}/countries`)
+      .then(r => (Array.isArray(r.data) && r.data.length
+        ? '<option value="">— any —</option>' +
+          r.data.map(c => `<option value="${escapeHtml(String(c.code))}">${escapeHtml(String(c.name))} (${escapeHtml(String(c.code))})</option>`).join('')
+        : ''))
+      .catch(() => '')
+      .then(html => { if (!html) _v2CountryOptionsPromise = null; return html; });
+  }
+  return _v2CountryOptionsPromise;
+}
+
+// Fill one country <select> from the source its block's proxy type wants: prem
+// blocks draw from the v2 premium catalog (each country resolves in the
+// region/city cascade), everything else from the v1 list. Prem falls back to
+// v1 if v2 is unavailable. No-op until loadCountries has cached the v1 list.
+async function populateCountrySelect(sel) {
+  if (!sel) return;
+  const prefix = sel.id.replace(/-geo-country$/, '');
+  const typeSel = document.getElementById(`${prefix}-proxy-type`);
+  if (typeSel && typeSel.value === 'prem_res_rotating') {
+    const html = await v2CountryOptions();
+    if (html) { replaceOptions(sel, html); return; }
+  }
+  if (_v1CountryOptionsHtml != null) replaceOptions(sel, _v1CountryOptionsHtml);
+}
+
 async function loadCountries() {
-  const selects = ['s-geo-country', 'b-geo-country', 'c-geo-country', 'cp-geo-country', 'pw-geo-country', 'sess-geo-country', 'se-geo-country']
+  const selects = ['s-geo-country', 'b-geo-country', 'c-geo-country', 'cp-geo-country', 'pw-geo-country', 'sess-geo-country', 'se-geo-country', 'mp-geo-country']
     .map(id => document.getElementById(id)).filter(Boolean);
   if (!selects.length) return;
+
+  // Drop the cached premium catalog so it is re-fetched against the current
+  // target (loadCountries also runs when the Scraper URL changes).
+  _v2CountryOptionsPromise = null;
 
   const { ok, data } = await apiCall('/api/v1/proxies/countries');
   if (!ok || !data?.countries) {
@@ -42,14 +171,12 @@ async function loadCountries() {
   }
 
   const sorted = [...data.countries].sort((a, b) => a.name.localeCompare(b.name));
-  const optionsHtml = '<option value="">— any —</option>' +
+  _v1CountryOptionsHtml = '<option value="">— any —</option>' +
     sorted.map(c => `<option value="${escapeHtml(c.code)}">${escapeHtml(c.name)} (${escapeHtml(c.code)})</option>`).join('');
 
-  selects.forEach(sel => {
-    const prev = sel.value;
-    sel.innerHTML = optionsHtml;
-    if (prev) sel.value = prev;
-  });
+  // Fill each block's country dropdown from the source its proxy type wants —
+  // prem blocks from the v2 catalog, the rest from the v1 list just built.
+  selects.forEach(populateCountrySelect);
 }
 // NB: countries are loaded after restoreState() (below), once the Scraper URL
 // points at the real target — calling it here would race the URL restore and
@@ -259,6 +386,38 @@ function makeMarkdownDetails(openKeys, key, label, text) {
   return wrap;
 }
 
+// Collapsible block with a syntax-highlighted JSON body, matching the
+// markdown/raw-html details styling. `open: true` forces it expanded; otherwise
+// it restores the previous open state via openKeys.
+function makeJsonDetails(openKeys, key, label, obj, { open = false } = {}) {
+  const wrap = document.createElement('details');
+  wrap.dataset.key = key;
+  if (open || openKeys.has(key)) wrap.setAttribute('open', '');
+  wrap.style.cssText = 'margin-bottom:0.5rem';
+
+  const summary = document.createElement('summary');
+  summary.className = 'details-summary';
+  summary.style.cssText = 'cursor:pointer;padding:0.5rem 0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:0.5rem;list-style:none';
+  summary.innerHTML = `<span class="details-chevron" style="display:inline-block;transition:transform 0.15s;font-size:10px">▶</span><span>${label}</span>`;
+
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'max-height:400px;overflow:auto;background:var(--bg-primary);border:1px solid var(--border);border-top:none;padding:0.75rem;font-size:12px;border-radius:0 0 var(--radius-sm) var(--radius-sm);color:var(--text-primary);white-space:pre-wrap;word-break:break-word';
+  pre.innerHTML = syntaxHighlight(obj);
+
+  wrap.appendChild(summary);
+  wrap.appendChild(pre);
+  return wrap;
+}
+
+// Collapsible "Request payload" block — the exact body we POSTed for this job,
+// looked up by job_id. Shows params the response meta can't echo (session_id,
+// extract rules, etc.). Returns null when we have no record for this job.
+function makeSentPayloadDetails(data, openKeys) {
+  const jobId = data?.job_id;
+  if (!jobId || !sentPayloads[jobId]) return null;
+  return makeJsonDetails(openKeys, 'sent-payload', 'Request payload (as submitted)', sentPayloads[jobId]);
+}
+
 function showResult(elId, data) {
   const el = document.getElementById(elId);
 
@@ -276,6 +435,10 @@ function showResult(elId, data) {
     return;
   }
 
+  // Echo the request we submitted for this job (if we have it on record).
+  const sentBlock = makeSentPayloadDetails(data, openKeys);
+  if (sentBlock) el.appendChild(sentBlock);
+
   // For scrape job results — show summary card + separate content blocks
   if (data?.results && Array.isArray(data.results)) {
     // Summary block (without raw_html/screenshot/data payloads)
@@ -285,7 +448,7 @@ function showResult(elId, data) {
       total: data.total,
       done: data.done,
       error: data.error,
-      results: data.results.map(r => ({
+      results: data.results.map((r, i) => r === null ? { slot: i + 1, status: 'pending' } : ({
         request_id: r.request_id,
         took_ms: r.took_ms,
         meta: r.meta,
@@ -302,26 +465,50 @@ function showResult(elId, data) {
 
     // Per-result content blocks
     data.results.forEach((r, i) => {
+      if (r === null) {
+        const placeholder = document.createElement('div');
+        placeholder.style.cssText = 'margin:0.75rem 0 0.4rem;padding:0.5rem 0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;color:var(--text-secondary)';
+        placeholder.innerHTML = `<b style="color:var(--text-primary)">Result #${i+1}</b> &nbsp;&mdash;&nbsp; <i>pending&hellip;</i>`;
+        el.appendChild(placeholder);
+        return;
+      }
       // Proxy info badge
       const meta = r.meta || {};
       const proxyBadge = document.createElement('div');
       proxyBadge.style.cssText = 'margin:0.75rem 0 0.4rem;padding:0.5rem 0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;color:var(--text-secondary)';
-      proxyBadge.innerHTML = `<b style="color:var(--text-primary)">Result #${i+1}</b> &nbsp;|&nbsp; proxy: <b style="color:var(--color-blue)">${escapeHtml(meta.proxy_type||'—')}</b>${meta.proxy_pool_id ? ` / pool: ${escapeHtml(meta.proxy_pool_id)}` : ''} &nbsp;|&nbsp; status: <b style="color:var(--color-green)">${meta.status_code||'—'}</b> &nbsp;|&nbsp; retries: ${meta.retries??'—'} &nbsp;|&nbsp; took: ${r.took_ms}ms`;
+
+      const fetchFailed = meta.fetch_ok === false;
+      const line1 = `<b style="color:var(--text-primary)">Result #${i+1}</b> &nbsp;|&nbsp; proxy: <b style="color:var(--color-blue)">${escapeHtml(meta.proxy_type||'—')}</b>${meta.proxy_pool_id ? ` / pool: ${escapeHtml(meta.proxy_pool_id)}` : ''} &nbsp;|&nbsp; status: <b style="color:var(--color-green)">${meta.status_code||'—'}</b> &nbsp;|&nbsp; retries: ${meta.retries??'—'} &nbsp;|&nbsp; took: ${r.took_ms}ms${fetchFailed ? ' &nbsp;|&nbsp; <b style="color:var(--color-red)">⚠ fetch failed</b>' : ''}`;
+
+      // Second line: applied request params (only what's present). prem_targeting
+      // and warmup come from the new ScrapeMeta echo; locale/tz/ua were always there.
+      const applied = [];
+      if (meta.applied_prem_targeting) applied.push(`prem: <b style="color:var(--color-purple)">${escapeHtml(meta.applied_prem_targeting)}</b>`);
+      if (meta.applied_warmup) {
+        const w = meta.applied_warmup;
+        const label = w.url || w.type || 'on';
+        const dwell = w.dwell_ms != null ? ` (${w.dwell_ms}ms)` : '';
+        applied.push(`warmup: <b style="color:var(--color-reef)">${escapeHtml(label)}${dwell}</b>`);
+      }
+      if (meta.applied_locale) applied.push(`locale: ${escapeHtml(meta.applied_locale)}`);
+      if (meta.applied_timezone) applied.push(`tz: ${escapeHtml(meta.applied_timezone)}`);
+      if (meta.applied_user_agent) {
+        const ua = meta.applied_user_agent;
+        applied.push(`ua: <span title="${escapeHtml(ua)}">${escapeHtml(ua.length > 48 ? ua.slice(0, 48) + '…' : ua)}</span>`);
+      }
+      const line2 = applied.length ? `<div style="margin-top:0.35rem">${applied.join(' &nbsp;|&nbsp; ')}</div>` : '';
+
+      proxyBadge.innerHTML = line1 + line2;
       el.appendChild(proxyBadge);
 
       // Extracted data
       if (r.data && typeof r.data === 'object' && Object.keys(r.data).length > 0) {
-        const wrap = document.createElement('details');
-        wrap.dataset.key = `data-${r.request_id}`;
-        wrap.setAttribute('open', '');
-        wrap.style.cssText = 'margin-bottom:0.5rem';
         const fieldCount = Object.keys(r.data).length;
-        wrap.innerHTML = `<summary class="details-summary" style="cursor:pointer;padding:0.5rem 0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:0.5rem;list-style:none"><span class="details-chevron" style="display:inline-block;transition:transform 0.15s;font-size:10px">▶</span><span>Extracted Data (${fieldCount} field${fieldCount === 1 ? '' : 's'})</span></summary>`;
-        const pre = document.createElement('pre');
-        pre.style.cssText = 'max-height:400px;overflow:auto;background:var(--bg-primary);border:1px solid var(--border);border-top:none;padding:0.75rem;font-size:12px;border-radius:0 0 var(--radius-sm) var(--radius-sm);color:var(--text-primary);white-space:pre-wrap;word-break:break-word';
-        pre.innerHTML = syntaxHighlight(r.data);
-        wrap.appendChild(pre);
-        el.appendChild(wrap);
+        el.appendChild(makeJsonDetails(
+          openKeys, `data-${r.request_id}`,
+          `Extracted Data (${fieldCount} field${fieldCount === 1 ? '' : 's'})`,
+          r.data, { open: true },
+        ));
       }
 
       // Raw HTML
@@ -467,9 +654,22 @@ function renderRecentJobs() {
     </span>`).join('');
   el.querySelectorAll('.job-chip').forEach(chip => {
     chip.addEventListener('click', () => {
-      document.getElementById('j-job-id').value = chip.dataset.id;
+      const jobId = chip.dataset.id;
+      document.getElementById('j-job-id').value = jobId;
+      // Show the result immediately — /results is safe to poll in any state
+      // (returns the current status with null results while still running).
+      lookupJobResults(jobId);
     });
   });
+}
+
+async function lookupJobResults(jobId) {
+  const { data } = await apiCall(`/api/v1/scrape/${jobId}/results`);
+  showResult('jobs-result', data);
+  if (data?.status) {
+    addRecentJob(jobId, data.status);
+    updateJobCancelButton(jobId, data.status);
+  }
 }
 
 async function pollJobBatch(jobId, statusElId, resultElId, totalExpected, cancelBtnId) {
@@ -723,15 +923,16 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 });
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
-document.getElementById('btnHealth').addEventListener('click', async () => {
-  const badge = document.getElementById('healthStatus');
+// One button checks both services in parallel; each gets its own mini-badge so
+// it's still clear which side is down.
+async function checkServiceHealth(badge, call, okText) {
   badge.className = 'badge';
-  badge.textContent = 'checking…';
+  badge.textContent = '…';
   try {
-    const { data, ok } = await apiCall('/api/v1/health');
+    const { data, ok } = await call('/api/v1/health');
     if (ok && data?.status === 'ok') {
       badge.className = 'badge ok';
-      badge.textContent = 'ok';
+      badge.textContent = okText(data);
     } else {
       badge.className = 'badge error';
       badge.textContent = 'error';
@@ -740,6 +941,17 @@ document.getElementById('btnHealth').addEventListener('click', async () => {
     badge.className = 'badge error';
     badge.textContent = 'unreachable';
   }
+}
+
+document.getElementById('btnHealth').addEventListener('click', async () => {
+  await Promise.allSettled([
+    checkServiceHealth(document.getElementById('healthStatus'), apiCall, () => 'ok'),
+    checkServiceHealth(
+      document.getElementById('crawlerHealthStatus'),
+      crawlerCall,
+      (data) => (data.scraper_reachable ? 'ok' : 'no scraper'),
+    ),
+  ]);
 });
 
 // ─── Dynamic rows ─────────────────────────────────────────────────────────────
@@ -798,6 +1010,28 @@ function addExtractField(containerId = 'extract-fields') {
   container.appendChild(row);
 }
 
+// ─── Camoufox premium fields collector ───────────────────────────────────────
+// Returns flat camoufox fields for top-level spread into the request payload
+// (humanize, block_webgl, and optionally spoof_os/addons), or {} for non-camoufox.
+// Prefix must match the tab's element-id prefix (s, b, se).
+function collectCamoufoxOpts(prefix) {
+  const $ = (id) => document.getElementById(id);
+  const engine = $(`${prefix}-browser-engine`)?.value;
+  if (engine !== 'camoufox') return {};
+  const opts = {
+    humanize: !!$(`${prefix}-cf-humanize`)?.checked,
+    block_webgl: !!$(`${prefix}-cf-block-webgl`)?.checked,
+  };
+  const spoofOs = $(`${prefix}-cf-spoof-os`)?.value;
+  if (spoofOs) opts.spoof_os = spoofOs;
+  const addonsRaw = $(`${prefix}-cf-addons`)?.value.trim();
+  if (addonsRaw) {
+    const addons = addonsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    if (addons.length) opts.addons = addons;
+  }
+  return opts;
+}
+
 // ─── Build scrape payload ─────────────────────────────────────────────────────
 function buildScrapePayload() {
   const url = normalizeUrl(document.getElementById('s-url').value);
@@ -813,8 +1047,16 @@ function buildScrapePayload() {
     raw_html: document.getElementById('s-raw-html').checked,
     screenshot: document.getElementById('s-screenshot').checked,
     stealth: document.getElementById('s-stealth').checked,
-    proxy_type: document.getElementById('s-proxy-type').value,
   };
+
+  // Browser engine — always included; chromium is the API default so sending
+  // it explicitly is a no-op for existing behaviour.
+  payload.browser_engine = document.getElementById('s-browser-engine')?.value || 'chromium';
+  Object.assign(payload, collectCamoufoxOpts('s'));
+
+  // Optional per-request retry cap. Blank => server MAX_RETRIES default.
+  const sMaxRetries = Number(document.getElementById('s-max-retries')?.value);
+  if (sMaxRetries) payload.max_retries = sMaxRetries;
 
   // Markdown-family formats. Server unions these with the raw_html /
   // screenshot booleans, so we only list the markdown outputs here.
@@ -838,26 +1080,17 @@ function buildScrapePayload() {
   const waitSelector = document.getElementById('s-wait-selector').value.trim();
   if (waitSelector) payload.wait_for_selector = waitSelector;
 
-  const poolId = document.getElementById('s-proxy-pool').value.trim();
-  if (poolId) payload.proxy_pool_id = poolId;
+  // Proxy (type / pool / legacy geo / premium generator) — single source of
+  // truth shared with the other tabs. Returns false after alerting on a missing
+  // pool id; the Scrape tab has no "default (preset)" sentinel so null can't
+  // happen here, but treat any falsy result as an abort.
+  const proxy = collectProxy('s');
+  if (!proxy) return null;
+  Object.assign(payload, proxy);
 
-  if (payload.proxy_type !== 'none' && !poolId) {
-    alert(`Select a Pool ID for proxy type "${payload.proxy_type}". If none available, use the "Buy" button to purchase one on CyberYozh.`);
-    return null;
-  }
-
-  // Geo (only for res_rotating)
-  if (payload.proxy_type === 'res_rotating') {
-    const cc = document.getElementById('s-geo-country').value.trim();
-    const region = document.getElementById('s-geo-region').value.trim();
-    const city = document.getElementById('s-geo-city').value.trim();
-    if (cc || region || city) {
-      payload.proxy_geo = {};
-      if (cc) payload.proxy_geo.country_code = cc.toUpperCase();
-      if (region) payload.proxy_geo.region = region;
-      if (city) payload.proxy_geo.city = city;
-    }
-  }
+  // Warmup — optional pre-navigation origin visit. Off by default.
+  const warmup = collectWarmup('s');
+  if (warmup) payload.warmup = warmup;
 
   // Session — server-side session id (created on Sessions tab). Overrides
   // device + proxy on the server when present.
@@ -929,9 +1162,43 @@ document.getElementById('btnScrape').addEventListener('click', async () => {
     return;
   }
 
+  rememberSentPayload(data.job_id, payload);
   await loadServerConfig();
   pollJob(data.job_id, 'scrape-status', 'scrape-result', 1, 'btnCancelScrape');
 });
+
+// ─── Engine dropdown + Camoufox conditional visibility ───────────────────────
+// Wires the browser-engine select for a given tab prefix.
+// - Shows/hides the camoufox-opts panel when engine=camoufox
+// - Disables the stealth checkbox (with tooltip) when engine≠chromium
+function initEngineControls(prefix) {
+  const $ = (id) => document.getElementById(id);
+  const engineSel = $(`${prefix}-browser-engine`);
+  const camoufoxOpts = $(`${prefix}-camoufox-opts`);
+  const stealthCb = $(`${prefix}-stealth`);
+  if (!engineSel) return;
+
+  const sync = () => {
+    const engine = engineSel.value;
+    if (camoufoxOpts) {
+      camoufoxOpts.style.display = engine === 'camoufox' ? '' : 'none';
+    }
+    if (stealthCb) {
+      const isChromium = engine === 'chromium';
+      stealthCb.disabled = !isChromium;
+      stealthCb.parentElement.title = isChromium
+        ? ''
+        : 'Camoufox/Firefox use built-in anti-detect';
+    }
+  };
+
+  engineSel.addEventListener('change', sync);
+  sync();
+}
+
+initEngineControls('s');
+initEngineControls('b');
+initEngineControls('se');
 
 // ─── Search ───────────────────────────────────────────────────────────────────
 (() => {
@@ -998,6 +1265,44 @@ function renderSearchResults(el, data) {
   });
 }
 
+// Fill the Search-tab Locale dropdown from the *selected engine's* preset
+// locales (google_search / bing_search / yandex_search). The list was a
+// hardcoded us/uk/de/fr/ru/jp, so engine-specific locales — notably Yandex's
+// region set (kz, by, ee, ua, …, each carrying its own `lr`) — were never
+// selectable. Re-runs on engine change and when the scraper target changes.
+async function populateSearchLocales() {
+  const engineSel = document.getElementById('se-engine');
+  const localeSel = document.getElementById('se-locale');
+  if (!engineSel || !localeSel) return;
+  // Prefer the live selection; fall back to the persisted value. restoreState
+  // runs before this and assigns se-locale against the static HTML options, so
+  // an engine-specific locale (e.g. yandex `kz`) gets clobbered to '' — recover
+  // it from saved state so the selection survives a reload.
+  let want = localeSel.value;
+  if (!want) {
+    try { want = (JSON.parse(localStorage.getItem(STATE_KEY) || 'null')?.inputs || {})['se-locale'] || ''; }
+    catch { /* no/invalid saved state */ }
+  }
+  const { ok, data } = await apiCall(
+    `/api/v1/presets/${encodeURIComponent(engineSel.value + '_search')}`);
+  if (!ok || !data || !data.locales) return;
+  const keys = Object.keys(data.locales);
+  const def = data.default_locale || keys[0] || 'us';
+  localeSel.innerHTML =
+    `<option value="">default (${escapeHtml(def)})</option>` +
+    keys.map(k => `<option value="${escapeHtml(k)}">${escapeHtml(k)}</option>`).join('');
+  if (want && keys.includes(want)) {
+    localeSel.value = want;  // keep selection if the engine still offers it
+    localeSel.dispatchEvent(new Event('change', { bubbles: true }));  // sync custom-select label
+  }
+}
+// restoreState replays a synthetic change on every select[id]; skip that replay
+// (the explicit init call below repopulates against the restored engine).
+document.getElementById('se-engine')?.addEventListener('change', () => {
+  if (_restoringState) return;
+  populateSearchLocales();
+});
+
 document.getElementById('btnSearch').addEventListener('click', async () => {
   const query = document.getElementById('se-query').value.trim();
   if (!query) { alert('Query is required'); return; }
@@ -1005,17 +1310,30 @@ document.getElementById('btnSearch').addEventListener('click', async () => {
   payload.engine = document.getElementById('se-engine').value;
   const locale = document.getElementById('se-locale').value;
   if (locale) payload.locale = locale;
+
+  const se = document.getElementById('se-browser-engine')?.value;
+  if (se) payload.browser_engine = se;
+  const seMaxRetries = Number(document.getElementById('se-max-retries')?.value);
+  if (seMaxRetries) payload.max_retries = seMaxRetries;
+  Object.assign(payload, collectCamoufoxOpts('se'));
   if (document.getElementById('se-scrape').checked) {
     payload.scrape = true;
-    const raw = document.getElementById('se-scrape-options').value.trim();
-    if (raw) {
-      try { payload.scrape_options = JSON.parse(raw); }
-      catch { alert('Scrape options must be valid JSON'); return; }
-    }
+    const opts = {};
+    if (document.getElementById('se-so-raw-html').checked) opts.raw_html = true;
+    if (document.getElementById('se-so-screenshot').checked) opts.screenshot = true;
+    const fmts = [];
+    if (document.getElementById('se-so-markdown').checked) fmts.push('markdown');
+    if (document.getElementById('se-so-fit-markdown').checked) fmts.push('fit_markdown');
+    if (fmts.length) opts.formats = fmts;
+    if (Object.keys(opts).length) payload.scrape_options = opts;
   }
   const proxy = collectProxy('se');
   if (proxy === false) return;   // invalid (missing pool) — already alerted
   if (proxy) Object.assign(payload, proxy);
+
+  // Warmup — optional pre-navigation origin visit. Off by default.
+  const seWarmup = collectWarmup('se');
+  if (seWarmup) payload.warmup = seWarmup;
 
   setStatus('search-status', 'queued', 'Searching...');
   document.getElementById('search-result').innerHTML = '<span class="placeholder">Searching…</span>';
@@ -1034,6 +1352,9 @@ document.getElementById('btnSearch').addEventListener('click', async () => {
 
 // ─── Batch Scrape ─────────────────────────────────────────────────────────────
 function buildBatchSharedPayload() {
+  const proxy = collectProxy('b');
+  if (proxy === false) return null;  // invalid (missing pool) — already alerted
+
   const payload = {
     render: document.getElementById('b-render').checked,
     wait_until: document.getElementById('b-wait-until').value,
@@ -1043,31 +1364,21 @@ function buildBatchSharedPayload() {
     raw_html: document.getElementById('b-raw-html').checked,
     screenshot: document.getElementById('b-screenshot').checked,
     stealth: document.getElementById('b-stealth').checked,
-    proxy_type: document.getElementById('b-proxy-type').value,
   };
+  Object.assign(payload, proxy);
+
+  // Warmup — optional pre-navigation origin visit. Off by default.
+  const warmup = collectWarmup('b');
+  if (warmup) payload.warmup = warmup;
+
+  payload.browser_engine = document.getElementById('b-browser-engine')?.value || 'chromium';
+  Object.assign(payload, collectCamoufoxOpts('b'));
+
+  const bMaxRetries = Number(document.getElementById('b-max-retries')?.value);
+  if (bMaxRetries) payload.max_retries = bMaxRetries;
 
   const waitSelector = document.getElementById('b-wait-selector').value.trim();
   if (waitSelector) payload.wait_for_selector = waitSelector;
-
-  const poolId = document.getElementById('b-proxy-pool').value.trim();
-  if (poolId) payload.proxy_pool_id = poolId;
-
-  if (payload.proxy_type !== 'none' && !poolId) {
-    alert(`Select a Pool ID for proxy type "${payload.proxy_type}". If none available, use the "Buy" button to purchase one on CyberYozh.`);
-    return null;
-  }
-
-  if (payload.proxy_type === 'res_rotating') {
-    const cc = document.getElementById('b-geo-country').value.trim();
-    const region = document.getElementById('b-geo-region').value.trim();
-    const city = document.getElementById('b-geo-city').value.trim();
-    if (cc || region || city) {
-      payload.proxy_geo = {};
-      if (cc) payload.proxy_geo.country_code = cc.toUpperCase();
-      if (region) payload.proxy_geo.region = region;
-      if (city) payload.proxy_geo.city = city;
-    }
-  }
 
   // Session — applied to every URL in the batch.
   const sessionId = document.getElementById('b-session-id')?.value.trim();
@@ -1119,6 +1430,8 @@ function buildBatchSharedPayload() {
   return payload;
 }
 
+renderProxyComponent('b', document.getElementById('b-proxy-component'));
+renderWarmupComponent('b', document.getElementById('b-warmup-component'));
 initProxyPool('b');
 
 document.getElementById('btnCopyFromSingle').addEventListener('click', () => {
@@ -1138,6 +1451,12 @@ document.getElementById('btnCopyFromSingle').addEventListener('click', () => {
     ['s-geo-region', 'b-geo-region'],
     ['s-geo-city', 'b-geo-city'],
     ['s-extract-type', 'b-extract-type'],
+    // Browser engine + Camoufox options
+    ['s-browser-engine', 'b-browser-engine'],
+    ['s-cf-humanize', 'b-cf-humanize'],
+    ['s-cf-block-webgl', 'b-cf-block-webgl'],
+    ['s-cf-spoof-os', 'b-cf-spoof-os'],
+    ['s-cf-addons', 'b-cf-addons'],
   ];
   for (const [from, to] of pairs) {
     const src = document.getElementById(from);
@@ -1189,6 +1508,7 @@ document.getElementById('btnBatch').addEventListener('click', async () => {
     return;
   }
 
+  rememberSentPayload(data.job_id, { pages });
   await loadServerConfig();
   pollJobBatch(data.job_id, 'batch-status', 'batch-result', pages.length, 'btnCancelBatch');
 });
@@ -1214,15 +1534,10 @@ document.getElementById('btnJobStatus').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('btnJobResults').addEventListener('click', async () => {
+document.getElementById('btnJobResults').addEventListener('click', () => {
   const jobId = document.getElementById('j-job-id').value.trim();
   if (!jobId) return;
-  const { data } = await apiCall(`/api/v1/scrape/${jobId}/results`);
-  showResult('jobs-result', data);
-  if (data?.status) {
-    addRecentJob(jobId, data.status);
-    updateJobCancelButton(jobId, data.status);
-  }
+  lookupJobResults(jobId);
 });
 
 document.getElementById('btnClearJobs').addEventListener('click', () => {
@@ -1261,9 +1576,14 @@ document.getElementById('mcp-target').addEventListener('change', () => {
 });
 
 // ─── Info tooltips (detached, fixed-positioned) ──────────────────────────────
-document.querySelectorAll('.info-icon').forEach(icon => {
+// Wire one .info-icon (idempotent). Detaches its tooltip to <body> and shows it
+// on hover/focus. Safe to call again for dynamically-rendered icons (e.g. the
+// warmup component, which renders AFTER the initial load-time pass below).
+function wireInfoIcon(icon) {
+  if (!icon || icon.dataset.tipWired) return;
   const tooltip = icon.querySelector('.info-tooltip');
   if (!tooltip) return;
+  icon.dataset.tipWired = '1';
   document.body.appendChild(tooltip);
 
   const show = () => {
@@ -1286,7 +1606,12 @@ document.querySelectorAll('.info-icon').forEach(icon => {
   icon.addEventListener('mouseleave', hide);
   icon.addEventListener('focus', show);
   icon.addEventListener('blur', hide);
-});
+}
+function wireInfoIcons(root = document) {
+  if (!root || !root.querySelectorAll) return;
+  root.querySelectorAll('.info-icon').forEach(wireInfoIcon);
+}
+wireInfoIcons(document);
 
 // ─── Proxy type dependent UI ──────────────────────────────────────────────────
 const STATIC_PROXY_TYPES = new Set(['res_static', 'mobile', 'mobile_shared', 'dc_static']);
@@ -1343,8 +1668,18 @@ async function wireProxyPool(prefix) {
     buyEl.innerHTML = '';
     return;
   }
+  // prem_res_rotating uses the v2 gateway — no legacy pool id needed.
+  if (type === 'prem_res_rotating') {
+    poolField.style.display = 'none';
+    buyEl.innerHTML = '';
+    return;
+  }
   poolField.style.display = '';
-  geoFields.style.display = type === 'res_rotating' ? '' : 'none';
+  // Both res_rotating (legacy) and prem_res_rotating (premium) target by geo, so
+  // both reveal the geo row. The premium generator's own handler then manages
+  // the region/city ⇄ zip swap within it.
+  geoFields.style.display =
+    (type === 'res_rotating' || type === 'prem_res_rotating') ? '' : 'none';
 
   hint.textContent = 'loading...';
   poolSelect.style.display = 'none';
@@ -1397,27 +1732,376 @@ function initProxyPool(prefix, { onChange } = {}) {
   if (onChange) onChange();
 }
 
-initProxyPool('s');
+// ─── Unified proxy component factory ─────────────────────────────────────────
+// PROXY_TYPES and PREM_IP_FILTER_FALLBACK are declared at the top of this file
+// (they must be initialized before the first top-level renderProxyComponent()
+// call in the Batch-tab init — a `const` here would be in its TDZ at that point).
 
-// Read a proxy block into a {proxy_type, proxy_pool_id?, proxy_geo?} object.
-// Returns null for the Search tab's "default (preset)" sentinel (empty type) so
-// the caller omits proxy entirely; returns false on a validation failure (the
-// user was already alerted) so the caller can abort.
+// Render a complete proxy block into `container` for the given id prefix and
+// wire all its conditional UI. Produces the exact ids the rest of app.js
+// already reads (proxy-type / pool-id-field / proxy-pool-select / proxy-pool /
+// pool-id-hint / geo-fields / geo-country / geo-region / geo-city) so
+// wireProxyPool, collectProxy, loadCountries and restoreState keep working
+// unchanged, plus a premium generator panel for prem_res_rotating.
+// Fill a <select> from a v2 /geo endpoint. Best-effort: an error or wrong
+// scraper target leaves the select with just the "— any —" option and never
+// throws. Keeps the current value if it's still valid after the reload.
+async function loadGeoSelect(sel, path, params, { value, label, code }) {
+  if (!sel) return;
+  const cur = sel.value;
+  let items = [];
+  try {
+    const qs = Object.entries(params)
+      .filter(([, v]) => v !== undefined && v !== null && v !== '')
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+      .join('&');
+    const r = await apiCall(`${path}${qs ? `?${qs}` : ''}`);
+    if (Array.isArray(r.data)) items = r.data;
+  } catch { /* best-effort: leave the placeholder */ }
+  sel.innerHTML = ['<option value="">— any —</option>'].concat(items.map(it => {
+    const v = String(it[value] ?? '');
+    const dc = (code != null && it[code] != null) ? ` data-code="${escapeHtml(String(it[code]))}"` : '';
+    return `<option value="${escapeHtml(v)}"${dc}>${escapeHtml(String(it[label] ?? v))}</option>`;
+  })).join('');
+  if (cur && Array.from(sel.options).some(o => o.value === cur)) sel.value = cur;
+}
+
+function renderProxyComponent(prefix, container) {
+  if (!container) return;
+  const typeOptions = PROXY_TYPES
+    .map(t => `<option value="${escapeHtml(t.value)}">${escapeHtml(t.label)}</option>`)
+    .join('');
+
+  // Stack direct children with the same vertical rhythm as the rest of the
+  // form. The form's spacing comes from .panel's `gap` applied to its DIRECT
+  // children; these rows are nested in the component, so they need their own
+  // gap or they render squished against each other.
+  container.style.display = 'flex';
+  container.style.flexDirection = 'column';
+  container.style.gap = '0.8rem';
+  container.innerHTML = `
+    <div class="field-row">
+      <div class="field">
+        <label>Proxy Type</label>
+        <select id="${prefix}-proxy-type">${typeOptions}</select>
+      </div>
+      <div class="field" id="${prefix}-pool-id-field">
+        <label>Pool ID <span id="${prefix}-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
+        <select id="${prefix}-proxy-pool-select" style="display:none"></select>
+        <input id="${prefix}-proxy-pool" type="text" placeholder="optional (for rotating: pin to pool id)" />
+      </div>
+    </div>
+    <div class="field-row" id="${prefix}-prem-top" style="display:none">
+      <div class="field">
+        <label>IP filter</label>
+        <select id="${prefix}-prem-ipfilter"></select>
+      </div>
+      <div class="field">
+        <label>Sub-user</label>
+        <select id="${prefix}-prem-subuser"></select>
+      </div>
+    </div>
+    <div class="field-row" id="${prefix}-geo-fields">
+      <div class="field">
+        <label>Country</label>
+        <select id="${prefix}-geo-country"><option value="">— any —</option></select>
+      </div>
+      <div class="field" id="${prefix}-geo-region-field">
+        <label>Region</label>
+        <input id="${prefix}-geo-region" type="text" placeholder="New York" />
+      </div>
+      <div class="field" id="${prefix}-geo-city-field">
+        <label>City</label>
+        <input id="${prefix}-geo-city" type="text" placeholder="New York" />
+      </div>
+    </div>
+    <div class="field-row" id="${prefix}-prem-geo" style="display:none">
+      <div class="field" id="${prefix}-prem-region-field">
+        <label>Region</label>
+        <select id="${prefix}-prem-region"><option value="">— any —</option></select>
+      </div>
+      <div class="field" id="${prefix}-prem-city-field">
+        <label>City</label>
+        <select id="${prefix}-prem-city"><option value="">— any —</option></select>
+      </div>
+      <div class="field" id="${prefix}-prem-zip-field" style="display:none">
+        <label>ZIP</label>
+        <select id="${prefix}-prem-zip"><option value="">— any —</option></select>
+      </div>
+      <div class="field">
+        <label>ISP <span style="color:var(--text-tertiary);font-weight:400">(optional)</span></label>
+        <select id="${prefix}-prem-isp"><option value="">— any —</option></select>
+      </div>
+    </div>
+    <div class="field-row checkboxes" id="${prefix}-prem-ziptoggle" style="display:none">
+      <label><input type="checkbox" id="${prefix}-prem-zip-toggle" /> Target by ZIP <span style="color:var(--text-tertiary);font-weight:400">(switches Region/City → ZIP)</span></label>
+    </div>
+    <div class="field-row" id="${prefix}-prem-session-row" style="display:none">
+      <div class="field">
+        <label>Session</label>
+        <div class="field-row checkboxes" style="padding-top:0.2rem">
+          <label><input type="radio" name="${prefix}-prem-session" value="rotating" checked /> rotating</label>
+          <label><input type="radio" name="${prefix}-prem-session" value="sticky" /> sticky</label>
+        </div>
+      </div>
+      <div class="field" id="${prefix}-prem-rotation-field" style="display:none">
+        <label>Rotation (min) <span style="color:var(--text-tertiary);font-weight:400">1–1440</span></label>
+        <input id="${prefix}-prem-rotation" type="number" min="1" max="1440" placeholder="auto" />
+      </div>
+    </div>`;
+
+  const $ = (suffix) => document.getElementById(`${prefix}-${suffix}`);
+  const typeSel = $('proxy-type');
+  const geoFields = $('geo-fields');
+  const premTop = $('prem-top');
+  const premGeo = $('prem-geo');
+  const premZipToggleRow = $('prem-ziptoggle');
+  const premSessionRow = $('prem-session-row');
+  const regionField = $('geo-region-field');   // legacy free-text region
+  const cityField = $('geo-city-field');        // legacy free-text city
+  const premRegionField = $('prem-region-field');
+  const premCityField = $('prem-city-field');
+  const premZipField = $('prem-zip-field');
+  const zipToggle = $('prem-zip-toggle');
+  const rotationField = $('prem-rotation-field');
+
+  const countrySel = $('geo-country');
+  const premRegion = $('prem-region');
+  const premCity = $('prem-city');
+  const premZip = $('prem-zip');
+  const premIsp = $('prem-isp');
+
+  const isPremNow = () => typeSel.value === 'prem_res_rotating';
+  const cc = () => (countrySel?.value || '').trim();
+  const regionCode = () => premRegion?.selectedOptions?.[0]?.dataset?.code || '';
+  const cityName = () => (premCity?.value || '').trim();
+
+  // Cascade loaders (prem only). Region/city/zip/isp come from the v2 /geo
+  // endpoints, scoped by the selections above them.
+  const GEO = PREM_GEO;
+  // All /geo lookups are scoped by country — skip the fetch (which would 422)
+  // until a country is chosen. region/city/isp stay optional ("— any —").
+  const loadRegions = () => cc() ? loadGeoSelect(premRegion, `${GEO}/regions`, { country_code: cc() }, { value: 'name', label: 'name', code: 'code' }) : null;
+  const loadCities  = () => cc() ? loadGeoSelect(premCity, `${GEO}/cities`, { country_code: cc(), region_code: regionCode() }, { value: 'name', label: 'name' }) : null;
+  const loadIsps    = () => cc() ? loadGeoSelect(premIsp, `${GEO}/isps`, { country_code: cc(), city_name: cityName() }, { value: 'name', label: 'name' }) : null;
+  const loadZips    = () => cc() ? loadGeoSelect(premZip, `${GEO}/zips`, { country_code: cc(), city_name: cityName() }, { value: 'zip', label: 'zip' }) : null;
+
+  // ZIP toggle (prem only): region/city ⇄ zip; disable the hidden controls so a
+  // stale value never leaks into collectProxy, and load zips when turned on.
+  const syncZip = () => {
+    const useZip = !!zipToggle.checked;
+    if (premRegionField) premRegionField.style.display = useZip ? 'none' : '';
+    if (premCityField) premCityField.style.display = useZip ? 'none' : '';
+    if (premZipField) premZipField.style.display = useZip ? '' : 'none';
+    if (premRegion) premRegion.disabled = useZip;
+    if (premCity) premCity.disabled = useZip;
+    if (premZip) premZip.disabled = !useZip;
+    if (useZip && isPremNow() && cc()) loadZips();
+  };
+
+  const syncSession = () => {
+    const sticky = container.querySelector(
+      `input[name="${prefix}-prem-session"]:checked`)?.value === 'sticky';
+    if (rotationField) rotationField.style.display = sticky ? '' : 'none';
+  };
+
+  // res_rotating → legacy free-text geo (Country + Region/City inputs).
+  // prem_res_rotating → Country + cascading Region/City/ZIP/ISP dropdowns.
+  // wireProxyPool also runs on the type change and owns geo-fields display for
+  // res_rotating; we set the prem-only rows here so the two never disagree.
+  const syncType = () => {
+    const type = typeSel.value;
+    const isPrem = type === 'prem_res_rotating';
+    if (geoFields) geoFields.style.display = (type === 'res_rotating' || isPrem) ? '' : 'none';
+    // For prem only the Country dropdown of geo-fields is used; its legacy
+    // free-text region/city inputs are hidden in favour of the cascade.
+    if (regionField) regionField.style.display = isPrem ? 'none' : '';
+    if (cityField) cityField.style.display = isPrem ? 'none' : '';
+    if (premTop) premTop.style.display = isPrem ? '' : 'none';
+    if (premGeo) premGeo.style.display = isPrem ? '' : 'none';
+    if (premZipToggleRow) premZipToggleRow.style.display = isPrem ? '' : 'none';
+    if (premSessionRow) premSessionRow.style.display = isPrem ? '' : 'none';
+    if (isPrem) syncZip();
+    // Fill the country dropdown from this block's source (v2 for prem, v1
+    // otherwise), then cascade for an already-selected country (prem only).
+    populateCountrySelect(countrySel).then(() => {
+      if (isPrem && cc()) { loadRegions(); loadIsps(); }
+    });
+  };
+
+  // Cascade wiring (guarded so a shared country dropdown only cascades for prem).
+  countrySel?.addEventListener('change', () => {
+    if (!isPremNow()) return;
+    loadRegions();
+    if (premCity) premCity.innerHTML = '<option value="">— any —</option>';
+    loadIsps();
+    if (zipToggle?.checked) loadZips();
+  });
+  premRegion?.addEventListener('change', () => { if (isPremNow()) loadCities(); });
+  premCity?.addEventListener('change', () => {
+    if (!isPremNow()) return;
+    loadIsps();
+    if (zipToggle?.checked) loadZips();
+  });
+
+  typeSel.addEventListener('change', () => { syncType(); syncSession(); });
+  if (zipToggle) zipToggle.addEventListener('change', syncZip);
+  container.querySelectorAll(`input[name="${prefix}-prem-session"]`)
+    .forEach(r => r.addEventListener('change', syncSession));
+
+  syncType();
+  syncSession();
+}
+
+// Populate every rendered prem dropdown from the sanitized v2 endpoints.
+// Best-effort: a missing/erroring backend leaves dropdowns with safe defaults
+// (sub-user/isp empty, ip_filter from the canonical enum) and never throws.
+async function loadPremCatalogs() {
+  const [subs, opts] = await Promise.all([
+    apiCall('/api/v2/prem-proxies/sub-users')
+      .then(r => (Array.isArray(r.data) ? r.data : [])).catch(() => []),
+    apiCall('/api/v2/prem-proxies/session-options')
+      .then(r => (r.data && typeof r.data === 'object' ? r.data : {})).catch(() => ({})),
+  ]);
+
+  // /session-options items are {value,label,suffix}; the fallback is plain
+  // enum strings. Normalize both to {value,label} for the dropdown so options
+  // show the human label (not "[object Object]") and submit the enum value.
+  const ipFilters = (Array.isArray(opts.ip_filters) && opts.ip_filters.length
+    ? opts.ip_filters
+    : PREM_IP_FILTER_FALLBACK
+  ).map(f => (typeof f === 'string'
+    ? { value: f, label: f }
+    : { value: f.value, label: f.label || f.value })
+  ).filter(f => f.value);
+
+  document.querySelectorAll('select[id$="-prem-subuser"]').forEach(sel => {
+    const prev = sel.value;
+    // Default = first sub-user (primary). Empty option lets the server fall
+    // back to its own primary when no sub-users are configured.
+    sel.innerHTML = subs.length
+      ? subs.map((u, i) => {
+          const label = u.login ? `${escapeHtml(u.login)}${u.is_primary ? ' (primary)' : ''}` : escapeHtml(u.id);
+          return `<option value="${escapeHtml(u.id)}"${i === 0 ? ' selected' : ''}>${label}</option>`;
+        }).join('')
+      : '<option value="">— default —</option>';
+    if (prev && subs.some(u => String(u.id) === prev)) sel.value = prev;
+  });
+
+  document.querySelectorAll('select[id$="-prem-ipfilter"]').forEach(sel => {
+    const prev = sel.value;
+    sel.innerHTML = ipFilters
+      .map(f => `<option value="${escapeHtml(f.value)}">${escapeHtml(f.label)}</option>`)
+      .join('');
+    if (prev && ipFilters.some(f => f.value === prev)) sel.value = prev;
+  });
+}
+
+// ─── Warmup component factory + collector ────────────────────────────────────
+// Renders a minimal "Warmup" fieldset (checkbox + type select) into container.
+// collectWarmup returns {type} when enabled, or null when disabled/absent.
+function renderWarmupComponent(prefix, container) {
+  if (!container) return;
+  // A normal form section (matching the .panel rhythm), not a bordered fieldset,
+  // so it reads like Proxy / Extraction. Own gap because these rows are nested
+  // in this container, not direct children of .panel.
+  container.style.display = 'flex';
+  container.style.flexDirection = 'column';
+  container.style.gap = '0.8rem';
+  container.innerHTML = `
+    <div style="display:flex;align-items:center;gap:0.5rem">
+      <h3 style="margin:0">Warmup</h3>
+      <span class="info-icon" tabindex="0">
+        i
+        <div class="info-tooltip">
+          <div>Before fetching your URL, the browser first opens the site's <b>homepage</b> and dwells briefly, then navigates to the target — in the <b>same</b> browser context.</div>
+          <div>This seeds cookies/session so anti-bot gates that only block a <i>cold</i> first hit (e.g. Yandex SmartCaptcha) let the warmed request through. Works on every engine and stacks with Max retries.</div>
+          <div>Off by default. Dwell time is the server's <code>WARMUP_DWELL_MS</code> (2500ms).</div>
+        </div>
+      </span>
+    </div>
+    <div class="field-row checkboxes">
+      <label><input type="checkbox" id="${prefix}-warmup-enable" /> Enable warmup <span style="color:var(--text-tertiary);font-weight:400">(visit a page first, then the target — same context)</span></label>
+    </div>
+    <div class="field-row">
+      <div class="field" style="max-width:240px">
+        <label>Type</label>
+        <select id="${prefix}-warmup-type">
+          <option value="homepage">homepage (target's origin)</option>
+          <option value="custom">custom URL</option>
+        </select>
+      </div>
+      <div class="field" id="${prefix}-warmup-url-field" style="display:none">
+        <label>Warmup URL</label>
+        <input id="${prefix}-warmup-url" type="text" placeholder="https://example.com/" />
+      </div>
+      <div class="field" style="max-width:180px">
+        <label>Dwell (ms) <span style="color:var(--text-tertiary);font-weight:400">opt.</span></label>
+        <input id="${prefix}-warmup-dwell" type="number" min="0" max="60000" placeholder="default 2500" />
+      </div>
+    </div>`;
+  // The load-time tooltip pass already ran before this dynamic render, so wire
+  // the freshly-injected info icon now (idempotent).
+  wireInfoIcons(container);
+  // Reveal the custom-URL field only for type=custom.
+  const typeSel = document.getElementById(`${prefix}-warmup-type`);
+  const urlField = document.getElementById(`${prefix}-warmup-url-field`);
+  const syncWarmupType = () => {
+    if (urlField) urlField.style.display = (typeSel && typeSel.value === 'custom') ? '' : 'none';
+  };
+  if (typeSel) typeSel.addEventListener('change', syncWarmupType);
+  syncWarmupType();
+}
+
+function collectWarmup(prefix) {
+  const en = document.getElementById(`${prefix}-warmup-enable`);
+  if (!en || !en.checked) return null;
+  const type = document.getElementById(`${prefix}-warmup-type`)?.value || 'homepage';
+  const w = { type };
+  if (type === 'custom') {
+    const u = (document.getElementById(`${prefix}-warmup-url`)?.value || '').trim();
+    if (u) w.url = u;
+  }
+  const d = (document.getElementById(`${prefix}-warmup-dwell`)?.value || '').trim();
+  if (d) w.dwell_ms = Number(d);
+  return w;
+}
+
+renderProxyComponent('s', document.getElementById('s-proxy-component'));
+renderWarmupComponent('s', document.getElementById('s-warmup-component'));
+initProxyPool('s');
+// Render the Preset Builder proxy component eagerly so restoreState can restore
+// its type/geo values; initProxyPool('pw') stays lazy (fired on first tab click)
+// to avoid fetching available proxy pools before the user ever opens the tab.
+renderProxyComponent('pw', document.getElementById('pw-proxy-component'));
+
+// Read a proxy block into a {proxy_type, proxy_pool_id?, proxy_geo?,
+// prem_proxy_options?} object. Returns null for the Search tab's "default
+// (preset)" sentinel (empty type) so the caller omits proxy entirely; returns
+// false on a validation failure (the user was already alerted) so the caller
+// can abort.
 function collectProxy(prefix) {
   const $ = (suffix) => document.getElementById(`${prefix}-${suffix}`);
+  const val = (suffix) => ($(suffix)?.value || '').trim();
+  const checked = (suffix) => !!$(suffix)?.checked;
+  const radio = (name) =>
+    document.querySelector(`input[name="${prefix}-${name}"]:checked`)?.value || '';
+
   const type = $('proxy-type').value;
   if (!type) return null;
   const proxy = { proxy_type: type };
-  const poolId = $('proxy-pool').value.trim();
+  const poolId = val('proxy-pool');
   if (poolId) proxy.proxy_pool_id = poolId;
-  if (type !== 'none' && !poolId) {
+  // The v2 premium gateway is keyed on the API account, not a purchased pool —
+  // so it (and 'none') are exempt from the legacy pool-id requirement.
+  if (type !== 'none' && type !== 'prem_res_rotating' && !poolId) {
     alert(`Select a Pool ID for proxy type "${type}". If none available, use the "Buy" button to purchase one on CyberYozh.`);
     return false;
   }
   if (type === 'res_rotating') {
-    const cc = $('geo-country').value.trim();
-    const region = $('geo-region').value.trim();
-    const city = $('geo-city').value.trim();
+    const cc = val('geo-country');
+    const region = val('geo-region');
+    const city = val('geo-city');
     if (cc || region || city) {
       proxy.proxy_geo = {};
       if (cc) proxy.proxy_geo.country_code = cc.toUpperCase();
@@ -1425,9 +2109,42 @@ function collectProxy(prefix) {
       if (city) proxy.proxy_geo.city = city;
     }
   }
+  if (type === 'prem_res_rotating') {
+    const cc = val('geo-country');
+    proxy.proxy_geo = cc ? { country_code: cc.toUpperCase() } : {};
+    const prem = {};
+    const su = val('prem-subuser'); if (su) prem.sub_user_id = su;
+    const ipf = val('prem-ipfilter'); if (ipf) prem.ip_filter = ipf;
+    const isp = val('prem-isp'); if (isp) prem.isp = isp;
+    if (checked('prem-zip-toggle')) {
+      // ZIP targeting is mutually exclusive with region/city (server enforces).
+      const zip = val('prem-zip'); if (zip) prem.zip = zip;
+    } else {
+      const r = val('prem-region'); if (r) proxy.proxy_geo.region = r;
+      const ci = val('prem-city'); if (ci) proxy.proxy_geo.city = ci;
+    }
+    const sess = radio('prem-session') || 'rotating';
+    prem.session_type = sess;
+    if (sess === 'sticky') {
+      const rot = val('prem-rotation'); if (rot) prem.rotation_minutes = Number(rot);
+    }
+    proxy.prem_proxy_options = prem;
+  }
   return proxy;
 }
 
+renderProxyComponent('se', document.getElementById('se-proxy-component'));
+renderWarmupComponent('se', document.getElementById('se-warmup-component'));
+// Search tab uses an empty-value sentinel so collectProxy returns null (= no proxy
+// override, letting the google_search preset decide). Prepend it to the type select
+// that renderProxyComponent just created.
+(function() {
+  const typeSel = document.getElementById('se-proxy-type');
+  if (!typeSel) return;
+  const sentinel = new Option('default (preset)', '');
+  typeSel.insertBefore(sentinel, typeSel.firstChild);
+  typeSel.value = '';  // select the sentinel by default
+})();
 initProxyPool('se');
 
 // ─── MCP helpers ─────────────────────────────────────────────────────────────
@@ -1698,7 +2415,8 @@ function renderMapResults(el, data) {
   summary.style.cssText = 'margin:0 0 0.6rem;font-size:12px;color:var(--text-secondary)';
   summary.innerHTML = `<b style="color:var(--text-primary)">${data.count}</b> URL${data.count === 1 ? '' : 's'} `
     + (took ? `<span style="color:var(--text-muted)">in ${took}</span> ` : '')
-    + `<span style="color:var(--text-muted)">(sitemap ${stats.from_sitemap ?? 0} · page ${stats.from_page ?? 0} · unique ${stats.unique_in_scope ?? 0})</span>`;
+    + `<span style="color:var(--text-muted)">(sitemap ${stats.from_sitemap ?? 0} · page ${stats.from_page ?? 0} · unique ${stats.unique_in_scope ?? 0}`
+    + (stats.with_lastmod ? ` · dated ${stats.with_lastmod}` : '') + `)</span>`;
   el.appendChild(summary);
 
   if (Array.isArray(data.warnings) && data.warnings.length) {
@@ -1710,11 +2428,20 @@ function renderMapResults(el, data) {
 
   const list = document.createElement('div');
   list.style.cssText = 'max-height:520px;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm)';
+  const lastmod = data.lastmod || {};
   data.urls.forEach((u) => {
     const row = document.createElement('a');
     row.href = u; row.target = '_blank'; row.rel = 'noopener noreferrer';
-    row.textContent = u;
-    row.style.cssText = 'display:block;padding:0.3rem 0.6rem;font-size:12px;color:var(--color-blue);text-decoration:none;border-bottom:1px solid var(--border);word-break:break-all';
+    row.style.cssText = 'display:flex;justify-content:space-between;gap:0.6rem;padding:0.3rem 0.6rem;font-size:12px;color:var(--color-blue);text-decoration:none;border-bottom:1px solid var(--border);word-break:break-all';
+    const link = document.createElement('span');
+    link.textContent = u;
+    row.appendChild(link);
+    if (lastmod[u]) {
+      const date = document.createElement('span');
+      date.textContent = lastmod[u];
+      date.style.cssText = 'flex:none;color:var(--text-muted);font-variant-numeric:tabular-nums';
+      row.appendChild(date);
+    }
     list.appendChild(row);
   });
   el.appendChild(list);
@@ -1734,26 +2461,19 @@ document.getElementById('btnMap').addEventListener('click', async () => {
   const search = document.getElementById('mp-search').value.trim();
   if (search) payload.search = search;
 
+  // Recency (sitemap lastmod). Only one of published_after / recent_days is
+  // meaningful — published_after wins server-side.
+  const publishedAfter = document.getElementById('mp-published-after').value;
+  if (publishedAfter) payload.published_after = publishedAfter;
+  const recentDays = document.getElementById('mp-recent-days').value.trim();
+  if (recentDays) payload.recent_days = Number(recentDays);
+  const sort = document.getElementById('mp-sort').value;
+  if (sort) payload.sort = sort;
+
   // Proxy (same convention as the Scrape/Crawler tabs).
-  const proxyType = document.getElementById('mp-proxy-type').value;
-  payload.proxy_type = proxyType;
-  const poolId = document.getElementById('mp-proxy-pool').value.trim();
-  if (poolId) payload.proxy_pool_id = poolId;
-  if (proxyType !== 'none' && !poolId) {
-    alert(`Select a Pool ID for proxy type "${proxyType}". If none available, use the "Buy" button to purchase one on CyberYozh.`);
-    return;
-  }
-  if (proxyType === 'res_rotating') {
-    const cc = document.getElementById('mp-geo-country').value.trim();
-    const region = document.getElementById('mp-geo-region').value.trim();
-    const city = document.getElementById('mp-geo-city').value.trim();
-    if (cc || region || city) {
-      payload.proxy_geo = {};
-      if (cc) payload.proxy_geo.country_code = cc.toUpperCase();
-      if (region) payload.proxy_geo.region = region;
-      if (city) payload.proxy_geo.city = city;
-    }
-  }
+  const mpProxy = collectProxy('mp');
+  if (mpProxy === false) return;  // invalid (missing pool) — already alerted
+  if (mpProxy) Object.assign(payload, mpProxy);
 
   setStatus('map-status', 'queued', 'Mapping...');
   document.getElementById('map-result').innerHTML = '<span class="placeholder">Mapping…</span>';
@@ -1770,27 +2490,8 @@ document.getElementById('btnMap').addEventListener('click', async () => {
   renderMapResults(document.getElementById('map-result'), data);
 });
 
+renderProxyComponent('mp', document.getElementById('mp-proxy-component'));
 initProxyPool('mp');
-
-// ─── Crawler health check ────────────────────────────────────────────────────
-document.getElementById('btnCrawlerHealth').addEventListener('click', async () => {
-  const badge = document.getElementById('crawlerHealthStatus');
-  badge.className = 'badge';
-  badge.textContent = 'checking…';
-  try {
-    const { data, ok } = await crawlerCall('/api/v1/health');
-    if (ok && data?.status === 'ok') {
-      badge.className = 'badge ok';
-      badge.textContent = data.scraper_reachable ? 'ok' : 'no scraper';
-    } else {
-      badge.className = 'badge error';
-      badge.textContent = 'error';
-    }
-  } catch {
-    badge.className = 'badge error';
-    badge.textContent = 'unreachable';
-  }
-});
 
 // ─── Crawler dynamic rows ────────────────────────────────────────────────────
 document.getElementById('btnAddHeaderCrawler').addEventListener('click', () =>
@@ -1835,6 +2536,7 @@ function updateCrawlerProxyWarning() {
   if (!warn) return;
   warn.style.display = document.getElementById('c-proxy-type').value === 'none' ? '' : 'none';
 }
+renderProxyComponent('c', document.getElementById('c-proxy-component'));
 initProxyPool('c', { onChange: updateCrawlerProxyWarning });
 
 // ─── Crawl Proxy pool (independent block, cp-* prefix) ───────────────────────
@@ -1843,6 +2545,7 @@ function updateCrawlProxyWarning() {
   if (!warn) return;
   warn.style.display = document.getElementById('cp-proxy-type').value === 'none' ? '' : 'none';
 }
+renderProxyComponent('cp', document.getElementById('cp-proxy-component'));
 initProxyPool('cp', { onChange: updateCrawlProxyWarning });
 
 // ─── Enable-scraping toggle: show/hide the scraping section ─────────────────
@@ -1871,6 +2574,9 @@ function buildCrawlPayload() {
     exclude_patterns: document.getElementById('c-exclude').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean),
   };
 
+  const cProxy = collectProxy('c');
+  if (cProxy === false) return null;  // invalid (missing pool) — already alerted
+
   const scrape = {
     render: document.getElementById('c-render').checked,
     wait_until: document.getElementById('c-wait-until').value,
@@ -1879,28 +2585,11 @@ function buildCrawlPayload() {
     block_assets: document.getElementById('c-block-assets').checked,
     screenshot: document.getElementById('c-screenshot').checked,
     stealth: document.getElementById('c-stealth').checked,
-    proxy_type: document.getElementById('c-proxy-type').value,
   };
+  Object.assign(scrape, cProxy);
+
   const waitSelector = document.getElementById('c-wait-selector').value.trim();
   if (waitSelector) scrape.wait_for_selector = waitSelector;
-
-  const poolId = document.getElementById('c-proxy-pool').value.trim();
-  if (poolId) scrape.proxy_pool_id = poolId;
-  if (scrape.proxy_type !== 'none' && !poolId) {
-    alert(`Select a Pool ID for proxy type "${scrape.proxy_type}". If none available, use the "Buy" button on the Scrape Page tab.`);
-    return null;
-  }
-  if (scrape.proxy_type === 'res_rotating') {
-    const cc = document.getElementById('c-geo-country').value.trim();
-    const region = document.getElementById('c-geo-region').value.trim();
-    const city = document.getElementById('c-geo-city').value.trim();
-    if (cc || region || city) {
-      scrape.proxy_geo = {};
-      if (cc) scrape.proxy_geo.country_code = cc.toUpperCase();
-      if (region) scrape.proxy_geo.region = region;
-      if (city) scrape.proxy_geo.city = city;
-    }
-  }
 
   // Session — attaches the crawler's per-page scrape to a server-side session.
   const sessionId = document.getElementById('c-session-id')?.value.trim();
@@ -1941,27 +2630,9 @@ function buildCrawlPayload() {
   }
 
   // Separate crawl proxy (used when enable_scraping=false)
-  let crawl_proxy = null;
-  const cpType = document.getElementById('cp-proxy-type').value;
-  if (cpType !== 'none') {
-    const cpPoolId = document.getElementById('cp-proxy-pool').value.trim();
-    if (!cpPoolId) {
-      alert(`Crawl proxy: select a Pool ID for "${cpType}" or switch the type back to "none".`);
-      return null;
-    }
-    crawl_proxy = { proxy_type: cpType, proxy_pool_id: cpPoolId };
-    if (cpType === 'res_rotating') {
-      const cc = document.getElementById('cp-geo-country').value.trim();
-      const region = document.getElementById('cp-geo-region').value.trim();
-      const city = document.getElementById('cp-geo-city').value.trim();
-      if (cc || region || city) {
-        crawl_proxy.proxy_geo = {};
-        if (cc) crawl_proxy.proxy_geo.country_code = cc.toUpperCase();
-        if (region) crawl_proxy.proxy_geo.region = region;
-        if (city) crawl_proxy.proxy_geo.city = city;
-      }
-    }
-  }
+  const cpProxy = collectProxy('cp');
+  if (cpProxy === false) return null;  // invalid (missing pool) — already alerted
+  const crawl_proxy = cpProxy && cpProxy.proxy_type !== 'none' ? cpProxy : null;
 
   return {
     seed_url: seed,
@@ -2514,6 +3185,13 @@ function enhanceSelect(select) {
 
   function openDropdown() {
     rebuildOptions();
+    // Re-sync the trigger label from the live <select> value too. The label
+    // otherwise only updates on `change`/mutation, so a programmatic
+    // `select.value = x` set without a change event (e.g. a dropdown refresh)
+    // would leave the label stale while rebuildOptions marks the real value —
+    // the two would visibly disagree. Reading both from select.value here makes
+    // the checkmark and the label provably consistent on every open.
+    setLabel();
     if (!dropdown.children.length) return;
     wrap.classList.add('open');
     dropdown.style.display = '';
@@ -2626,8 +3304,14 @@ function captureState() {
   document.querySelectorAll('input[id], select[id], textarea[id]').forEach(el => {
     if (!el.id) return;
     // Skip selects populated dynamically from APIs — restoring stale values
-    // would conflict with the refresh fetches on page load.
-    if (el.id.endsWith('-proxy-pool-select') || el.id.endsWith('-geo-country')) return;
+    // would conflict with the refresh fetches on page load (loadPremCatalogs
+    // repopulates the prem sub-user / ip-filter lists; the geo cascade fills
+    // region/city/isp/zip async from /geo, so a restored value would no-op
+    // against an as-yet-empty list).
+    if (el.id.endsWith('-proxy-pool-select') || el.id.endsWith('-geo-country') ||
+        el.id.endsWith('-prem-subuser') || el.id.endsWith('-prem-ipfilter') ||
+        el.id.endsWith('-prem-region') || el.id.endsWith('-prem-city') ||
+        el.id.endsWith('-prem-isp') || el.id.endsWith('-prem-zip')) return;
     // Session pickers are repopulated from /api/v1/sessions on load; preserving
     // their value via restoreState would point at sessions that no longer exist.
     if (el.id === 's-session-id' || el.id === 'b-session-id' ||
@@ -2922,7 +3606,9 @@ function pwResetBuild() {
 // Step 1: real scrape job → raw_html into pwState.sampleHtml
 document.getElementById('pw-fetch').addEventListener('click', async () => {
   const pasted = document.getElementById('pw-sample-html').value.trim();
-  const proxyType = document.getElementById('pw-proxy-type').value;
+  const pwProxy = collectProxy('pw');
+  if (pwProxy === false) return;  // invalid (missing pool) — already alerted
+
   // Persist scrape settings for Save (everything except concrete pool_id).
   pwState.scrapeDefaults = {
     device: document.getElementById('pw-device').value,
@@ -2931,20 +3617,15 @@ document.getElementById('pw-fetch').addEventListener('click', async () => {
     block_assets: document.getElementById('pw-block-assets').checked,
     wait_until: document.getElementById('pw-wait-until').value,
     timeout_ms: Number(document.getElementById('pw-timeout').value) || 30000,
-    proxy_type: proxyType,
   };
   const waitSel = document.getElementById('pw-wait-selector').value.trim();
   if (waitSel) pwState.scrapeDefaults.wait_for_selector = waitSel;
-  if (proxyType === 'res_rotating') {
-    const cc = document.getElementById('pw-geo-country').value.trim();
-    const rg = document.getElementById('pw-geo-region').value.trim();
-    const ct = document.getElementById('pw-geo-city').value.trim();
-    if (cc || rg || ct) {
-      pwState.scrapeDefaults.proxy_geo = {};
-      if (cc) pwState.scrapeDefaults.proxy_geo.country_code = cc.toUpperCase();
-      if (rg) pwState.scrapeDefaults.proxy_geo.region = rg;
-      if (ct) pwState.scrapeDefaults.proxy_geo.city = ct;
-    }
+  if (pwProxy) {
+    // Spread proxy fields into scrapeDefaults (proxy_type, proxy_geo?,
+    // prem_proxy_options?) but strip proxy_pool_id — it's per-account, not
+    // a portable preset default.
+    const { proxy_pool_id: _skip, ...proxyDefaults } = pwProxy;
+    Object.assign(pwState.scrapeDefaults, proxyDefaults);
   }
 
   if (pasted) {
@@ -2970,12 +3651,8 @@ document.getElementById('pw-fetch').addEventListener('click', async () => {
     raw_html: true,
     screenshot: document.getElementById('pw-screenshot').checked,
   };
-  const poolId = document.getElementById('pw-proxy-pool').value.trim();
-  if (poolId) payload.proxy_pool_id = poolId;
-  if (proxyType !== 'none' && !poolId) {
-    alert(`Select a Pool ID for proxy type "${proxyType}", or use Buy on CyberYozh.`);
-    return;
-  }
+  // Re-add pool_id to the actual scrape request (stripped from scrapeDefaults above).
+  if (pwProxy && pwProxy.proxy_pool_id) payload.proxy_pool_id = pwProxy.proxy_pool_id;
 
   const fetchBtn = document.getElementById('pw-fetch');
   fetchBtn.disabled = true;
@@ -3291,57 +3968,6 @@ function showSessOutput(elId, data) {
     dataForJson = { ...data, screenshot_b64: `<${Math.round(b64.length * 0.75)} bytes — rendered above>` };
   }
   el.innerHTML = imgHtml + `<pre>${syntaxHighlight(dataForJson)}</pre>`;
-}
-
-async function refreshSessProxyPool() {
-  const type = document.getElementById('sess-proxy-type').value;
-  const geoFields = document.getElementById('sess-geo-fields');
-  const poolField = document.getElementById('sess-pool-id-field');
-  const poolSelect = document.getElementById('sess-proxy-pool-select');
-  const poolInput = document.getElementById('sess-proxy-pool');
-  const hint = document.getElementById('sess-pool-id-hint');
-  const buyEl = ensureBuyButtonEl(poolField, 'sess-buy-proxy');
-
-  if (type === 'none') {
-    if (geoFields) geoFields.style.display = 'none';
-    if (poolField) poolField.style.display = 'none';
-    buyEl.innerHTML = '';
-    return;
-  }
-  if (poolField) poolField.style.display = '';
-  if (geoFields) geoFields.style.display = type === 'res_rotating' ? '' : 'none';
-
-  hint.textContent = 'loading...';
-  poolSelect.style.display = 'none';
-  poolInput.style.display = '';
-  poolSelect.innerHTML = '';
-  buyEl.innerHTML = '';
-
-  const { ok, data } = await apiCall(`/api/v1/proxies/available?proxy_type=${encodeURIComponent(type)}`);
-  if (!ok || !data) {
-    hint.textContent = '(failed to load)';
-    return;
-  }
-  if (!data.configured) {
-    hint.textContent = '(CyberYozh API key not set — manual entry only)';
-    return;
-  }
-  if (!data.items?.length) {
-    hint.textContent = `(no purchased ${type.replace(/_/g, ' ')} proxies)`;
-    poolSelect.style.display = 'none';
-    poolInput.style.display = 'none';
-    buyEl.innerHTML = renderBuyButton(type);
-    return;
-  }
-
-  hint.textContent = `(${data.items.length} available)`;
-  poolSelect.innerHTML = '<option value="">— select one —</option>' +
-    data.items.map(p =>
-      `<option value="${escapeHtml(p.id)}">${escapeHtml(p.id)} — ${escapeHtml(p.url || '(no url)')} ${p.expired ? '[expired]' : ''}</option>`
-    ).join('');
-  poolSelect.style.display = '';
-  poolInput.style.display = 'none';
-  poolInput.value = '';
 }
 
 async function listSessions() {
@@ -3704,12 +4330,8 @@ function _wireSessionPickerProxyAutofill() {
 
 _wireSessionPickerProxyAutofill();
 
-document.getElementById('sess-proxy-type')?.addEventListener('change', refreshSessProxyPool);
-document.getElementById('sess-proxy-pool-select')?.addEventListener('change', () => {
-  document.getElementById('sess-proxy-pool').value =
-    document.getElementById('sess-proxy-pool-select').value;
-});
-refreshSessProxyPool();
+renderProxyComponent('sess', document.getElementById('sess-proxy-component'));
+initProxyPool('sess');
 
 document.getElementById('btnSessAddStep')?.addEventListener('click', () => addLoginStep());
 
@@ -3717,28 +4339,12 @@ document.getElementById('btnSessRefresh')?.addEventListener('click', refreshSess
 
 document.getElementById('btnSessCreate')?.addEventListener('click', async () => {
   const device = document.getElementById('sess-device').value;
-  const proxyType = document.getElementById('sess-proxy-type').value;
-  const poolId = document.getElementById('sess-proxy-pool').value.trim();
+  const sessProxy = collectProxy('sess');
+  if (sessProxy === false) return;  // invalid (missing pool) — already alerted
   const ttl = Number(document.getElementById('sess-ttl').value) || 86400;
 
-  if (proxyType !== 'none' && !poolId) {
-    alert(`Select a Pool ID for proxy type "${proxyType}" (or switch back to "none").`);
-    return;
-  }
-
-  const body = { device, proxy_type: proxyType, ttl_seconds: ttl };
-  if (poolId) body.proxy_pool_id = poolId;
-  if (proxyType === 'res_rotating') {
-    const cc = document.getElementById('sess-geo-country').value.trim();
-    const region = document.getElementById('sess-geo-region').value.trim();
-    const city = document.getElementById('sess-geo-city').value.trim();
-    if (cc || region || city) {
-      body.proxy_geo = {};
-      if (cc) body.proxy_geo.country_code = cc.toUpperCase();
-      if (region) body.proxy_geo.region = region;
-      if (city) body.proxy_geo.city = city;
-    }
-  }
+  const body = { device, ttl_seconds: ttl };
+  if (sessProxy) Object.assign(body, sessProxy);
 
   const { data, ok } = await apiCall('/api/v1/sessions', {
     method: 'POST',
@@ -3875,8 +4481,52 @@ restoreState();
 // the proxy countries and the preset dropdown load (these endpoints don't exist
 // on a stock scraper / wrong host). Refresh them whenever the target changes too.
 loadCountries();
+loadPremCatalogs();
 populateScrapePresetSelect();
+populateSearchLocales();
 document.getElementById('scraperUrl').addEventListener('change', () => {
   loadCountries();
+  loadPremCatalogs();
   populateScrapePresetSelect();
+  populateSearchLocales();
 });
+
+// Live GitHub star count on the header icon. Reads the public mirror
+// (CyberYozh-data/yozh-scraper) — unauthenticated, so cache in localStorage to
+// render instantly and stay under GitHub's 60 req/h/IP limit. Any failure
+// (offline, rate-limited) silently leaves the icon without a count.
+async function loadGithubStars() {
+  const el = document.getElementById('ghStars');
+  if (!el) return;
+  const REPO = 'CyberYozh-data/yozh-scraper';
+  const CACHE_KEY = 'ghStars:' + REPO;
+  const TTL_MS = 6 * 60 * 60 * 1000;
+  // Widen the icon into a pill only once a count is actually shown; until then
+  // it stays a circle matching the sibling social icons.
+  const show = (count) => {
+    el.innerHTML = '<span class="gh-star">★</span> ' + count;
+    el.hidden = false;
+    el.parentElement.classList.add('gh-pill');
+  };
+  let fresh = false;
+  try {
+    const cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
+    if (cached && typeof cached.count === 'number') {
+      show(cached.count);
+      fresh = Date.now() - cached.ts < TTL_MS;
+    }
+  } catch {}
+  if (fresh) return;
+  try {
+    const resp = await fetch('https://api.github.com/repos/' + REPO, {
+      headers: { Accept: 'application/vnd.github+json' },
+    });
+    if (!resp.ok) return;
+    const { stargazers_count: count } = await resp.json();
+    if (typeof count === 'number') {
+      show(count);
+      try { localStorage.setItem(CACHE_KEY, JSON.stringify({ count, ts: Date.now() })); } catch {}
+    }
+  } catch {}
+}
+loadGithubStars();

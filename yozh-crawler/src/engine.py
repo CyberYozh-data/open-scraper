@@ -68,11 +68,16 @@ class CrawlEngine:
             active.proxy_geo.model_dump(exclude_none=True)
             if (active and active.proxy_geo) else None
         )
+        active_prem = (
+            active.prem_proxy_options.model_dump(exclude_none=True)
+            if (active and active.prem_proxy_options) else None
+        )
 
         self._sessions = ManagedSession(
             base_proxy_type=active_type,
             base_proxy_pool_id=active_pool_id,
             base_proxy_geo=active_geo,
+            base_prem_proxy_options=active_prem,
             max_error_score=settings.session_max_error_score,
             max_usage=settings.session_max_usage,
             blocked_codes=settings.session_blocked_codes,
@@ -87,7 +92,7 @@ class CrawlEngine:
             base_opts.pop("extract", None)
             base_opts["screenshot"] = False
         # Proxy fields come from SessionPool on every fetch — drop defaults here.
-        for proxy_key in ("proxy_type", "proxy_pool_id", "proxy_geo"):
+        for proxy_key in ("proxy_type", "proxy_pool_id", "proxy_geo", "prem_proxy_options"):
             base_opts.pop(proxy_key, None)
         self._base_scrape_options = base_opts
 

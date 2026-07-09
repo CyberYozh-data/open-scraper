@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from src.app import create_app
-from src.jobs import JobRecord
-from src.schemas import ScrapeResponse, ScrapeMeta
+from src.queue.store import get_job_store, pack_payload
+from src.queue.tasks import make_error_payload
+from src.schemas import ScrapeRequest, ScrapeResponse, ScrapeMeta
 
 
 @pytest.fixture
@@ -17,38 +19,36 @@ def client():
         yield client
 
 
-@pytest.fixture
-def mock_job_queue(mocker):
-    """Mock JobQueue for tests"""
-    queue = AsyncMock()
-    queue.submit = AsyncMock(return_value="job_123")
-    queue.get = AsyncMock(return_value=JobRecord(
-        job_id="job_123",
-        status="done",
-        pages=[],
-        total=1,
-        done=1,
-        results=[
-            ScrapeResponse(
-                request_id="req_1",
-                took_ms=100,
-                meta=ScrapeMeta(
-                    url="https://example.com",
-                    device="desktop",
-                    proxy_type="none",
-                    retries=0,
-                ),
-            )
-        ],
-    ))
+def _run(coro):
+    """Run a coroutine against the current _store using a fresh event loop.
 
-    mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
-    return queue
+    TestClient uses anyio internally, so the event loop it runs the lifespan on
+    is NOT the loop returned by asyncio.get_event_loop() in a sync test body.
+    asyncio.run() creates a fresh loop; fakeredis and the _store singleton don't
+    depend on a specific loop, so this is safe.
+    """
+    return asyncio.run(coro)
+
+
+def _make_result_payload(url: str = "https://example.com", request_id: str = "req_1") -> bytes:
+    """Build a packed ScrapeResponse payload for writing into the store."""
+    resp = ScrapeResponse(
+        request_id=request_id,
+        took_ms=100,
+        meta=ScrapeMeta(
+            url=url,
+            device="desktop",
+            proxy_type="none",
+            retries=0,
+        ),
+    )
+    return pack_payload(resp.model_dump(mode="json"))
 
 
 class TestScrapePageEndpoint:
-    def test_scrape_page_minimal(self, client, mock_job_queue):
+    def test_scrape_page_minimal(self, client, mocker):
         """Minimal request /scrape/page"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
         response = client.post(
             "/api/v1/scrape/page",
             json={"url": "https://example.com"},
@@ -58,18 +58,33 @@ class TestScrapePageEndpoint:
         data = response.json()
         assert "job_id" in data
 
-    def test_scrape_page_returns_job_id(self, client, mock_job_queue):
-        """POST /scrape/page return job_id"""
+    def test_scrape_page_queue_full_returns_503(self, client, mocker):
+        """Submit is rejected with 503 when the stream depth exceeds QUEUE_MAXSIZE."""
+        mocker.patch("src.scrape_service.is_inmemory_broker", return_value=False)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        store = get_job_store()
+        mocker.patch.object(store, "queue_depth", new=AsyncMock(return_value=10**9))
+
+        response = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "queue_full"
+
+    def test_scrape_page_returns_job_id(self, client, mocker):
+        """POST /scrape/page returns a non-empty job_id"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
         response = client.post(
             "/api/v1/scrape/page",
             json={"url": "https://example.com"},
         )
 
         data = response.json()
-        assert data["job_id"] == "job_123"
+        assert isinstance(data["job_id"], str)
+        assert len(data["job_id"]) > 0
 
-    def test_scrape_page_with_proxy(self, client, mock_job_queue):
+    def test_scrape_page_with_proxy(self, client, mocker):
         """POST /scrape/page with proxy_type"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
         response = client.post(
             "/api/v1/scrape/page",
             json={
@@ -80,8 +95,9 @@ class TestScrapePageEndpoint:
 
         assert response.status_code == 200
 
-    def test_scrape_page_with_extract(self, client, mock_job_queue):
+    def test_scrape_page_with_extract(self, client, mocker):
         """POST /scrape/page with extract rules"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
         response = client.post(
             "/api/v1/scrape/page",
             json={
@@ -99,8 +115,9 @@ class TestScrapePageEndpoint:
 
         assert response.status_code == 200
 
-    def test_scrape_page_with_all_options(self, client, mock_job_queue):
+    def test_scrape_page_with_all_options(self, client, mocker):
         """POST /scrape/page with all params"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
         response = client.post(
             "/api/v1/scrape/page",
             json={
@@ -116,8 +133,9 @@ class TestScrapePageEndpoint:
 
         assert response.status_code == 200
 
-    def test_scrape_page_with_proxy_geo(self, client, mock_job_queue):
+    def test_scrape_page_with_proxy_geo(self, client, mocker):
         """POST /scrape/page with proxy_geo"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
         response = client.post(
             "/api/v1/scrape/page",
             json={
@@ -129,8 +147,9 @@ class TestScrapePageEndpoint:
 
         assert response.status_code == 200
 
-    def test_scrape_page_validation_error(self, client, mock_job_queue):
+    def test_scrape_page_validation_error(self, client, mocker):
         """POST /scrape/page with not valid URL"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
         response = client.post(
             "/api/v1/scrape/page",
             json={"url": "not-a-url"},
@@ -140,8 +159,9 @@ class TestScrapePageEndpoint:
 
 
 class TestScrapePagesEndpoint:
-    def test_scrape_pages_single(self, client, mock_job_queue):
-        """POST /scrape/pageswith single page"""
+    def test_scrape_pages_single(self, client, mocker):
+        """POST /scrape/pages with single page"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
         response = client.post(
             "/api/v1/scrape/pages",
             json={
@@ -153,8 +173,9 @@ class TestScrapePagesEndpoint:
 
         assert response.status_code == 200
 
-    def test_scrape_pages_multiple(self, client, mock_job_queue):
+    def test_scrape_pages_multiple(self, client, mocker):
         """POST /scrape/pages with a few pages"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
         response = client.post(
             "/api/v1/scrape/pages",
             json={
@@ -170,8 +191,9 @@ class TestScrapePagesEndpoint:
         data = response.json()
         assert "job_id" in data
 
-    def test_scrape_pages_returns_job_id(self, client, mock_job_queue):
-        """POST /scrape/pages return job_id"""
+    def test_scrape_pages_returns_job_id(self, client, mocker):
+        """POST /scrape/pages returns a non-empty job_id"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
         response = client.post(
             "/api/v1/scrape/pages",
             json={
@@ -182,10 +204,12 @@ class TestScrapePagesEndpoint:
         )
 
         data = response.json()
-        assert data["job_id"] == "job_123"
+        assert isinstance(data["job_id"], str)
+        assert len(data["job_id"]) > 0
 
-    def test_scrape_pages_empty_list(self, client, mock_job_queue):
+    def test_scrape_pages_empty_list(self, client, mocker):
         """POST /scrape/pages with empty list"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
         response = client.post(
             "/api/v1/scrape/pages",
             json={"pages": []},
@@ -198,17 +222,12 @@ class TestScrapePagesEndpoint:
 class TestScrapeStatusEndpoint:
     def test_scrape_status_queued(self, client, mocker):
         """GET /scrape/{job_id} for queued job"""
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="queued",
-            pages=[],
-            total=1,
-            done=0,
-        ))
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        # Submit a job so it exists in the store (status=queued)
+        resp = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+        job_id = resp.json()["job_id"]
 
-        response = client.get("/api/v1/scrape/job_123")
+        response = client.get(f"/api/v1/scrape/{job_id}")
 
         assert response.status_code == 200
         data = response.json()
@@ -218,37 +237,31 @@ class TestScrapeStatusEndpoint:
 
     def test_scrape_status_running(self, client, mocker):
         """GET /scrape/{job_id} for running job"""
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="running",
-            pages=[],
-            total=5,
-            done=2,
-        ))
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+        job_id = resp.json()["job_id"]
+        # Drive the job to "running" via mark_running
+        store = get_job_store()
+        _run(store.mark_running(job_id))
 
-        response = client.get("/api/v1/scrape/job_123")
+        response = client.get(f"/api/v1/scrape/{job_id}")
 
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "running"
-        assert data["done"] == 2
-        assert data["total"] == 5
+        assert data["done"] == 0
+        assert data["total"] == 1
 
     def test_scrape_status_done(self, client, mocker):
         """GET /scrape/{job_id} for done job"""
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="done",
-            pages=[],
-            total=1,
-            done=1,
-        ))
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+        job_id = resp.json()["job_id"]
+        # Write a slot to finalize the job as done
+        store = get_job_store()
+        _run(store.write_slot(job_id, 0, _make_result_payload()))
 
-        response = client.get("/api/v1/scrape/job_123")
+        response = client.get(f"/api/v1/scrape/{job_id}")
 
         assert response.status_code == 200
         data = response.json()
@@ -257,31 +270,24 @@ class TestScrapeStatusEndpoint:
         assert data["total"] == 1
 
     def test_scrape_status_failed(self, client, mocker):
-        """GET /scrape/{job_id} for failed job"""
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="failed",
-            pages=[],
-            total=1,
-            done=0,
-            error="Worker error",
-        ))
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        """GET /scrape/{job_id} reflects error when an error slot is written"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+        job_id = resp.json()["job_id"]
+        # Write an error slot — the job will be done with a warning, not "failed" status
+        store = get_job_store()
+        page = {"url": "https://example.com"}
+        _run(store.write_slot(job_id, 0, pack_payload(make_error_payload(page, "Worker error"))))
 
-        response = client.get("/api/v1/scrape/job_123")
+        response = client.get(f"/api/v1/scrape/{job_id}")
 
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "failed"
-        assert data["error"] == "Worker error"
+        # The job finalized as "done" (error payloads still fill slots)
+        assert data["status"] == "done"
 
     def test_scrape_status_not_found(self, client, mocker):
         """GET /scrape/{job_id} for not exists task"""
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=None)
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
-
         response = client.get("/api/v1/scrape/non_existent")
 
         assert response.status_code == 404
@@ -290,17 +296,11 @@ class TestScrapeStatusEndpoint:
 
     def test_scrape_status_response_format(self, client, mocker):
         """GET /scrape/{job_id} return valid format"""
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="running",
-            pages=[],
-            total=10,
-            done=5,
-        ))
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+        job_id = resp.json()["job_id"]
 
-        response = client.get("/api/v1/scrape/job_123")
+        response = client.get(f"/api/v1/scrape/{job_id}")
 
         data = response.json()
         assert "job_id" in data
@@ -313,31 +313,14 @@ class TestScrapeStatusEndpoint:
 class TestScrapeResultsEndpoint:
     def test_scrape_results_success(self, client, mocker):
         """GET /scrape/{job_id}/results for finished job"""
-        results = [
-            ScrapeResponse(
-                request_id="req_1",
-                took_ms=100,
-                meta=ScrapeMeta(
-                    url="https://example.com",
-                    device="desktop",
-                    proxy_type="none",
-                    retries=0,
-                ),
-            )
-        ]
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+        job_id = resp.json()["job_id"]
+        # Write a slot to complete the job
+        store = get_job_store()
+        _run(store.write_slot(job_id, 0, _make_result_payload()))
 
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="done",
-            pages=[],
-            total=1,
-            done=1,
-            results=results,
-        ))
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
-
-        response = client.get("/api/v1/scrape/job_123/results")
+        response = client.get(f"/api/v1/scrape/{job_id}/results")
 
         assert response.status_code == 200
         data = response.json()
@@ -347,27 +330,17 @@ class TestScrapeResultsEndpoint:
 
     def test_scrape_results_not_found(self, client, mocker):
         """GET /scrape/{job_id}/results for not exists job"""
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=None)
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
-
         response = client.get("/api/v1/scrape/non_existent/results")
 
         assert response.status_code == 404
 
     def test_scrape_results_not_done_queued(self, client, mocker):
         """GET /scrape/{job_id}/results for queued job"""
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="queued",
-            pages=[],
-            total=1,
-            done=0,
-        ))
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+        job_id = resp.json()["job_id"]
 
-        response = client.get("/api/v1/scrape/job_123/results")
+        response = client.get(f"/api/v1/scrape/{job_id}/results")
 
         assert response.status_code == 200
         data = response.json()
@@ -375,112 +348,87 @@ class TestScrapeResultsEndpoint:
 
     def test_scrape_results_not_done_running(self, client, mocker):
         """GET /scrape/{job_id}/results for running job"""
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="running",
-            pages=[],
-            total=1,
-            done=0,
-        ))
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+        job_id = resp.json()["job_id"]
+        store = get_job_store()
+        _run(store.mark_running(job_id))
 
-        response = client.get("/api/v1/scrape/job_123/results")
+        response = client.get(f"/api/v1/scrape/{job_id}/results")
 
         assert response.status_code == 200
 
-    def test_scrape_results_failed_job_returns_200(self, client, mocker):
-        """GET /scrape/{job_id}/results for failed job returns 200 with error info"""
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="failed",
-            pages=[],
-            total=1,
-            done=0,
-            error="Worker crashed",
-        ))
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+    def test_scrape_results_no_slots_returns_200_null(self, client, mocker):
+        """GET /results for a job with no slots filled yet returns 200 with null
+        results (matches the old queued-job contract). Note: the "failed" job
+        status is unreachable in the taskiq design — every page converges to a
+        slot, so jobs finalize as done/cancelled, never failed."""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+        job_id = resp.json()["job_id"]
+        # Do NOT write a slot — no results filled, job still queued
 
-        response = client.get("/api/v1/scrape/job_123/results")
+        response = client.get(f"/api/v1/scrape/{job_id}/results")
 
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "failed"
-        assert data["error"] == "Worker crashed"
         assert data["results"] is None
 
+    def test_scrape_results_partial_returns_null_slots(self, client, mocker):
+        """GET /results for a running batch returns 200 with null for unfinished
+        slots, index-aligned (the tester polls this for incremental progress)."""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post(
+            "/api/v1/scrape/pages",
+            json={"pages": [{"url": "https://a.example"}, {"url": "https://b.example"}]},
+        )
+        job_id = resp.json()["job_id"]
+        store = get_job_store()
+        _run(store.write_slot(job_id, 1, _make_result_payload("https://b.example", "req_b")))
+
+        response = client.get(f"/api/v1/scrape/{job_id}/results")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["results"][0] is None  # in-flight slot stays null
+        assert data["results"][1]["meta"]["url"] == "https://b.example"
+
     def test_scrape_results_response_format(self, client, mocker):
-        """GET /scrape/{job_id}/results return correct format"""
-        results = [
-            ScrapeResponse(
-                request_id="req_1",
-                took_ms=100,
-                meta=ScrapeMeta(
-                    url="https://example.com",
-                    device="desktop",
-                    proxy_type="none",
-                    retries=0,
-                ),
-                data={"title": "Test"},
-            )
-        ]
+        """GET /scrape/{job_id}/results returns correct format"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+        job_id = resp.json()["job_id"]
+        store = get_job_store()
+        _run(store.write_slot(job_id, 0, _make_result_payload()))
 
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="done",
-            pages=[],
-            total=1,
-            done=1,
-            results=results,
-        ))
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
-
-        response = client.get("/api/v1/scrape/job_123/results")
+        response = client.get(f"/api/v1/scrape/{job_id}/results")
 
         data = response.json()
-        assert data["job_id"] == "job_123"
+        assert data["job_id"] == job_id
         assert isinstance(data["results"], list)
-        assert data["results"][0]["data"]["title"] == "Test"
+        # The result has meta.url from the payload
+        assert data["results"][0]["meta"]["url"] == "https://example.com"
 
     def test_scrape_results_multiple_pages(self, client, mocker):
-        """GET /scrape/{job_id}/results with a few results"""
-        results = [
-            ScrapeResponse(
-                request_id="req_1",
-                took_ms=100,
-                meta=ScrapeMeta(
-                    url="https://example.com",
-                    device="desktop",
-                    proxy_type="none",
-                    retries=0,
-                ),
-            ),
-            ScrapeResponse(
-                request_id="req_2",
-                took_ms=150,
-                meta=ScrapeMeta(
-                    url="https://example.org",
-                    device="desktop",
-                    proxy_type="none",
-                    retries=0,
-                ),
-            ),
-        ]
+        """GET /scrape/{job_id}/results with multiple results"""
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post(
+            "/api/v1/scrape/pages",
+            json={"pages": [
+                {"url": "https://example.com"},
+                {"url": "https://example.org"},
+            ]},
+        )
+        job_id = resp.json()["job_id"]
+        store = get_job_store()
 
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="done",
-            pages=[],
-            total=2,
-            done=2,
-            results=results,
-        ))
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        async def _fill():
+            await store.write_slot(job_id, 0, _make_result_payload("https://example.com", "req_1"))
+            await store.write_slot(job_id, 1, _make_result_payload("https://example.org", "req_2"))
 
-        response = client.get("/api/v1/scrape/job_123/results")
+        _run(_fill())
+
+        response = client.get(f"/api/v1/scrape/{job_id}/results")
 
         data = response.json()
         assert len(data["results"]) == 2
@@ -489,22 +437,7 @@ class TestScrapeResultsEndpoint:
 class TestIntegrationFlows:
     def test_full_flow_page(self, client, mocker):
         """Full flow: page -> status -> results"""
-        # Mock queue for different steps
-        queue = AsyncMock()
-
-        # Submit
-        queue.submit = AsyncMock(return_value="job_123")
-
-        # Status (running)
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="running",
-            pages=[],
-            total=1,
-            done=0,
-        ))
-
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
 
         # 1. Submit
         response = client.post(
@@ -514,31 +447,14 @@ class TestIntegrationFlows:
         assert response.status_code == 200
         job_id = response.json()["job_id"]
 
-        # 2. Status
+        # 2. Status (queued initially)
         response = client.get(f"/api/v1/scrape/{job_id}")
         assert response.status_code == 200
-        assert response.json()["status"] == "running"
+        assert response.json()["status"] == "queued"
 
-        # 3. Update mock for done
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_123",
-            status="done",
-            pages=[],
-            total=1,
-            done=1,
-            results=[
-                ScrapeResponse(
-                    request_id="req_1",
-                    took_ms=100,
-                    meta=ScrapeMeta(
-                        url="https://example.com",
-                        device="desktop",
-                        proxy_type="none",
-                        retries=0,
-                    ),
-                )
-            ],
-        ))
+        # 3. Simulate worker completing the job
+        store = get_job_store()
+        _run(store.write_slot(job_id, 0, _make_result_payload()))
 
         # 4. Results
         response = client.get(f"/api/v1/scrape/{job_id}/results")
@@ -547,40 +463,7 @@ class TestIntegrationFlows:
 
     def test_full_flow_pages(self, client, mocker):
         """Full flow: pages -> status -> results"""
-        queue = AsyncMock()
-        queue.submit = AsyncMock(return_value="job_456")
-
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_456",
-            status="done",
-            pages=[],
-            total=2,
-            done=2,
-            results=[
-                ScrapeResponse(
-                    request_id="req_1",
-                    took_ms=100,
-                    meta=ScrapeMeta(
-                        url="https://example.com",
-                        device="desktop",
-                        proxy_type="none",
-                        retries=0,
-                    ),
-                ),
-                ScrapeResponse(
-                    request_id="req_2",
-                    took_ms=120,
-                    meta=ScrapeMeta(
-                        url="https://example.org",
-                        device="desktop",
-                        proxy_type="none",
-                        retries=0,
-                    ),
-                ),
-            ],
-        ))
-
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
 
         # Submit
         response = client.post(
@@ -594,6 +477,15 @@ class TestIntegrationFlows:
         )
         job_id = response.json()["job_id"]
 
+        # Simulate both pages completing
+        store = get_job_store()
+
+        async def _fill():
+            await store.write_slot(job_id, 0, _make_result_payload("https://example.com", "req_1"))
+            await store.write_slot(job_id, 1, _make_result_payload("https://example.org", "req_2"))
+
+        _run(_fill())
+
         # Results
         response = client.get(f"/api/v1/scrape/{job_id}/results")
         assert response.status_code == 200
@@ -602,36 +494,30 @@ class TestIntegrationFlows:
 
 class TestScrapeCancelEndpoint:
     def test_cancel_running_job_returns_cancelled_true(self, client, mocker):
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_run", status="running", pages=[], total=1, done=0,
-        ))
-        queue.request_cancel = AsyncMock(return_value=True)
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+        job_id = resp.json()["job_id"]
+        store = get_job_store()
+        _run(store.mark_running(job_id))
 
-        response = client.delete("/api/v1/scrape/job_run")
+        response = client.delete(f"/api/v1/scrape/{job_id}")
         assert response.status_code == 200
         data = response.json()
-        assert data == {"job_id": "job_run", "cancelled": True}
-        queue.request_cancel.assert_awaited_once_with("job_run")
+        assert data == {"job_id": job_id, "cancelled": True}
 
     def test_cancel_terminal_job_returns_cancelled_false(self, client, mocker):
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=JobRecord(
-            job_id="job_done", status="done", pages=[], total=1, done=1,
-        ))
-        queue.request_cancel = AsyncMock(return_value=False)
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
+        resp = client.post("/api/v1/scrape/page", json={"url": "https://example.com"})
+        job_id = resp.json()["job_id"]
+        # Complete the job (terminal state)
+        store = get_job_store()
+        _run(store.write_slot(job_id, 0, _make_result_payload()))
 
-        response = client.delete("/api/v1/scrape/job_done")
+        response = client.delete(f"/api/v1/scrape/{job_id}")
         assert response.status_code == 200
-        assert response.json() == {"job_id": "job_done", "cancelled": False}
+        assert response.json() == {"job_id": job_id, "cancelled": False}
 
     def test_cancel_unknown_job_returns_404(self, client, mocker):
-        queue = AsyncMock()
-        queue.get = AsyncMock(return_value=None)
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
-
         response = client.delete("/api/v1/scrape/job_missing")
         assert response.status_code == 404
         assert response.json()["detail"] == "job_not_found"

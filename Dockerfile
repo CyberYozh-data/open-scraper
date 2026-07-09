@@ -17,9 +17,20 @@ ENV PATH=/app/.venv/bin:$PATH \
 
 WORKDIR /app
 
-COPY pyproject.toml requirements.txt ./
+COPY pyproject.toml requirements.txt requirements-dev.txt ./
 
 RUN pip install -r requirements.txt
+
+# Fetch the Camoufox browser binary + GeoIP data into the image at build time.
+# Must run after camoufox is installed (above) and before COPY src so that a
+# source-only change does not invalidate this ~1.3 GB download layer.
+RUN python -m camoufox fetch
+
+# Test/dev deps (pytest, fakeredis, ...). The production CMD never imports them;
+# they live in the image so `docker compose run --rm web-scraper pytest` works on
+# hosts without a local Python 3.12 toolchain (the K12 dev convention). Drop this
+# layer behind a build target if a slim production image is ever needed.
+RUN pip install -r requirements-dev.txt
 
 COPY src /app/src
 COPY scripts /app/scripts

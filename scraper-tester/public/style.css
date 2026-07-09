@@ -2,6 +2,11 @@
 
 @import url('https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Fira+Code&display=swap');
 
+/* Always reserve the viewport scrollbar gutter so the two-column layout doesn't
+   shift horizontally when switching between tall tabs (Scrape/Batch/…) and short
+   ones (Jobs/MCP) that don't overflow the viewport. */
+html { scrollbar-gutter: stable; }
+
 :root {
   /* Neutrals */
   --neutral-50: #fafafa;
@@ -152,6 +157,73 @@ header {
   border-color: var(--text-primary);
 }
 
+/* GitHub icon widened into a pill when a live star count is shown. */
+.icon-btn.gh-pill {
+  width: auto;
+  gap: 0.35rem;
+  padding: 0 0.7rem;
+  border-radius: 999px;
+}
+.gh-stars {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+.gh-stars[hidden] { display: none; }
+.gh-star {
+  color: #f5b300; /* star yellow */
+  font-size: 15px;
+}
+
+/* URL fields with an inline label baked into the box (saves the separate
+   standalone <label>). The wrapper carries the border/focus; the input is bare. */
+.url-field {
+  display: inline-flex;
+  align-items: center;
+  flex: 1 1 240px;
+  min-width: 0;
+  max-width: 420px;
+  height: var(--control-height);
+  padding: 0 0.7rem 0 var(--control-padding-x);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.url-field:focus-within { border-color: var(--text-primary); box-shadow: var(--shadow-focus); }
+.url-field:hover:not(:focus-within) { border-color: var(--border-hover); }
+.url-prefix {
+  color: var(--text-secondary);
+  font-size: 13px;
+  white-space: nowrap;
+  padding-right: 0.5rem;
+  margin-right: 0.5rem;
+  border-right: 1px solid var(--border);
+}
+.server-bar .url-field input,
+.server-bar .url-field input:focus,
+.server-bar .url-field input:hover {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+/* Per-service health shown inside its own URL field; the single Check button
+   fills both. Empty (pre-check) collapses so the field looks untouched. */
+.field-status {
+  flex: none;
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.45rem;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.field-status:empty { display: none; }
+
 /* Tabs — CyberYozh pill style */
 .tabs {
   display: flex;
@@ -249,6 +321,19 @@ header {
   flex-direction: column;
   gap: 0.35rem;
   flex: 1;
+  /* Allow flex children to shrink below their content width so a long control
+     (e.g. the Pool ID custom-select label) truncates with ellipsis instead of
+     forcing the whole row wider and pushing neighbours out of alignment. */
+  min-width: 0;
+}
+
+/* Max retries holds a 1–2 digit number; keep it a compact fixed column so it
+   doesn't stretch to a half-row box or drift when the Pool ID field grows. */
+.field--retries {
+  flex: 0 0 150px;
+}
+.field--retries input {
+  max-width: 100px;
 }
 
 .field label {
@@ -288,6 +373,7 @@ input[type="text"],
 input[type="password"],
 input[type="number"],
 input[type="url"],
+input[type="date"],
 select,
 textarea {
   background: var(--bg-primary);
@@ -306,8 +392,21 @@ input[type="text"]:not(textarea),
 input[type="password"],
 input[type="number"],
 input[type="url"],
+input[type="date"],
 select {
   height: var(--control-height);
+}
+
+/* Native date input now inherits the box/font/height/border from the rules
+   above (it was previously unstyled). The locale digit format (dd.mm.yyyy) is
+   browser-owned and stays; we just soften the calendar button to match. */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  opacity: 0.9;
 }
 
 select {
@@ -938,12 +1037,9 @@ details[open] > .details-summary .details-chevron { transform: rotate(90deg); }
     padding: 0.8rem 1rem;
   }
   .server-bar { gap: 0.5rem 0.6rem; }
-  /* Keep the URL inputs usably wide; flex-basis forces each label/input/Check
-     group to wrap onto its own row instead of collapsing to a sliver. */
-  .server-bar input { max-width: none; flex: 1 1 150px; min-width: 130px; }
-  /* Drops the inline `margin-left:1rem` on the "Crawler URL" label (the only
-     inline-styled label in .server-bar) so it doesn't indent when stacked. */
-  .server-bar label[style] { margin-left: 0 !important; }
+  /* Each URL field takes a full row so its inline label + URL + status stay
+     readable instead of collapsing to a sliver. */
+  .server-bar .url-field { max-width: none; flex: 1 1 100%; }
   .social-icons { margin-left: 0; }
 
   .tabs { padding: 0.75rem 1rem 0; }

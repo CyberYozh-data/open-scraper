@@ -6,7 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Durable job queue (taskiq + Redis)**: the in-process job queue and browser
+  worker pool are replaced by a taskiq stream on Redis. The `web-scraper`
+  container now only enqueues page tasks and reads results; browsers run in
+  separate, horizontally scalable `scraper-worker` containers
+  (`docker compose up -d --scale scraper-worker=N`). Job state, results and
+  sessions live in Redis, so the API no longer loses jobs on restart. Sessions
+  are serialized across workers by a distributed lock. **Operators must now run
+  the `redis` and `scraper-worker` services** (both are in `docker-compose.yml`).
+  The public API contract is unchanged.
+- `POST /scrape/page` and `/scrape/pages` now return **503 `queue_full`** when
+  the Redis stream depth exceeds `QUEUE_MAXSIZE` (previously unbounded).
+- Removed env vars `JOB_TIMEOUT_MS` (→ `PAGE_TASK_TIMEOUT_S`), `JOB_RESULT_MAX`
+  (eviction is now a native Redis TTL) and `JOBS_ENABLED` (the queue is always
+  on); they are ignored with a startup warning if set. New: `REDIS_URL`,
+  `PAGE_TASK_TIMEOUT_S`, `LOGIN_TASK_TIMEOUT_S`, `RECLAIM_IDLE_S`,
+  `BROWSER_MAX_PAGES`.
+
 ### Added
+
+- `GET /api/v1/queue/stats` — live stream depth, in-flight count and consumers.
 
 - **Sessions API (Phase 1)**: server-side `SessionRecord` with Playwright
   `storage_state` (cookies + localStorage + sessionStorage), populated via a

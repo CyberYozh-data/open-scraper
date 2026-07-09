@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import patch, AsyncMock
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from src.app import create_app
+from src.queue.store import get_job_store
 
 
 class TestAppCreation:
@@ -39,144 +41,62 @@ class TestAppCreation:
 
 class TestLifespan:
     @pytest.mark.asyncio
-    async def test_lifespan_startup(self, mocker):
-        """Test startup in lifespan"""
-        # Mock worker_pool
-        mock_worker_pool = Mock()
-        mock_worker_pool.init = Mock()
-        mock_worker_pool.start = Mock()
-        mock_worker_pool.stop = Mock()
-        mocker.patch("src.app.worker_pool", mock_worker_pool)
-
-        # Mock JobRunner
-        mock_job_runner = Mock()
-        mock_job_runner.start = AsyncMock()
-        mock_job_runner.stop = AsyncMock()
-        mocker.patch("src.app.JobRunner", return_value=mock_job_runner)
-
-        # Mock get_job_queue
-        mock_queue = Mock()
-        mocker.patch("src.app.get_job_queue", return_value=mock_queue)
-
-        # Create app
-        with patch("src.app.settings") as mock_settings:
-            mock_settings.workers = 2
-            mock_settings.queue_maxsize = 100
-            mock_settings.job_timeout_ms = 30000
-            mock_settings.jobs_enabled = True
-            mock_settings.log_level = "INFO"  # Add log_level
-
-            app = create_app()
-
-            # Manual call lifespan
-            async with app.router.lifespan_context(app):
-                # Check, worker_pool is initialized and was running
-                mock_worker_pool.init.assert_called_once()
-                mock_worker_pool.start.assert_called_once()
+    async def test_lifespan_startup_initializes_store(self):
+        """Lifespan startup calls init_job_store so get_job_store() is reachable."""
+        app = create_app()
+        async with app.router.lifespan_context(app):
+            # After startup the store is set and operational
+            store = get_job_store()
+            assert store is not None
 
     @pytest.mark.asyncio
-    async def test_lifespan_shutdown(self, mocker):
-        """Test shutdown in lifespan"""
-        mock_worker_pool = Mock()
-        mock_worker_pool.init = Mock()
-        mock_worker_pool.start = Mock()
-        mock_worker_pool.stop = Mock()
-        mocker.patch("src.app.worker_pool", mock_worker_pool)
+    async def test_lifespan_broker_startup_and_shutdown(self, mocker):
+        """Lifespan calls broker.startup on entry and broker.shutdown on exit."""
+        mock_startup = AsyncMock()
+        mock_shutdown = AsyncMock()
+        mocker.patch("src.app.broker.startup", mock_startup)
+        mocker.patch("src.app.broker.shutdown", mock_shutdown)
+        mocker.patch("src.app.broker.is_worker_process", False)
 
-        mock_job_runner = Mock()
-        mock_job_runner.start = AsyncMock()
-        mock_job_runner.stop = AsyncMock()
-        mocker.patch("src.app.JobRunner", return_value=mock_job_runner)
+        app = create_app()
+        async with app.router.lifespan_context(app):
+            mock_startup.assert_awaited_once()
 
-        mock_queue = Mock()
-        mocker.patch("src.app.get_job_queue", return_value=mock_queue)
-
-        with patch("src.app.settings") as mock_settings:
-            mock_settings.workers = 2
-            mock_settings.queue_maxsize = 100
-            mock_settings.job_timeout_ms = 30000
-            mock_settings.jobs_enabled = True
-            mock_settings.log_level = "INFO"  # Add log_level
-
-            app = create_app()
-
-            async with app.router.lifespan_context(app):
-                pass
-
-            # After context exit, stop should be call
-            mock_worker_pool.stop.assert_called_once()
+        mock_shutdown.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_lifespan_jobs_disabled(self, mocker):
-        """Test lifespan with disabled jobs"""
-        mock_worker_pool = Mock()
-        mock_worker_pool.init = Mock()
-        mock_worker_pool.start = Mock()
-        mock_worker_pool.stop = Mock()
-        mocker.patch("src.app.worker_pool", mock_worker_pool)
-
-        mock_job_runner = Mock()
-        mock_job_runner.start = AsyncMock()
-        mock_job_runner.stop = AsyncMock()
-        mocker.patch("src.app.JobRunner", return_value=mock_job_runner)
-
-        mock_queue = Mock()
-        mocker.patch("src.app.get_job_queue", return_value=mock_queue)
-
-        with patch("src.app.settings") as mock_settings:
-            mock_settings.workers = 2
-            mock_settings.queue_maxsize = 100
-            mock_settings.job_timeout_ms = 30000
-            mock_settings.jobs_enabled = False  # Disable
-            mock_settings.log_level = "INFO"  # Add log_level
-
-            app = create_app()
-
-            async with app.router.lifespan_context(app):
-                pass
-
-            # job_runner.start must not be call
-            mock_job_runner.start.assert_not_called()
+    async def test_lifespan_health_endpoint_works(self):
+        """After lifespan startup the /health endpoint responds."""
+        app = create_app()
+        async with app.router.lifespan_context(app):
+            with TestClient(app) as c:
+                resp = c.get("/api/v1/health")
+                assert resp.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_lifespan_worker_pool_config(self, mocker):
-        """Check configuration worker_pool from settings"""
-        mock_worker_pool = Mock()
-        mock_worker_pool.init = Mock()
-        mock_worker_pool.start = Mock()
-        mock_worker_pool.stop = Mock()
-        mocker.patch("src.app.worker_pool", mock_worker_pool)
+    async def test_lifespan_does_not_run_reclaim_in_process(self, mocker):
+        """Stale-pending reclaim runs via the taskiq scheduler, not as an
+        in-process background task. The API lifespan starts only the sessions
+        GC loop — never the reaper/reclaim."""
+        started = []
+        original_create_task = __import__("asyncio").create_task
 
-        mock_job_runner = Mock()
-        mock_job_runner.start = AsyncMock()
-        mock_job_runner.stop = AsyncMock()
-        mocker.patch("src.app.JobRunner", return_value=mock_job_runner)
+        def tracking_create_task(coro, **kwargs):
+            started.append(getattr(coro, "__qualname__", repr(coro)))
+            return original_create_task(coro, **kwargs)
 
-        mock_queue = Mock()
-        mocker.patch("src.app.get_job_queue", return_value=mock_queue)
+        mocker.patch("src.app.asyncio.create_task", side_effect=tracking_create_task)
 
-        # Mock WorkerPoolConfig
-        mock_config_class = Mock()
-        mocker.patch("src.app.WorkerPoolConfig", mock_config_class)
+        app = create_app()
+        async with app.router.lifespan_context(app):
+            pass
 
-        with patch("src.app.settings") as mock_settings:
-            mock_settings.workers = 4
-            mock_settings.queue_maxsize = 200
-            mock_settings.job_timeout_ms = 60000
-            mock_settings.jobs_enabled = False
-            mock_settings.log_level = "DEBUG"  # Add log_level
-
-            app = create_app()
-
-            async with app.router.lifespan_context(app):
-                pass
-
-            # Check, WorkerPoolConfig created with correct params
-            mock_config_class.assert_called_once_with(
-                workers=4,
-                queue_maxsize=200,
-                job_timeout_ms=60000,
-            )
+        # The GC loop IS in-process (proves the tracker sees real tasks)...
+        assert any("_sessions_gc_loop" in name for name in started)
+        # ...but reclaim/reaper is NOT (moved to the scheduler process).
+        assert not any(
+            "reaper" in name.lower() or "reclaim" in name.lower() for name in started
+        )
 
 
 class TestLogging:

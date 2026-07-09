@@ -4,11 +4,14 @@ import logging
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from fastapi import APIRouter, HTTPException
+from pydantic import ValidationError
 
 from src.proxy.models import ProxyConfig
 from src.proxy.resolver import CyberYozhAPIError, proxy_resolver
 from src.schemas import (
     CountriesResponse,
+    PremProxyOptions,
+    ProxyGeo,
     ProxyListResponse,
     ProxyResolveResponse,
     ProxyType,
@@ -75,8 +78,21 @@ async def resolve_proxy(
     country_code: str | None = None,
     region: str | None = None,
     city: str | None = None,
+    # prem_res_rotating targeting — ignored for other proxy types. Flat query
+    # params (this is a GET helper) mirroring PremProxyOptions; the crawler
+    # forwards them so /map discovery fetches get the same premium targeting
+    # (IP filter, sticky sessions, ISP, ZIP, sub-user) as /scrape.
+    ip_filter: str | None = None,
+    isp: str | None = None,
+    zip_code: str | None = None,
+    session_type: str | None = None,
+    sticky_id: str | None = None,
+    rotation_minutes: int | None = None,
+    sub_user_id: str | None = None,
+    protocol: str | None = None,
 ) -> ProxyResolveResponse:
-    """Resolve an upstream proxy URL for a proxy_type (+ optional pool / geo).
+    """Resolve an upstream proxy URL for a proxy_type (+ optional pool / geo /
+    prem targeting).
 
     Reuses the same CyberYozh resolution `/scrape` uses and returns the upstream
     proxy URL so service-to-service callers (e.g. the crawler's /map) can proxy
@@ -88,18 +104,47 @@ async def resolve_proxy(
     """
     if proxy_type == "none":
         return ProxyResolveResponse(proxy_url=None)
+    # Validate the flat query params through the SAME models /scrape uses, so this
+    # GET helper can't bypass their Literal/range/charset constraints (e.g. a
+    # bogus ip_filter, an out-of-range rotation_minutes, or a '-'-injecting
+    # country_code / sticky_id). model_dump(exclude_unset) keeps only the keys the
+    # caller actually passed — model defaults must not leak into the upstream
+    # username (the v2 provider applies its own defaults).
+    try:
+        geo = ProxyGeo(country_code=country_code, region=region, city=city)
+        raw_prem = {
+            key: value
+            for key, value in (
+                ("ip_filter", ip_filter),
+                ("isp", isp),
+                ("zip", zip_code),
+                ("session_type", session_type),
+                ("sticky_id", sticky_id),
+                ("rotation_minutes", rotation_minutes),
+                ("sub_user_id", sub_user_id),
+                ("protocol", protocol),
+            )
+            if value is not None
+        }
+        prem_proxy_options = (
+            PremProxyOptions(**raw_prem).model_dump(exclude_unset=True, exclude_none=True)
+            if raw_prem
+            else None
+        ) or None
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from exc
     try:
         proxy_url = await _resolve_upstream_proxy_url(
-            proxy_type, proxy_pool_id, country_code, region, city
+            proxy_type, proxy_pool_id, geo.country_code, geo.region, geo.city, prem_proxy_options
         )
     except (CyberYozhAPIError, RuntimeError) as exc:
         # open_session raises bare RuntimeError for ordinary conditions like a
         # depleted pool / empty rotating credentials (see cyberyozh/provider.py);
-        # surface those as 502, not an opaque 500 (mirrors worker_pool).
+        # surface those as 502, not an opaque 500 (mirrors the scrape task's proxy-error mapping).
         # Never log the resolved URL itself — it embeds credentials.
         log.warning(
-            "proxy resolve failed proxy_type=%s pool=%r geo=%r/%r/%r: %s",
-            proxy_type, proxy_pool_id, country_code, region, city, exc,
+            "proxy resolve failed proxy_type=%s pool=%r geo=%r/%r/%r prem=%r: %s",
+            proxy_type, proxy_pool_id, country_code, region, city, prem_proxy_options, exc,
         )
         raise HTTPException(
             status_code=502, detail=getattr(exc, "detail", str(exc))
@@ -113,6 +158,7 @@ async def _resolve_upstream_proxy_url(
     country_code: str | None,
     region: str | None,
     city: str | None,
+    prem_proxy_options: dict | None = None,
 ) -> str | None:
     """Open a proxy session and render its config as a credentialed URL."""
     geo = {
@@ -125,7 +171,10 @@ async def _resolve_upstream_proxy_url(
         if value
     }
     session = await proxy_resolver.open_session(
-        proxy_type, proxy_pool_id=proxy_pool_id, proxy_geo=geo or None
+        proxy_type,
+        proxy_pool_id=proxy_pool_id,
+        proxy_geo=geo or None,
+        prem_proxy_options=prem_proxy_options,
     )
     cfg = session.current_proxy()
     return _proxy_config_to_url(cfg) if cfg else None

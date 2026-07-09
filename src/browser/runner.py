@@ -5,6 +5,7 @@ import base64
 import contextlib
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Optional, Literal
@@ -19,7 +20,17 @@ from src.settings import settings
 
 
 log = logging.getLogger(__name__)
-_stealth = Stealth()
+# playwright_stealth's default WebGL spoof reports a macOS renderer ("Intel Iris
+# OpenGL Engine"), which contradicts our Windows UA/navigator.platform and is a
+# cross-check that advanced anti-bots (CreepJS/Cloudflare) flag. Override it with
+# a real Windows Chrome ANGLE/Direct3D renderer so the GPU identity matches the
+# rest of the fingerprint. Desktop preset is Windows; the value suits it.
+_stealth = Stealth(
+    webgl_vendor_override="Google Inc. (Intel)",
+    webgl_renderer_override=(
+        "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)"
+    ),
+)
 
 
 DESKTOP = {
@@ -41,11 +52,200 @@ MOBILE = {
     "has_touch": True,
 }
 
+
+def _chrome_ua_metadata(user_agent: str) -> dict | None:
+    """Build coherent User-Agent Client Hints from a Chrome UA string.
+
+    Playwright's UA override changes the UA *string* but leaves the browser's
+    real ``userAgentMetadata`` — so on headless Chromium the ``Sec-CH-UA``
+    header leaks ``"HeadlessChrome"`` and the real bundle version (verified on
+    the wire), contradicting the spoofed UA. Feeding this metadata to
+    ``Emulation.setUserAgentOverride`` aligns the brands/version with the UA and
+    drops the ``HeadlessChrome`` tell. Returns None for non-Chrome UAs (e.g. the
+    mobile Safari preset), which do not send Sec-CH-UA at all.
+    """
+    match = re.search(r"Chrome/(\d+)", user_agent)
+    if not match:
+        return None
+    major = match.group(1)
+    if "Windows" in user_agent:
+        platform = "Windows"
+    elif "Macintosh" in user_agent or "Mac OS X" in user_agent:
+        platform = "macOS"
+    elif "Android" in user_agent:
+        platform = "Android"
+    else:
+        platform = "Linux"
+    brands = [
+        {"brand": "Chromium", "version": major},
+        {"brand": "Google Chrome", "version": major},
+        {"brand": "Not.A/Brand", "version": "24"},
+    ]
+    return {
+        "brands": brands,
+        "fullVersionList": [
+            {"brand": b["brand"], "version": f"{b['version']}.0.0.0"} for b in brands
+        ],
+        "platform": platform,
+        "platformVersion": "",
+        "architecture": "x86",
+        "bitness": "64",
+        "model": "",
+        "mobile": "Mobile" in user_agent or "Android" in user_agent,
+    }
+
 # Element-screenshot timing/padding constants. Not in Settings — per-deploy
 # variation has no realistic use case.
 _ELEMENT_SCROLL_TIMEOUT_MS = 3000
 _ELEMENT_NETWORKIDLE_TIMEOUT_MS = 2000
 _ELEMENT_PADDING_PX = 24
+
+# Resource types aborted when asset blocking is enabled.
+_BLOCKED_RESOURCE_TYPES = frozenset({"image", "media", "font"})
+
+
+async def _block_assets_route(route) -> None:
+    """Abort heavy asset requests, continue everything else.
+
+    Must be awaited by Playwright (registered as a coroutine handler, not a
+    fire-and-forget ``create_task``) so abort/continue settle before teardown
+    and their errors are not swallowed.
+    """
+    if route.request.resource_type in _BLOCKED_RESOURCE_TYPES:
+        await route.abort()
+    else:
+        await route.continue_()
+
+
+# Captcha / block interstitials are tiny (Google's /sorry page is ~3 KB); a
+# rendered results or content page is far larger (a Google SERP is ~90 KB+).
+# Above this ceiling we treat trigger phrases as page content, not a block.
+_MAX_BLOCK_PAGE_BYTES = 20_000
+
+# HTTP statuses that mean "this exit IP is burned" — the body (if any) is a
+# block/error page, not target content, so the fetch is not ok and the queue
+# should rotate to a fresh proxy. Mirrored by the queue's retry policy.
+HTTP_BAN_STATUSES = frozenset({401, 403, 407, 429})
+# Transient upstream/proxy failures: also not ok and worth a fresh exit, but
+# the IP isn't necessarily burned (so not flagged as a hard "block").
+HTTP_TRANSIENT_STATUSES = frozenset(
+    {500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 413}
+)
+
+
+def classify_fetch(
+    status_code: int | None, *, captcha_detected: bool
+) -> tuple[bool, bool, str | None]:
+    """Decide (ok, blocked, error) from the HTTP status + captcha heuristic.
+
+    A navigation that returns a ban/transient HTTP status still yields an HTML
+    body, so Playwright reports no error — but the response is not genuine
+    content. Marking it ``ok=False`` lets the queue's retry loop reach its
+    proxy-rotation decision instead of short-circuiting on ``ok``. A genuine
+    target status (e.g. 404) stays ``ok`` so we don't waste proxies retrying it.
+    """
+    if captcha_detected:
+        return False, True, "Captcha/block detected by heuristic"
+    if status_code in HTTP_BAN_STATUSES:
+        return False, True, f"HTTP {status_code} (proxy ban / rate limit)"
+    if status_code in HTTP_TRANSIENT_STATUSES:
+        return False, False, f"HTTP {status_code} (transient upstream failure)"
+    return True, False, None
+
+
+def looks_like_captcha_or_block(html: str, *, final_url: str | None = None) -> bool:
+    """Heuristic for detecting captcha / block pages.
+
+    Real captcha / challenge interstitials are *tiny* compared to a rendered
+    content page, so size is the primary discriminator: above
+    ``_MAX_BLOCK_PAGE_BYTES`` we treat the page as genuine content and ignore
+    trigger phrases in it. Otherwise a real results page that merely *mentions*
+    a phrase — e.g. a Google SERP for a query about captchas / anti-detect
+    tooling — gets misread as a block, which fails the fetch and drives a
+    wasteful chain of proxy-rotating retries.
+
+    ``final_url`` is the one size-independent signal: Google serves real
+    blocks from ``/sorry/`` (HTTP 200) and Yandex SmartCaptcha from
+    ``/showcaptcha`` (HTTP 200), so the redirect target (not the status code)
+    is what unambiguously marks the block. Without the Yandex marker a
+    SmartCaptcha page is read as a successful empty fetch, so the queue never
+    rotates past a captcha'd exit and the SERP parse returns zero results.
+
+    Extracted to module level so the Camoufox runner can reuse it without
+    duplication (the heuristic body must not be copied verbatim).
+    """
+    if final_url:
+        final_lower = final_url.lower()
+        if "/sorry/" in final_lower or "/showcaptcha" in final_lower:
+            return True
+    # Past the block-page size ceiling we're looking at real content; any
+    # trigger phrase there (result snippets, help text, footers) is a false
+    # positive, so don't inspect the body.
+    if len(html) > _MAX_BLOCK_PAGE_BYTES:
+        return False
+    html_lower = html.lower()
+    strong_signals = (
+        "unusual traffic",
+        "verify you are a human",
+        "verify you are human",
+        "access denied",
+        "temporarily blocked",
+        "are you a robot",
+        "enable javascript and cookies to continue",
+        "/sorry/",
+        "cf-chl-",  # cloudflare challenge marker
+        "data-sitekey",  # reCAPTCHA / Turnstile attribute
+    )
+    if any(signal in html_lower for signal in strong_signals):
+        return True
+    # The bare word "captcha" is the weakest signal — only trust it on a
+    # block-sized page (the size ceiling above already bounds us here).
+    if "captcha" in html_lower:
+        return True
+    return False
+
+
+def warmup_origin(target_url: str) -> str | None:
+    """scheme://host/ of the target, or None if not a usable absolute URL."""
+    from urllib.parse import urlparse
+    p = urlparse(target_url)
+    if not p.scheme or not p.hostname:
+        return None
+    return f"{p.scheme}://{p.hostname}/"
+
+
+async def run_warmup(page, target_url, warmup, *, timeout_ms, default_dwell_ms) -> dict | None:
+    """Optional pre-navigation warmup. Non-fatal: any failure is logged and
+    swallowed so the real navigation still runs.
+
+    type='homepage' visits the target's own origin; type='custom' visits
+    warmup['url'] verbatim. Both then dwell before the caller's real navigation.
+
+    Returns a descriptor of what actually ran ({type, url, dwell_ms}, with `url`
+    being the URL actually visited), or None when warmup was not configured, had
+    no usable URL, or failed — so callers can report what was applied, not just
+    what was requested.
+    """
+    if not warmup:
+        return None
+    wtype = warmup.get("type", "homepage")
+    if wtype == "homepage":
+        warm_url = warmup_origin(target_url)
+    elif wtype == "custom":
+        warm_url = warmup.get("url") or None
+    else:
+        return None
+    if not warm_url:
+        return None
+    dwell = warmup.get("dwell_ms")
+    dwell = default_dwell_ms if dwell is None else dwell
+    try:
+        await page.goto(str(warm_url), wait_until="domcontentloaded", timeout=timeout_ms)
+        await page.wait_for_timeout(dwell)
+        return {"type": wtype, "url": str(warm_url), "dwell_ms": dwell}
+    except Exception as exc:  # pylint: disable=broad-except
+        log.warning("warmup failed (non-fatal) for %s: %s", warm_url, exc)
+        return None
 
 
 async def _fullpage_screenshot(page, *, effective_block_assets: bool) -> bytes:
@@ -243,15 +443,23 @@ class FetchResult:
     applied_locale: str | None = None
     applied_timezone: str | None = None
     applied_accept_language: str | None = None
+    # What the pre-navigation warmup actually did ({type, url, dwell_ms}), or
+    # None if no warmup ran. Distinct from the requested warmup config.
+    applied_warmup: dict | None = None
     storage_state: dict | None = None
     element_status: str | None = None
+    # True when the page looked like a captcha / anti-bot block. Distinct from a
+    # network/proxy error: the request succeeded but the IP is burned, so the
+    # queue layer should rotate the proxy and retry.
+    blocked: bool = False
 
 
 class PlaywrightRunner:
-    def __init__(self, headless: bool, block_assets: bool, timeout_ms: int):
+    def __init__(self, headless: bool, block_assets: bool, timeout_ms: int, engine: str = "chromium"):
         self.headless = headless
         self.block_assets = block_assets
         self.timeout_ms = timeout_ms
+        self._engine = engine
         self._playwright: Any = None
         self._browser: Browser | None = None
         self._lock = asyncio.Lock()
@@ -267,16 +475,29 @@ class PlaywrightRunner:
             # TCP only). These flags force WebRTC to only use the proxied
             # path. Disable via WEBRTC_BLOCK=false if the scraped site
             # actually needs working WebRTC (video chat, RTCPeerConnection).
+            #
+            # Separately: hide the headless-automation signal. Without this flag
+            # Google (and other anti-bot SERPs) redirect a headless Chromium
+            # straight to a /sorry captcha even from a clean residential IP; with
+            # it, the same browser renders a full SERP. Verified empirically.
             launch_args: list[str] = []
-            if settings.webrtc_block:
-                launch_args.extend([
-                    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-                    "--force-webrtc-ip-handling-policy",
-                ])
-            self._browser = await self._playwright.chromium.launch(
-                headless=self.headless,
-                args=launch_args or None,
-            )
+            if self._engine == "chromium":
+                launch_args.append("--disable-blink-features=AutomationControlled")
+                if settings.webrtc_block:
+                    launch_args.extend([
+                        "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                        "--force-webrtc-ip-handling-policy",
+                    ])
+            browser_type = getattr(self._playwright, self._engine)
+            launch_kwargs = {"headless": self.headless}
+            # No launch-level proxy on any engine. Playwright honours a
+            # per-context proxy (set in _new_context) for Firefox/WebKit without
+            # a launch placeholder, and a no-proxy context goes direct. The old
+            # {"server": "per-context"} placeholder leaked into no-proxy contexts
+            # as a literal host and broke them (NS_ERROR_UNKNOWN_PROXY_HOST).
+            if launch_args:
+                launch_kwargs["args"] = launch_args
+            self._browser = await browser_type.launch(**launch_kwargs)
 
     async def stop(self) -> None:
         # Must only be called from the worker's own coroutine (between jobs):
@@ -402,26 +623,86 @@ class PlaywrightRunner:
         )
 
         # WebRTC leak protection. The Chromium launch flags above are not
-        # always effective in headless mode, so also neutralise the WebRTC
-        # APIs at the JS level before any page script runs.
+        # always effective in headless mode (verified: without this script the
+        # real IP still leaks via ICE), so also neutralise WebRTC at the JS
+        # level. We KEEP RTCPeerConnection present and NATIVE-LOOKING — a deleted
+        # API (`typeof RTCPeerConnection === 'undefined'`) and a hand-rolled
+        # wrapper (non-native `toString()` / missing `generateCertificate`) are
+        # each their own automation tell. The constructor is fronted by a Proxy
+        # that forwards every static/`toString`/`length`/`instanceof` to the
+        # native impl, while each instance drops the ICE candidates (`typ
+        # host|srflx|prflx`) that would expose the real host/server IP. Normal
+        # event semantics are preserved: add/removeEventListener symmetry, a
+        # single-slot `onicecandidate`, and the end-of-candidates null event.
         if settings.webrtc_block:
             await context.add_init_script("""
                 (() => {
-                  const kill = (name) => {
-                    try {
-                      Object.defineProperty(window, name, {
-                        value: undefined,
-                        writable: false,
-                        configurable: false,
+                  const Orig = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+                  if (Orig) {
+                    const LEAKY = /\\btyp\\s+(host|srflx|prflx)\\b/i;
+                    const isLeaky = (c) => !!c && LEAKY.test(c);
+                    const patch = (pc) => {
+                      const wrap = new WeakMap();
+                      const guardFor = (cb) => {
+                        let g = wrap.get(cb);
+                        if (!g) {
+                          g = (ev) => {
+                            if (ev && ev.candidate && isLeaky(ev.candidate.candidate)) return;
+                            return cb.call(pc, ev);
+                          };
+                          wrap.set(cb, g);
+                        }
+                        return g;
+                      };
+                      const rawAdd = EventTarget.prototype.addEventListener.bind(pc);
+                      const rawRemove = EventTarget.prototype.removeEventListener.bind(pc);
+                      Object.defineProperty(pc, 'addEventListener', {
+                        configurable: true, writable: true,
+                        value(type, cb, ...rest) {
+                          if (type === 'icecandidate' && typeof cb === 'function') {
+                            return rawAdd(type, guardFor(cb), ...rest);
+                          }
+                          return rawAdd(type, cb, ...rest);
+                        },
                       });
-                    } catch (_) {}
-                  };
-                  kill('RTCPeerConnection');
-                  kill('webkitRTCPeerConnection');
-                  kill('mozRTCPeerConnection');
-                  kill('RTCDataChannel');
-                  kill('RTCSessionDescription');
-                  kill('RTCIceCandidate');
+                      Object.defineProperty(pc, 'removeEventListener', {
+                        configurable: true, writable: true,
+                        value(type, cb, ...rest) {
+                          if (type === 'icecandidate' && typeof cb === 'function' && wrap.has(cb)) {
+                            return rawRemove(type, wrap.get(cb), ...rest);
+                          }
+                          return rawRemove(type, cb, ...rest);
+                        },
+                      });
+                      let slot = null, slotWrapped = null;
+                      Object.defineProperty(pc, 'onicecandidate', {
+                        configurable: true, enumerable: true,
+                        get() { return slot; },
+                        set(cb) {
+                          if (slotWrapped) rawRemove('icecandidate', slotWrapped);
+                          slot = (typeof cb === 'function') ? cb : null;
+                          slotWrapped = slot ? guardFor(slot) : null;
+                          if (slotWrapped) rawAdd('icecandidate', slotWrapped);
+                        },
+                      });
+                      return pc;
+                    };
+                    const handler = {
+                      construct(target, args) { return patch(Reflect.construct(target, args, target)); },
+                      get(target, prop, recv) {
+                        // Keep Function.prototype.toString native-looking ([native
+                        // code]); forward everything else unchanged so static
+                        // members keep their native identity and .name (binding
+                        // them would expose "bound generateCertificate" etc.).
+                        if (prop === 'toString') return target.toString.bind(target);
+                        return Reflect.get(target, prop, recv);
+                      },
+                    };
+                    const Proxied = new Proxy(Orig, handler);
+                    try { Orig.prototype.constructor = Proxied; } catch (_) {}
+                    try { window.RTCPeerConnection = Proxied; } catch (_) {}
+                    try { if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = Proxied; } catch (_) {}
+                  }
                   if (navigator.mediaDevices) {
                     try {
                       navigator.mediaDevices.getUserMedia = () =>
@@ -433,45 +714,14 @@ class PlaywrightRunner:
 
         effective_block_assets = self.block_assets if block_assets is None else block_assets
         if effective_block_assets:
-            await context.route(
-                "**/*",
-                lambda route: asyncio.create_task(
-                    route.abort()
-                    if route.request.resource_type in {"image", "media", "font"}
-                    else route.continue_()
-                ),
-            )
+            await context.route("**/*", _block_assets_route)
         return context
 
-    def _looks_like_captcha_or_block(self, html: str) -> bool:
-        """
-        Heuristic for detecting captcha / block pages.
-
-        Uses strong phrases only — a bare "captcha" word produces false positives
-        on sites that merely mention it in their help / footer links. We also
-        require the HTML to be relatively short, because block pages are
-        typically tiny compared to real content pages.
-        """
-        html_lower = html.lower()
-        strong_signals = (
-            "unusual traffic",
-            "verify you are a human",
-            "verify you are human",
-            "access denied",
-            "temporarily blocked",
-            "are you a robot",
-            "enable javascript and cookies to continue",
-            "/sorry/",
-            "cf-chl-",  # cloudflare challenge marker
-            "data-sitekey",  # reCAPTCHA / Turnstile attribute
-        )
-        if any(signal in html_lower for signal in strong_signals):
-            return True
-        # The bare word "captcha" is only a signal on small pages (real blocks
-        # are tiny; content pages that just reference the word are huge).
-        if "captcha" in html_lower and len(html) < 8000:
-            return True
-        return False
+    def _looks_like_captcha_or_block(
+        self, html: str, *, final_url: str | None = None
+    ) -> bool:
+        """Delegate to the module-level function; kept for backward compat."""
+        return looks_like_captcha_or_block(html, final_url=final_url)
 
     async def fetch(
         self,
@@ -490,6 +740,13 @@ class PlaywrightRunner:
         render: bool = True,
         cookies: list[dict[str, Any]] | None = None,
         storage_state: dict | None = None,
+        # Camoufox-only premium options — accepted here so the call shape in
+        # scrape_runner.py is identical for both runners; ignored by Chromium/Firefox/WebKit.
+        humanize: bool = False,
+        spoof_os: str | None = None,
+        block_webgl: bool = False,
+        addons: list[str] | None = None,
+        warmup: dict | None = None,
     ) -> FetchResult:
         await self.start()
         assert self._browser is not None
@@ -502,32 +759,72 @@ class PlaywrightRunner:
 
         effective_proxy, bridge_cm = await self.resolve_proxy(proxy)
 
-        context = await self._new_context(
-            device=device, proxy=effective_proxy, headers=headers,
-            block_assets=block_assets, proxy_geo=proxy_geo, render=render,
-            storage_state=storage_state,
-        )
+        context = None
+        page = None
 
-        if cookies:
-            # Playwright requires either url or both domain+path. If the caller
-            # omitted domain, default it to the URL's hostname and path="/".
-            from urllib.parse import urlparse  # local import to avoid top-level pollution
-            default_domain = urlparse(url).hostname or ""
-            prepared_cookies = []
-            for cookie in cookies:
-                cookie_dict = dict(cookie)
-                if not cookie_dict.get("domain") and not cookie_dict.get("url"):
-                    cookie_dict["domain"] = default_domain
-                    cookie_dict.setdefault("path", "/")
-                prepared_cookies.append(cookie_dict)
-            try:
-                await context.add_cookies(prepared_cookies)
-            except Exception as exc:  # pylint: disable=broad-except
-                log.warning("failed to add cookies: %s", exc)
+        async def _teardown() -> None:
+            if page is not None:
+                with contextlib.suppress(Exception):
+                    await page.close()
+            if context is not None:
+                with contextlib.suppress(Exception):
+                    await context.close()
+            if bridge_cm is not None:
+                with contextlib.suppress(Exception):
+                    await bridge_cm.__aexit__(None, None, None)
 
-        page = await context.new_page()
-        if stealth:
-            await _stealth.apply_stealth_async(page)
+        # Acquire context/page outside the main fetch try; a failure here would
+        # otherwise leak the context and SOCKS bridge (the fetch finally never
+        # runs because its try is never entered).
+        try:
+            context = await self._new_context(
+                device=device, proxy=effective_proxy, headers=headers,
+                block_assets=block_assets, proxy_geo=proxy_geo, render=render,
+                storage_state=storage_state,
+            )
+
+            if cookies:
+                # Playwright requires either url or both domain+path. If the caller
+                # omitted domain, default it to the URL's hostname and path="/".
+                from urllib.parse import urlparse  # local import to avoid top-level pollution
+                default_domain = urlparse(url).hostname or ""
+                prepared_cookies = []
+                for cookie in cookies:
+                    cookie_dict = dict(cookie)
+                    if not cookie_dict.get("domain") and not cookie_dict.get("url"):
+                        cookie_dict["domain"] = default_domain
+                        cookie_dict.setdefault("path", "/")
+                    prepared_cookies.append(cookie_dict)
+                try:
+                    await context.add_cookies(prepared_cookies)
+                except Exception as exc:  # pylint: disable=broad-except
+                    log.warning("failed to add cookies: %s", exc)
+
+            page = await context.new_page()
+            if stealth and self._engine == "chromium":
+                await _stealth.apply_stealth_async(page)
+            elif stealth:
+                log.debug("stealth requested but skipped: not supported for engine=%r", self._engine)
+
+            # Align Client Hints with the spoofed UA: Playwright's UA override
+            # leaves the real headless metadata, so Sec-CH-UA otherwise leaks
+            # "HeadlessChrome" + the real version. Chromium only; per-page CDP.
+            # Non-fatal: any failure (incl. building the metadata) is swallowed.
+            if self._engine == "chromium":
+                try:
+                    ua = getattr(context, "_applied_user_agent", None)
+                    ua_metadata = _chrome_ua_metadata(ua) if isinstance(ua, str) else None
+                    if ua_metadata is not None:
+                        cdp = await context.new_cdp_session(page)
+                        await cdp.send("Emulation.setUserAgentOverride", {
+                            "userAgent": ua,
+                            "userAgentMetadata": ua_metadata,
+                        })
+                except Exception as exc:  # pylint: disable=broad-except
+                    log.debug("Client-Hints override failed: %s", exc)
+        except BaseException:
+            await _teardown()
+            raise
 
         applied = {
             "user_agent": getattr(context, "_applied_user_agent", None),
@@ -536,15 +833,25 @@ class PlaywrightRunner:
             "accept_language": getattr(context, "_applied_accept_language", None),
         }
 
+        # Late-bound: set inside the try below, read by _with_applied when each
+        # FetchResult is wrapped after the fetch completes.
+        applied_warmup: dict | None = None
+
         def _with_applied(result: FetchResult) -> FetchResult:
             result.applied_user_agent = applied["user_agent"]
             result.applied_locale = applied["locale"]
             result.applied_timezone = applied["timezone"]
             result.applied_accept_language = applied["accept_language"]
+            result.applied_warmup = applied_warmup
             return result
 
         try:
             effective_timeout_ms = timeout_ms or self.timeout_ms
+            applied_warmup = await run_warmup(
+                page, url, warmup,
+                timeout_ms=effective_timeout_ms,
+                default_dwell_ms=settings.warmup_dwell_ms,
+            )
             resp = await page.goto(url, wait_until=wait_until, timeout=effective_timeout_ms)
             if wait_for_selector:
                 await page.wait_for_selector(wait_for_selector, timeout=effective_timeout_ms)
@@ -573,10 +880,14 @@ class PlaywrightRunner:
                     raise
             if last_error is not None:
                 raise last_error
-            captcha_detected = self._looks_like_captcha_or_block(html)
-
             final_url = page.url
             status_code = resp.status if resp is not None else None
+            captcha_detected = self._looks_like_captcha_or_block(
+                html, final_url=final_url
+            )
+            fetch_ok, fetch_blocked, fetch_error = classify_fetch(
+                status_code, captcha_detected=captcha_detected
+            )
 
             screenshot_b64 = None
             png, element_status = await _capture_screenshot(
@@ -600,10 +911,11 @@ class PlaywrightRunner:
                 final_url=final_url,
                 status_code=status_code,
                 screenshot_b64=screenshot_b64,
-                ok=not captcha_detected,
-                error="Captcha/block detected by heuristic" if captcha_detected else None,
+                ok=fetch_ok,
+                error=fetch_error,
                 storage_state=new_storage_state,
                 element_status=element_status,
+                blocked=fetch_blocked,
             ))
 
         except PWError as e:
@@ -613,7 +925,8 @@ class PlaywrightRunner:
                 status_code=None,
                 screenshot_b64=None,
                 ok=False,
-                error=f"PlaywrightError: {str(e)}"
+                error=f"PlaywrightError: {str(e)}",
+                element_status="no_screenshot",
             ))
         except Exception as e:
             return _with_applied(FetchResult(
@@ -622,11 +935,8 @@ class PlaywrightRunner:
                 status_code=None,
                 screenshot_b64=None,
                 ok=False,
-                error=f"UnexpectedError: {str(e)}"
+                error=f"UnexpectedError: {str(e)}",
+                element_status="no_screenshot",
             ))
         finally:
-            await page.close()
-            await context.close()
-            if bridge_cm is not None:
-                with contextlib.suppress(Exception):
-                    await bridge_cm.__aexit__(None, None, None)
+            await _teardown()

@@ -33,7 +33,7 @@ from src.schemas import (
     SearchResponse,
     SearchResult,
 )
-from src.scrape_service import scrape_service
+from src.scrape_service import QueueFull, scrape_service
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -63,7 +63,7 @@ ENGINES: dict[str, EngineProfile] = {
     ),
 }
 
-RunJob = Callable[[list[ScrapeRequest]], Awaitable[list[ScrapeResponse]]]
+RunJob = Callable[[list[ScrapeRequest]], Awaitable[list[ScrapeResponse | None]]]
 
 
 def _first_http_link(el) -> str | None:
@@ -79,15 +79,37 @@ def _unwrap_redirect(url: str) -> str:
 
     Bing wraps every organic link in a ``/ck/a`` redirect with the destination
     base64url-encoded in the ``u=a1<…>`` param. Decode it so callers get the
-    target site, not the tracker. Non-Bing or unrecognised URLs pass through.
+    target site, not the tracker.
 
-    The input is SERP HTML Bing itself returned (not caller-supplied), and we
-    only ever return an ``http(s)`` string, so a crafted ``u=`` can't yield a
-    ``javascript:`` / ``file:`` link — worst case is a passthrough.
+    Yandex ad/tracking links (``yabs.yandex.ru/count/…``) sometimes carry the
+    destination in a ``url=`` or ``u=`` query param. This is best-effort: when
+    the param is present and resolves to an http(s) URL we return it; if the
+    destination is in an opaque path blob or ``etext=`` param (not decodable
+    without following the redirect) we pass through unchanged.
+
+    We only ever return an ``http(s)`` string — a crafted param cannot yield a
+    ``javascript:``/``file:`` link; worst case is a passthrough.
     """
     try:
         parsed = urlparse(url)
         host = parsed.netloc.lower()
+
+        # --- Yandex yabs tracking links ---
+        if host == "yabs.yandex.ru" or (
+            host.endswith(".yandex.ru") and "/count/" in parsed.path
+        ):
+            from urllib.parse import unquote as _unquote  # stdlib, always available
+
+            qs = parse_qs(parsed.query)
+            for key in ("url", "u"):
+                vals = qs.get(key)
+                if vals:
+                    cand = _unquote(vals[0])
+                    if cand.startswith(("http://", "https://")):
+                        return cand
+            return url  # opaque blob — pass through rather than drop
+
+        # --- Bing /ck/a tracking links ---
         if host != "bing.com" and not host.endswith(".bing.com"):
             return url
         if "/ck/a" not in parsed.path:
@@ -101,7 +123,7 @@ def _unwrap_redirect(url: str) -> str:
     except ValueError as exc:
         # The URL failed to parse, or a u=a1… payload failed to decode —
         # i.e. Bing changed its encoding; worth a server-side signal.
-        log.warning("failed to unwrap bing redirect url=%r: %s", url, exc)
+        log.warning("failed to unwrap redirect url=%r: %s", url, exc)
         return url
 
 
@@ -153,6 +175,8 @@ def _proxy_override(req: SearchRequest) -> dict[str, Any]:
     override: dict[str, Any] = {}
     if req.proxy_type is not None:
         override["proxy_type"] = req.proxy_type
+    if req.max_retries is not None:
+        override["max_retries"] = req.max_retries
     if req.proxy_pool_id is not None:
         override["proxy_pool_id"] = req.proxy_pool_id
     if req.proxy_geo is not None:
@@ -165,6 +189,30 @@ def _proxy_override(req: SearchRequest) -> dict[str, Any]:
     return override
 
 
+def _engine_override(req: SearchRequest) -> dict[str, Any]:
+    """Browser-engine and Camoufox premium fields the caller explicitly set.
+
+    Only includes fields that differ from their silent defaults so an
+    unset engine leaves the SERP preset's own engine untouched (preset wins).
+    """
+    override: dict[str, Any] = {}
+    if req.browser_engine is not None:
+        override["browser_engine"] = req.browser_engine
+    if req.humanize:
+        override["humanize"] = req.humanize
+    if req.spoof_os is not None:
+        override["spoof_os"] = req.spoof_os
+    if req.block_webgl:
+        override["block_webgl"] = req.block_webgl
+    if req.addons:
+        override["addons"] = req.addons
+    if req.warmup is not None:
+        override["warmup"] = req.warmup.model_dump()
+    if req.prem_proxy_options is not None:
+        override["prem_proxy_options"] = req.prem_proxy_options.model_dump()
+    return override
+
+
 async def build_search(
     req: SearchRequest, *, store: PresetStore, run_job: RunJob
 ) -> SearchResponse:
@@ -173,13 +221,15 @@ async def build_search(
     profile = ENGINES[req.engine]
     preset = store.get(profile.preset)
     proxy_override = _proxy_override(req)
+    engine_override = _engine_override(req)
+    combined_override = {**proxy_override, **engine_override}
     serp_req = materialize(
         preset,
         PresetScrapeRequest(
             source=profile.preset,
             preset_params={"query": req.query},
             locale=req.locale,
-            request_override=proxy_override or None,
+            request_override=combined_override or None,
         ),
     )
     serp_results = await run_job([serp_req])
@@ -193,7 +243,7 @@ async def build_search(
     log.info("search engine=%s query=%r results=%d", req.engine, req.query, len(results))
 
     if req.scrape and results:
-        await _scrape_result_pages(req, results, proxy_override, run_job, warnings)
+        await _scrape_result_pages(req, results, proxy_override, engine_override, run_job, warnings)
 
     return SearchResponse(
         query=req.query,
@@ -208,6 +258,7 @@ async def _scrape_result_pages(
     req: SearchRequest,
     results: list[SearchResult],
     proxy_override: dict[str, Any],
+    engine_override: dict[str, Any],
     run_job: RunJob,
     warnings: list[str],
 ) -> None:
@@ -218,10 +269,11 @@ async def _scrape_result_pages(
         for k, v in (req.scrape_options or {}).items()
         if k not in ("preset_meta", "parser_plan")
     }
-    # The panel's proxy applies to the result scrapes too, taking precedence
-    # over any proxy passed inside scrape_options.
+    # The panel's proxy and engine settings apply to the result scrapes too,
+    # taking precedence over any proxy/engine passed inside scrape_options.
     scrape_reqs = [
-        ScrapeRequest(**{**opts, **proxy_override, "url": r.url}) for r in results
+        ScrapeRequest(**{**opts, **proxy_override, **engine_override, "url": r.url})
+        for r in results
     ]
     # Session is validated here (after the SERP) because it is checked
     # against the materialized per-result request, which only exists now.
@@ -248,6 +300,8 @@ async def run_search(
 ) -> SearchResponse:
     try:
         return await build_search(req, store=store, run_job=scrape_service.run_and_wait)
+    except QueueFull as exc:
+        raise HTTPException(status_code=503, detail="queue_full") from exc
     except PresetNotFound as exc:
         raise HTTPException(
             status_code=500,

@@ -10,3 +10,4 @@ faker>=19.0.0
 pylint>=3.0
 Pillow>=10.0
 pytest-httpserver>=1.0
+fakeredis[lua]>=2.23

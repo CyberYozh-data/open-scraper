@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     map_http_timeout_ms: int = Field(default=10_000, alias="MAP_HTTP_TIMEOUT_MS")
     map_max_urls: int = Field(default=5_000, alias="MAP_MAX_URLS")
     map_max_sitemaps: int = Field(default=50, alias="MAP_MAX_SITEMAPS")
+    # Hard cap on the seed-render leg of /map. The render (a JS-heavy SPA via a
+    # residential proxy) can stall for minutes; without a tight cap it blocks the
+    # otherwise-fast sitemap result past the caller's create_map timeout, forcing
+    # a slow full-crawl fallback. On timeout /map degrades to sitemap-only.
+    map_render_timeout_ms: int = Field(
+        default=12_000, gt=0, alias="MAP_RENDER_TIMEOUT_MS"
+    )
 
 
 settings = Settings()

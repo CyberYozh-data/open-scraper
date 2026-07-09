@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 
 from src.api.presets import get_preset_store
 from src.api.session_guard import validate_session_id
-from src.jobs import get_job_queue
 from src.presets.materializer import (
     MaterializeError,
     SessionConflictError,
@@ -24,6 +23,7 @@ from src.presets.materializer import (
 )
 from src.presets.store import PresetNotFound, PresetStore
 from src.schemas import JobCreateResponse, ScrapeRequest
+from src.scrape_service import QueueFull, scrape_service
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -67,7 +67,10 @@ async def scrape_preset_page(
 ) -> JobCreateResponse:
     scrape_req = _resolve(store, request)
     await validate_session_id(scrape_req)
-    job_id = await get_job_queue().submit([scrape_req])
+    try:
+        job_id = await scrape_service.submit_job_internal([scrape_req])
+    except QueueFull as exc:
+        raise HTTPException(status_code=503, detail="queue_full") from exc
     return JobCreateResponse(job_id=job_id)
 
 
@@ -99,5 +102,8 @@ async def scrape_preset_pages(
         await validate_session_id(scrape_req)
         scrape_reqs.append(scrape_req)
 
-    job_id = await get_job_queue().submit(scrape_reqs)
+    try:
+        job_id = await scrape_service.submit_job_internal(scrape_reqs)
+    except QueueFull as exc:
+        raise HTTPException(status_code=503, detail="queue_full") from exc
     return JobCreateResponse(job_id=job_id)

@@ -60,6 +60,10 @@ class LocaleProfile(BaseModel):
     locale: str | None = None
     timezone: str | None = None
     accept_language: str | None = None
+    # Optional search-engine region code exposed to `url_template` as `{lr}`.
+    # Used by yandex_search (Yandex's own `lr` region id, e.g. 225=Russia,
+    # 213=Moscow) to localise results independently of the proxy exit country.
+    lr: str | None = None
 
 
 def derive_locale_profile(loc: LocaleProfile) -> LocaleProfile:

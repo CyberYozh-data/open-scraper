@@ -14,6 +14,18 @@ tester and MCP exposure on both services.
 Both API services mount an **MCP endpoint** at `/mcp` (Streamable HTTP) and
 publish their OpenAPI at `/docs`.
 
+Behind the scraper API, jobs run on a durable **taskiq + Redis** queue: the
+`web-scraper` container only enqueues page tasks and reads results, while one
+or more **`scraper-worker`** containers consume the stream and drive
+Playwright. Redis also holds job state and sessions, so the API survives
+restarts without losing jobs and the browser fleet scales horizontally:
+
+```bash
+docker compose up -d --scale scraper-worker=4
+```
+
+Live queue depth / in-flight / consumers: `GET /api/v1/queue/stats`.
+
 ## Quick start
 
 ```bash

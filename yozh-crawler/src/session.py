@@ -14,6 +14,7 @@ class Session:
     proxy_type: str
     proxy_pool_id: str | None
     proxy_geo: dict[str, Any] | None
+    prem_proxy_options: dict[str, Any] | None = None
     error_score: float = 0.0
     usage_count: int = 0
     retired: bool = False
@@ -24,6 +25,8 @@ class Session:
             d["proxy_pool_id"] = self.proxy_pool_id
         if self.proxy_geo:
             d["proxy_geo"] = self.proxy_geo
+        if self.prem_proxy_options:
+            d["prem_proxy_options"] = self.prem_proxy_options
         return d
 
 
@@ -42,11 +45,13 @@ class ManagedSession:
         max_error_score: float,
         max_usage: int,
         blocked_codes: list[int],
+        base_prem_proxy_options: dict[str, Any] | None = None,
     ) -> None:
         self._base = {
             "proxy_type": base_proxy_type,
             "proxy_pool_id": base_proxy_pool_id,
             "proxy_geo": base_proxy_geo,
+            "prem_proxy_options": base_prem_proxy_options,
         }
         self._max_error_score = max_error_score
         self._max_usage = max_usage
@@ -59,6 +64,7 @@ class ManagedSession:
             proxy_type=self._base["proxy_type"],
             proxy_pool_id=self._base["proxy_pool_id"],
             proxy_geo=self._base["proxy_geo"],
+            prem_proxy_options=self._base["prem_proxy_options"],
         )
 
     def acquire(self) -> Session:

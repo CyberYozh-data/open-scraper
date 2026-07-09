@@ -6,7 +6,9 @@
   "url_template": "https://www.ebay.{domain}/sch/i.html?_nkw={query}&_sop=12",
   "request_defaults": {
     "device": "desktop",
-    "proxy_type": "res_rotating",
+    "proxy_type": "prem_res_rotating",
+    "prem_proxy_options": { "ip_filter": "quality-security" },
+    "warmup": { "type": "homepage" },
     "stealth": true,
     "wait_until": "domcontentloaded",
     "timeout_ms": 60000,

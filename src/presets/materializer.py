@@ -175,6 +175,10 @@ def materialize(preset: Preset, req: PresetScrapeRequest) -> ScrapeRequest:
         "country": locale.country.lower(),
         "lang": lang,
     }
+    if locale.lr is not None:
+        template_vars["lr"] = locale.lr
+    # preset_params last so a caller can override a locale-derived value
+    # (e.g. pass a custom Yandex `lr` region).
     for key, value in req.preset_params.items():
         template_vars[key] = str(value)
 

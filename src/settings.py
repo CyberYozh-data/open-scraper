@@ -53,8 +53,13 @@ class Settings(BaseSettings):
         alias="REQUEST_TIMEOUT_MS",
         description="Default page request timeout in milliseconds.",
     )
+    warmup_dwell_ms: int = Field(
+        default=2500,
+        alias="WARMUP_DWELL_MS",
+        description="Default dwell (ms) on the origin during a 'homepage' warmup before the real navigation.",
+    )
     max_retries: int = Field(
-        default=5,
+        default=3,
         alias="MAX_RETRIES",
         description=(
             "Maximum number of fetch attempts per request when a failure looks "
@@ -74,47 +79,29 @@ class Settings(BaseSettings):
     )
 
     # =====================
-    # Worker pool
+    # Workers
     # =====================
     workers: int = Field(
         default=2,
         alias="WORKERS",
-        description="Number of Playwright worker processes.",
+        description=(
+            "taskiq worker processes per scraper-worker container (the "
+            "`--workers` flag); also reported by /health for visibility."
+        ),
     )
     queue_maxsize: int = Field(
         default=200,
         alias="QUEUE_MAXSIZE",
-        description="Maximum number of pending tasks in worker queue.",
-    )
-    job_timeout_ms: int = Field(
-        default=45_000,
-        alias="JOB_TIMEOUT_MS",
-        description="Timeout for a single scraping job in milliseconds.",
-    )
-    jobs_enabled: bool = Field(
-        default=True,
-        alias="JOBS_ENABLED",
-        description="Enable background job runner for batch scraping.",
+        description="Submit backpressure: reject new jobs once the Redis stream depth exceeds this.",
     )
     job_result_ttl_s: float = Field(
         default=600.0,
         ge=0,
         alias="JOB_RESULT_TTL_S",
         description=(
-            "Seconds a completed job's result (raw_html + screenshots) is kept "
-            "in memory after it finishes, then evicted by the GC sweep. 0 "
-            "disables time-based eviction. Keep comfortably above how long a "
-            "consumer takes to fetch /results."
-        ),
-    )
-    job_result_max: int = Field(
-        default=1000,
-        ge=0,
-        alias="JOB_RESULT_MAX",
-        description=(
-            "Hard ceiling on retained job records. On overflow the oldest "
-            "finished jobs are evicted first; in-flight jobs are never dropped. "
-            "0 disables the size cap."
+            "Seconds a finished job's keys (status + results) live in Redis "
+            "after finalization, via a native key TTL. 0 disables the TTL. "
+            "Keep comfortably above how long a consumer takes to fetch /results."
         ),
     )
     browser_idle_shutdown_s: float = Field(
@@ -130,6 +117,66 @@ class Settings(BaseSettings):
             "permanently."
         ),
     )
+    browser_idle_shutdown_s_secondary: int = Field(
+        default=120,
+        alias="BROWSER_IDLE_SHUTDOWN_S_SECONDARY",
+        description=(
+            "Idle window (seconds) for non-default native engines (e.g. a warm "
+            "Firefox). Shorter than the primary so secondary engines reclaim RAM "
+            "quickly. 0 disables."
+        ),
+    )
+
+    # =====================
+    # Queue (taskiq + Redis)
+    # =====================
+    redis_url: str = Field(
+        default="redis://redis:6379/0",
+        alias="REDIS_URL",
+        description="Redis connection URL (broker, job store, session store).",
+    )
+    page_task_timeout_s: float = Field(
+        default=120.0,
+        alias="PAGE_TASK_TIMEOUT_S",
+        description=(
+            "Hard ceiling for one scrape_page task (all retry attempts "
+            "included). Even a hung Playwright produces an error slot within "
+            "this bound. Replaces the old JOB_TIMEOUT_MS role."
+        ),
+    )
+    login_task_timeout_s: float = Field(
+        default=45.0,
+        alias="LOGIN_TASK_TIMEOUT_S",
+        description="Hard ceiling for the worker's login task (the actual login work).",
+    )
+    login_result_grace_s: float = Field(
+        default=15.0,
+        ge=0,
+        alias="LOGIN_RESULT_GRACE_S",
+        description=(
+            "Extra time the login endpoint waits for the result beyond "
+            "LOGIN_TASK_TIMEOUT_S. The worker's timeout is measured from when it "
+            "picks the task up, the API's from enqueue; this grace absorbs the "
+            "queue-pickup skew so a slow-but-successful login isn't 504'd (which "
+            "would mark the session failed and drop its storage_state)."
+        ),
+    )
+    reclaim_idle_s: float = Field(
+        default=240.0,
+        alias="RECLAIM_IDLE_S",
+        description=(
+            "Pending stream entries idle longer than this are reclaimed and "
+            "re-enqueued (worker died mid-task). Keep ~2x PAGE_TASK_TIMEOUT_S."
+        ),
+    )
+    browser_max_pages: int = Field(
+        default=100,
+        alias="BROWSER_MAX_PAGES",
+        description=(
+            "Browser retirement: a worker recycles its browser after this many "
+            "pages to bound Chromium memory bloat. 0 disables."
+        ),
+    )
 
     # =====================
     # Sessions (Phase 1)
@@ -137,7 +184,7 @@ class Settings(BaseSettings):
     sessions_max: int = Field(
         default=256,
         alias="SESSIONS_MAX",
-        description="Soft cap on simultaneous sessions per process. LRU-evicted on overflow.",
+        description="Soft global cap on simultaneous sessions (Redis ZSET-backed). LRU-evicted on overflow.",
     )
     session_storage_state_max_bytes: int = Field(
         default=2 * 1024 * 1024,

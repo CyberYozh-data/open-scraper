@@ -65,6 +65,18 @@ Set `CYBERYOZH_API_KEY` in `.env` to enable proxy support.
 to obtain per-session credentials (optionally with `proxy_geo`).
 The mapping lives in [`proxy/cyberyozh/provider.py`](proxy/cyberyozh/provider.py).
 
+### Retries on failure
+
+When a fetch fails in a way that looks like a proxy issue or a captcha/block,
+the request is retried with a freshly rotated proxy. The number of attempts is
+the **`MAX_RETRIES`** env var (default `3`). Direct (`proxy_type: none`)
+requests never retry — they always make a single attempt.
+
+A request (or a preset's `request_defaults`) may override the server default per
+call with **`max_retries`** (`1`–`10`; `1` = no retry). It is ignored for
+`proxy_type: none`. The `retries` field in each result's `meta` reports how many
+retries actually happened.
+
 ## API
 
 ### Scrape (async jobs)
@@ -108,7 +120,7 @@ Check status:
 curl -s http://localhost:8000/api/v1/scrape/req_...
 ```
 
-Fetch results (available for `done`, `failed`, and `cancelled` jobs):
+Fetch results (available for any job; while queued or running, returns a 200 partial snapshot where unfinished slots are `null`, index-aligned with `pages`; fully populated for `done`, `failed`, and `cancelled` jobs):
 
 ```bash
 curl -s http://localhost:8000/api/v1/scrape/req_.../results
@@ -511,7 +523,7 @@ python geo_scraping.py
 |-------|------|---------|-------------|
 | `url` | string | required | Target URL |
 | `render` | boolean | `true` | Run full JS rendering in browser |
-| `wait_until` | `domcontentloaded` \| `networkidle` | `domcontentloaded` | When to consider page loaded |
+| `wait_until` | `domcontentloaded` \| `load` \| `networkidle` | `domcontentloaded` | When to consider page loaded |
 | `wait_for_selector` | string | — | Wait for CSS selector before extracting |
 | `timeout_ms` | integer | — | Per-page timeout (ms), overrides global |
 | `device` | `desktop` \| `mobile` | `desktop` | Device emulation |
@@ -710,7 +722,7 @@ required.
 | `run_scrape_pages` | Scrape multiple pages in batch, returns `job_id` |
 | `run_search` | Web search (SERP + optional scrape), returns results inline |
 | `get_job_status` | Poll job status by `job_id` |
-| `get_job_result` | Fetch results for a completed job |
+| `get_job_result` | Fetch results for a job (partial snapshot with `null` slots while running) |
 | `cancel_scrape_job` | Soft-cancel a running job |
 | `health` | Health check |
 

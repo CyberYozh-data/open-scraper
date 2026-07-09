@@ -16,12 +16,11 @@ from src.app import create_app
 
 @pytest.fixture
 def client(mocker):
-    queue = AsyncMock()
-    queue.submit = AsyncMock(return_value="job_1")
-    mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+    kiq_mock = AsyncMock()
+    mocker.patch("src.scrape_service.scrape_page_task.kiq", new=kiq_mock)
     app = create_app()
     with TestClient(app) as c:
-        c._queue = queue  # type: ignore[attr-defined]
+        c._kiq_mock = kiq_mock  # type: ignore[attr-defined]
         yield c
 
 
@@ -36,7 +35,7 @@ class TestRawScrapeRejectsInternalFields:
             },
         )
         assert resp.status_code == 422
-        client._queue.submit.assert_not_awaited()
+        client._kiq_mock.assert_not_awaited()
 
     def test_preset_meta_rejected_on_page(self, client):
         resp = client.post(
@@ -60,7 +59,7 @@ class TestRawScrapeRejectsInternalFields:
             },
         )
         assert resp.status_code == 422
-        client._queue.submit.assert_not_awaited()
+        client._kiq_mock.assert_not_awaited()
 
     def test_clean_request_still_works(self, client):
         resp = client.post(
@@ -68,4 +67,6 @@ class TestRawScrapeRejectsInternalFields:
             json={"url": "https://example.com"},
         )
         assert resp.status_code == 200
-        assert resp.json()["job_id"] == "job_1"
+        data = resp.json()
+        assert isinstance(data["job_id"], str)
+        assert len(data["job_id"]) > 0

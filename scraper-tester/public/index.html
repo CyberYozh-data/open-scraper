@@ -15,22 +15,18 @@
       <span>CyberYozh Scraper UI</span>
     </div>
     <div class="server-bar">
-      <label>Scraper URL</label>
-      <input id="scraperUrl" type="text" value="http://localhost:8000" />
-      <button id="btnHealth" class="btn-secondary">Check</button>
-      <span id="healthStatus" class="badge"></span>
-      <label style="margin-left:1rem">Crawler URL</label>
-      <input id="crawlerUrl" type="text" value="http://localhost:8001" />
-      <button id="btnCrawlerHealth" class="btn-secondary">Check</button>
-      <span id="crawlerHealthStatus" class="badge"></span>
-      <a href="https://apidoc.cyberyozh.com" target="_blank" rel="noopener" class="btn-secondary header-link">CyberYozh API Docs ↗</a>
-      <a href="https://app.cyberyozh.com/ru/my-account/api-keys/" target="_blank" rel="noopener" class="btn-secondary header-link">Get API Key ↗</a>
+      <span class="url-field"><span class="url-prefix">Scraper</span><input id="scraperUrl" type="text" value="http://localhost:8000" /><span id="healthStatus" class="badge field-status"></span></span>
+      <span class="url-field"><span class="url-prefix">Crawler</span><input id="crawlerUrl" type="text" value="http://localhost:8001" /><span id="crawlerHealthStatus" class="badge field-status"></span></span>
+      <button id="btnHealth" class="btn-secondary" title="Check scraper + crawler">Check</button>
+      <a href="https://apidoc.cyberyozh.com" target="_blank" rel="noopener" class="btn-secondary header-link">Docs ↗</a>
+      <a href="https://app.cyberyozh.com/ru/my-account/api-keys/" target="_blank" rel="noopener" class="btn-secondary header-link">API Key ↗</a>
     </div>
     <div class="social-icons">
-      <a href="https://github.com/CyberYozh-data" target="_blank" rel="noopener" class="icon-btn" title="GitHub" aria-label="GitHub">
+      <a href="https://github.com/CyberYozh-data/yozh-scraper" target="_blank" rel="noopener" class="icon-btn" title="GitHub" aria-label="GitHub">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
           <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.082-.73.082-.73 1.205.085 1.84 1.237 1.84 1.237 1.07 1.835 2.807 1.305 3.492.998.108-.775.42-1.305.763-1.605-2.665-.3-5.467-1.332-5.467-5.93 0-1.31.467-2.38 1.235-3.22-.125-.302-.535-1.524.117-3.176 0 0 1.007-.322 3.3 1.23a11.5 11.5 0 0 1 3-.404c1.02.005 2.045.138 3 .404 2.29-1.552 3.296-1.23 3.296-1.23.655 1.652.245 2.874.12 3.176.77.84 1.233 1.91 1.233 3.22 0 4.61-2.807 5.625-5.48 5.92.43.37.813 1.102.813 2.222 0 1.606-.014 2.9-.014 3.293 0 .322.218.697.825.577C20.565 21.795 24 17.3 24 12c0-6.63-5.37-12-12-12z"/>
         </svg>
+        <span id="ghStars" class="gh-stars" hidden></span>
       </a>
       <a href="https://linktr.ee/CyberYozh.com" target="_blank" rel="noopener" class="icon-btn" title="Linktree" aria-label="Linktree">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -78,6 +74,7 @@
                 i
                 <div class="info-tooltip">
                   <div><b>domcontentloaded</b> (fast) — fires as soon as the HTML is parsed. Images, CSS and deferred JS may still be loading. Good for static sites and when you do not need rendered visuals.</div>
+                  <div><b>load</b> (balanced) — fires when the page and all dependent resources (images, CSS) have loaded. Good middle ground between domcontentloaded and networkidle.</div>
                   <div><b>networkidle</b> (thorough) — waits until there are no network requests for 500ms. Required for SPAs that render content via XHR/fetch after page load. On sites with constant analytics/polling (Amazon, eBay) it may never settle and hit the timeout.</div>
                   <div><b>Timeout (ms)</b> is the maximum time to wait for this event; the request fails if it is not reached.</div>
                 </div>
@@ -85,6 +82,7 @@
             </label>
             <select id="s-wait-until">
               <option value="domcontentloaded">domcontentloaded</option>
+              <option value="load">load</option>
               <option value="networkidle">networkidle</option>
             </select>
           </div>
@@ -108,6 +106,18 @@
           <input id="s-wait-selector" type="text" placeholder="h1 (optional)" />
         </div>
 
+        <div class="field-row">
+          <div class="field">
+            <label>Browser engine</label>
+            <select id="s-browser-engine">
+              <option value="chromium" selected>Chromium</option>
+              <option value="firefox">Firefox</option>
+              <option value="webkit">WebKit</option>
+              <option value="camoufox">Camoufox (anti-detect)</option>
+            </select>
+          </div>
+        </div>
+
         <div class="field-row checkboxes">
           <label><input id="s-render" type="checkbox" checked /> JS Render</label>
           <label><input id="s-raw-html" type="checkbox" /> Raw HTML</label>
@@ -125,9 +135,32 @@
               <div><b>Fit Markdown</b> — noise-filtered Markdown (pruning or LLM), per the content filter below.</div>
               <div><b>Screenshot</b> — capture a full-page PNG and return as base64.</div>
               <div><b>Block Assets</b> — skip images / fonts / media to speed up load and save traffic. Turn off if you need images in screenshots.</div>
-              <div><b>Stealth</b> — apply playwright-stealth patches (navigator.webdriver, WebGL / Canvas fingerprint, etc.) to reduce bot detection.</div>
+              <div><b>Stealth</b> — apply playwright-stealth patches (navigator.webdriver, WebGL / Canvas fingerprint, etc.) to reduce bot detection. Disabled for Firefox/WebKit/Camoufox which have built-in anti-detect.</div>
             </div>
           </span>
+        </div>
+
+        <div id="s-camoufox-opts" style="display:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.6rem 0.75rem;margin-bottom:0.5rem;background:var(--bg-secondary)">
+          <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:0.4rem">Camoufox options</div>
+          <div class="field-row checkboxes">
+            <label><input id="s-cf-humanize" type="checkbox" checked /> Humanize</label>
+            <label><input id="s-cf-block-webgl" type="checkbox" /> Block WebGL</label>
+          </div>
+          <div class="field-row" style="margin-top:0.4rem">
+            <div class="field">
+              <label>Spoof OS</label>
+              <select id="s-cf-spoof-os">
+                <option value="">— default —</option>
+                <option value="windows">Windows</option>
+                <option value="macos">macOS</option>
+                <option value="linux">Linux</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Addons (comma-separated paths)</label>
+              <input id="s-cf-addons" type="text" placeholder="optional" />
+            </div>
+          </div>
         </div>
 
         <details class="md-options" style="margin:0.25rem 0 0.5rem">
@@ -153,36 +186,14 @@
         </details>
 
         <h3>Proxy</h3>
+        <!-- Proxy controls (type / pool / geo / premium generator) are injected
+             by renderProxyComponent('s', …) in app.js. Max retries stays here:
+             it is a generic per-request field, not part of the proxy block. -->
+        <div id="s-proxy-component"></div>
         <div class="field-row">
-          <div class="field">
-            <label>Proxy Type</label>
-            <select id="s-proxy-type">
-              <option value="none">none</option>
-              <option value="res_rotating">res_rotating</option>
-              <option value="res_static">res_static</option>
-              <option value="mobile">mobile</option>
-              <option value="mobile_shared">mobile_shared</option>
-              <option value="dc_static">dc_static</option>
-            </select>
-          </div>
-          <div class="field" id="s-pool-id-field">
-            <label>Pool ID <span id="s-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
-            <select id="s-proxy-pool-select" style="display:none"></select>
-            <input id="s-proxy-pool" type="text" placeholder="optional (for rotating: pin to pool id)" />
-          </div>
-        </div>
-        <div class="field-row" id="s-geo-fields">
-          <div class="field">
-            <label>Country</label>
-            <select id="s-geo-country"><option value="">— any —</option></select>
-          </div>
-          <div class="field">
-            <label>Region</label>
-            <input id="s-geo-region" type="text" placeholder="New York" />
-          </div>
-          <div class="field">
-            <label>City</label>
-            <input id="s-geo-city" type="text" placeholder="New York" />
+          <div class="field field--retries">
+            <label>Max retries <span style="color:var(--text-tertiary);font-weight:400">(proxy only)</span></label>
+            <input id="s-max-retries" type="number" min="1" max="10" placeholder="default" />
           </div>
         </div>
 
@@ -203,6 +214,8 @@
             </select>
           </div>
         </div>
+
+        <div id="s-warmup-component"></div>
 
         <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.4rem">
           <h3 style="margin:0">Extraction</h3>
@@ -342,6 +355,7 @@
                 i
                 <div class="info-tooltip">
                   <div><b>domcontentloaded</b> (fast) — fires as soon as the HTML is parsed. Images, CSS and deferred JS may still be loading.</div>
+                  <div><b>load</b> (balanced) — fires when the page and all dependent resources have loaded.</div>
                   <div><b>networkidle</b> (thorough) — waits until there are no network requests for 500ms. Needed for SPAs but may never settle on sites with constant polling.</div>
                   <div><b>Timeout (ms)</b> caps the wait; the request fails if the event never happens.</div>
                 </div>
@@ -349,6 +363,7 @@
             </label>
             <select id="b-wait-until">
               <option value="domcontentloaded">domcontentloaded</option>
+              <option value="load">load</option>
               <option value="networkidle">networkidle</option>
             </select>
           </div>
@@ -372,6 +387,18 @@
           <input id="b-wait-selector" type="text" placeholder="h1 (optional)" />
         </div>
 
+        <div class="field-row">
+          <div class="field">
+            <label>Browser engine</label>
+            <select id="b-browser-engine">
+              <option value="chromium" selected>Chromium</option>
+              <option value="firefox">Firefox</option>
+              <option value="webkit">WebKit</option>
+              <option value="camoufox">Camoufox (anti-detect)</option>
+            </select>
+          </div>
+        </div>
+
         <div class="field-row checkboxes">
           <label><input id="b-render" type="checkbox" checked /> JS Render</label>
           <label><input id="b-raw-html" type="checkbox" /> Raw HTML</label>
@@ -385,42 +412,40 @@
               <div><b>Raw HTML</b> — return full HTML of the page in the response.</div>
               <div><b>Screenshot</b> — capture a full-page PNG and return as base64.</div>
               <div><b>Block Assets</b> — skip images / fonts / media to speed up load and save traffic. Turn off if you need images in screenshots.</div>
-              <div><b>Stealth</b> — apply playwright-stealth patches (navigator.webdriver, WebGL / Canvas fingerprint, etc.) to reduce bot detection.</div>
+              <div><b>Stealth</b> — apply playwright-stealth patches (navigator.webdriver, WebGL / Canvas fingerprint, etc.) to reduce bot detection. Disabled for Firefox/WebKit/Camoufox which have built-in anti-detect.</div>
             </div>
           </span>
         </div>
 
-        <h3>Proxy</h3>
-        <div class="field-row">
-          <div class="field">
-            <label>Proxy Type</label>
-            <select id="b-proxy-type">
-              <option value="none">none</option>
-              <option value="res_rotating">res_rotating</option>
-              <option value="res_static">res_static</option>
-              <option value="mobile">mobile</option>
-              <option value="mobile_shared">mobile_shared</option>
-              <option value="dc_static">dc_static</option>
-            </select>
+        <div id="b-camoufox-opts" style="display:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.6rem 0.75rem;margin-bottom:0.5rem;background:var(--bg-secondary)">
+          <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:0.4rem">Camoufox options</div>
+          <div class="field-row checkboxes">
+            <label><input id="b-cf-humanize" type="checkbox" checked /> Humanize</label>
+            <label><input id="b-cf-block-webgl" type="checkbox" /> Block WebGL</label>
           </div>
-          <div class="field" id="b-pool-id-field">
-            <label>Pool ID <span id="b-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
-            <select id="b-proxy-pool-select" style="display:none"></select>
-            <input id="b-proxy-pool" type="text" placeholder="optional" />
+          <div class="field-row" style="margin-top:0.4rem">
+            <div class="field">
+              <label>Spoof OS</label>
+              <select id="b-cf-spoof-os">
+                <option value="">— default —</option>
+                <option value="windows">Windows</option>
+                <option value="macos">macOS</option>
+                <option value="linux">Linux</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Addons (comma-separated paths)</label>
+              <input id="b-cf-addons" type="text" placeholder="optional" />
+            </div>
           </div>
         </div>
-        <div class="field-row" id="b-geo-fields">
-          <div class="field">
-            <label>Country</label>
-            <select id="b-geo-country"><option value="">— any —</option></select>
-          </div>
-          <div class="field">
-            <label>Region</label>
-            <input id="b-geo-region" type="text" placeholder="New York" />
-          </div>
-          <div class="field">
-            <label>City</label>
-            <input id="b-geo-city" type="text" placeholder="New York" />
+
+        <h3>Proxy</h3>
+        <div id="b-proxy-component"></div>
+        <div class="field-row">
+          <div class="field field--retries">
+            <label>Max retries <span style="color:var(--text-tertiary);font-weight:400">(proxy only)</span></label>
+            <input id="b-max-retries" type="number" min="1" max="10" placeholder="default" />
           </div>
         </div>
 
@@ -441,6 +466,8 @@
             </select>
           </div>
         </div>
+
+        <div id="b-warmup-component"></div>
 
         <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.4rem">
           <h3 style="margin:0">Extraction</h3>
@@ -602,38 +629,7 @@
           </span>
           <span id="cp-proxy-warning" style="margin-left:auto;font-size:11px;color:var(--color-orange,#c77400)">⚠ crawl proxy=none — no IP rotation</span>
         </div>
-        <div class="field-row">
-          <div class="field">
-            <label>Proxy Type</label>
-            <select id="cp-proxy-type">
-              <option value="none">none</option>
-              <option value="res_rotating">res_rotating</option>
-              <option value="res_static">res_static</option>
-              <option value="mobile">mobile</option>
-              <option value="mobile_shared">mobile_shared</option>
-              <option value="dc_static">dc_static</option>
-            </select>
-          </div>
-          <div class="field" id="cp-pool-id-field">
-            <label>Pool ID <span id="cp-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
-            <select id="cp-proxy-pool-select" style="display:none"></select>
-            <input id="cp-proxy-pool" type="text" placeholder="optional" />
-          </div>
-        </div>
-        <div class="field-row" id="cp-geo-fields">
-          <div class="field">
-            <label>Country</label>
-            <select id="cp-geo-country"><option value="">— any —</option></select>
-          </div>
-          <div class="field">
-            <label>Region</label>
-            <input id="cp-geo-region" type="text" placeholder="New York" />
-          </div>
-          <div class="field">
-            <label>City</label>
-            <input id="cp-geo-city" type="text" placeholder="New York" />
-          </div>
-        </div>
+        <div id="cp-proxy-component"></div>
 
         <div class="field-row checkboxes" style="padding:0.6rem 0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);margin:0.75rem 0 0.5rem">
           <label style="font-weight:500">
@@ -656,6 +652,7 @@
               <label>Wait Until</label>
               <select id="c-wait-until">
                 <option value="domcontentloaded">domcontentloaded</option>
+                <option value="load">load</option>
                 <option value="networkidle">networkidle</option>
               </select>
             </div>
@@ -689,38 +686,7 @@
             </span>
             <span id="c-proxy-warning" style="margin-left:auto;font-size:11px;color:var(--color-orange,#c77400)">⚠ scrape proxy=none — no IP rotation</span>
           </div>
-          <div class="field-row">
-            <div class="field">
-              <label>Proxy Type</label>
-              <select id="c-proxy-type">
-                <option value="none">none</option>
-                <option value="res_rotating">res_rotating</option>
-                <option value="res_static">res_static</option>
-                <option value="mobile">mobile</option>
-                <option value="mobile_shared">mobile_shared</option>
-                <option value="dc_static">dc_static</option>
-              </select>
-            </div>
-            <div class="field" id="c-pool-id-field">
-              <label>Pool ID <span id="c-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
-              <select id="c-proxy-pool-select" style="display:none"></select>
-              <input id="c-proxy-pool" type="text" placeholder="optional" />
-            </div>
-          </div>
-          <div class="field-row" id="c-geo-fields">
-            <div class="field">
-              <label>Country</label>
-              <select id="c-geo-country"><option value="">— any —</option></select>
-            </div>
-            <div class="field">
-              <label>Region</label>
-              <input id="c-geo-region" type="text" placeholder="New York" />
-            </div>
-            <div class="field">
-              <label>City</label>
-              <input id="c-geo-city" type="text" placeholder="New York" />
-            </div>
-          </div>
+          <div id="c-proxy-component"></div>
 
           <div class="field-row">
             <div class="field">
@@ -823,12 +789,29 @@
           </div>
           <div class="field">
             <label>Limit</label>
-            <input id="mp-limit" type="number" value="1000" min="1" max="50000" />
+            <input id="mp-limit" type="number" value="1000" min="1" max="200000" />
           </div>
         </div>
         <div class="field">
           <label>Search filter (substring, optional)</label>
           <input id="mp-search" type="text" placeholder="/blog/" />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Published after (optional)</label>
+            <input id="mp-published-after" type="date" />
+          </div>
+          <div class="field">
+            <label>Recent days (optional)</label>
+            <input id="mp-recent-days" type="number" min="1" max="36525" placeholder="e.g. 30" />
+          </div>
+          <div class="field">
+            <label>Sort</label>
+            <select id="mp-sort">
+              <option value="">Discovery order</option>
+              <option value="newest">Newest (lastmod)</option>
+            </select>
+          </div>
         </div>
         <div class="field-row checkboxes">
           <label><input id="mp-sitemap" type="checkbox" checked /> Sitemap</label>
@@ -845,38 +828,7 @@
         </div>
 
         <h3>Proxy</h3>
-        <div class="field-row">
-          <div class="field">
-            <label>Proxy Type</label>
-            <select id="mp-proxy-type">
-              <option value="none">none</option>
-              <option value="res_rotating">res_rotating</option>
-              <option value="res_static">res_static</option>
-              <option value="mobile">mobile</option>
-              <option value="mobile_shared">mobile_shared</option>
-              <option value="dc_static">dc_static</option>
-            </select>
-          </div>
-          <div class="field" id="mp-pool-id-field">
-            <label>Pool ID <span id="mp-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
-            <select id="mp-proxy-pool-select" style="display:none"></select>
-            <input id="mp-proxy-pool" type="text" placeholder="optional (for rotating: pin to pool id)" />
-          </div>
-        </div>
-        <div class="field-row" id="mp-geo-fields">
-          <div class="field">
-            <label>Country</label>
-            <select id="mp-geo-country"><option value="">— any —</option></select>
-          </div>
-          <div class="field">
-            <label>Region</label>
-            <input id="mp-geo-region" type="text" placeholder="New York" />
-          </div>
-          <div class="field">
-            <label>City</label>
-            <input id="mp-geo-city" type="text" placeholder="New York" />
-          </div>
-        </div>
+        <div id="mp-proxy-component"></div>
 
         <div class="actions">
           <button id="btnMap" class="btn-primary">Map</button>
@@ -923,38 +875,7 @@
         </div>
 
         <h3>Proxy</h3>
-        <div class="field-row">
-          <div class="field">
-            <label>Proxy Type</label>
-            <select id="sess-proxy-type">
-              <option value="none">none</option>
-              <option value="res_rotating">res_rotating</option>
-              <option value="res_static">res_static</option>
-              <option value="mobile">mobile</option>
-              <option value="mobile_shared">mobile_shared</option>
-              <option value="dc_static">dc_static</option>
-            </select>
-          </div>
-          <div class="field" id="sess-pool-id-field">
-            <label>Pool ID <span id="sess-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
-            <select id="sess-proxy-pool-select" style="display:none"></select>
-            <input id="sess-proxy-pool" type="text" placeholder="optional (for rotating: pin to pool id)" />
-          </div>
-        </div>
-        <div class="field-row" id="sess-geo-fields">
-          <div class="field">
-            <label>Country</label>
-            <select id="sess-geo-country"><option value="">— any —</option></select>
-          </div>
-          <div class="field">
-            <label>Region</label>
-            <input id="sess-geo-region" type="text" placeholder="optional" />
-          </div>
-          <div class="field">
-            <label>City</label>
-            <input id="sess-geo-city" type="text" placeholder="optional" />
-          </div>
-        </div>
+        <div id="sess-proxy-component"></div>
 
         <div class="actions">
           <button id="btnSessCreate" class="btn-primary">Create Session</button>
@@ -1122,19 +1043,57 @@
             <input id="se-limit" type="number" value="10" min="1" max="50" />
           </div>
         </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Browser engine</label>
+            <select id="se-browser-engine">
+              <option value="" selected>Default (preset)</option>
+              <option value="chromium">Chromium</option>
+              <option value="firefox">Firefox</option>
+              <option value="webkit">WebKit</option>
+              <option value="camoufox">Camoufox (anti-detect)</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="se-camoufox-opts" style="display:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.6rem 0.75rem;margin-bottom:0.5rem;background:var(--bg-secondary)">
+          <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:0.4rem">Camoufox options</div>
+          <div class="field-row checkboxes">
+            <label><input id="se-cf-humanize" type="checkbox" checked /> Humanize</label>
+            <label><input id="se-cf-block-webgl" type="checkbox" /> Block WebGL</label>
+          </div>
+          <div class="field-row" style="margin-top:0.4rem">
+            <div class="field">
+              <label>Spoof OS</label>
+              <select id="se-cf-spoof-os">
+                <option value="">— default —</option>
+                <option value="windows">Windows</option>
+                <option value="macos">macOS</option>
+                <option value="linux">Linux</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Addons (comma-separated paths)</label>
+              <input id="se-cf-addons" type="text" placeholder="optional" />
+            </div>
+          </div>
+        </div>
+
         <div class="field-row checkboxes">
           <label><input id="se-scrape" type="checkbox" /> Scrape each result</label>
           <span class="info-icon" tabindex="0">
             i
             <div class="info-tooltip">
               <div><b>Scrape each result</b> — fetch every result page and attach its scrape response. Slower.</div>
-              <div><b>Scrape options</b> — JSON forwarded to each result's scrape, e.g. <code>{"raw_html": true}</code> or <code>{"formats": ["markdown"]}</code>.</div>
+              <div><b>Scrape options</b> — tick what to fetch for each result page.</div>
             </div>
           </span>
         </div>
-        <div class="field" id="se-scrape-options-row" style="display:none">
-          <label>Scrape options (JSON)</label>
-          <input id="se-scrape-options" type="text" placeholder='{"raw_html": true}' />
+        <div class="field-row checkboxes" id="se-scrape-options-row" style="display:none">
+          <label><input id="se-so-raw-html" type="checkbox" /> Raw HTML</label>
+          <label><input id="se-so-markdown" type="checkbox" /> Markdown</label>
+          <label><input id="se-so-fit-markdown" type="checkbox" /> Fit Markdown</label>
+          <label><input id="se-so-screenshot" type="checkbox" /> Screenshot</label>
         </div>
 
         <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.4rem">
@@ -1147,39 +1106,15 @@
             </div>
           </span>
         </div>
+        <div id="se-proxy-component"></div>
         <div class="field-row">
-          <div class="field">
-            <label>Proxy Type</label>
-            <select id="se-proxy-type">
-              <option value="">default (preset)</option>
-              <option value="none">none</option>
-              <option value="res_rotating">res_rotating</option>
-              <option value="res_static">res_static</option>
-              <option value="mobile">mobile</option>
-              <option value="mobile_shared">mobile_shared</option>
-              <option value="dc_static">dc_static</option>
-            </select>
-          </div>
-          <div class="field" id="se-pool-id-field">
-            <label>Pool ID <span id="se-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
-            <select id="se-proxy-pool-select" style="display:none"></select>
-            <input id="se-proxy-pool" type="text" placeholder="optional (for rotating: pin to pool id)" />
+          <div class="field field--retries">
+            <label>Max retries <span style="color:var(--text-tertiary);font-weight:400">(proxy only)</span></label>
+            <input id="se-max-retries" type="number" min="1" max="10" placeholder="default" />
           </div>
         </div>
-        <div class="field-row" id="se-geo-fields">
-          <div class="field">
-            <label>Country</label>
-            <select id="se-geo-country"><option value="">— any —</option></select>
-          </div>
-          <div class="field">
-            <label>Region</label>
-            <input id="se-geo-region" type="text" placeholder="New York" />
-          </div>
-          <div class="field">
-            <label>City</label>
-            <input id="se-geo-city" type="text" placeholder="New York" />
-          </div>
-        </div>
+
+        <div id="se-warmup-component"></div>
 
         <div class="actions">
           <button id="btnSearch" class="btn-primary">Search</button>
@@ -1262,6 +1197,7 @@
               <label>Wait Until</label>
               <select id="pw-wait-until">
                 <option value="domcontentloaded">domcontentloaded</option>
+                <option value="load">load</option>
                 <option value="networkidle">networkidle</option>
               </select>
             </div>
@@ -1283,38 +1219,7 @@
           </div>
 
           <h3>Proxy</h3>
-          <div class="field-row">
-            <div class="field">
-              <label>Proxy Type</label>
-              <select id="pw-proxy-type">
-                <option value="none">none</option>
-                <option value="res_rotating">res_rotating</option>
-                <option value="res_static">res_static</option>
-                <option value="mobile">mobile</option>
-                <option value="mobile_shared">mobile_shared</option>
-                <option value="dc_static">dc_static</option>
-              </select>
-            </div>
-            <div class="field" id="pw-pool-id-field">
-              <label>Pool ID <span id="pw-pool-id-hint" style="color:var(--text-tertiary);font-weight:400"></span></label>
-              <select id="pw-proxy-pool-select" style="display:none"></select>
-              <input id="pw-proxy-pool" type="text" placeholder="optional" />
-            </div>
-          </div>
-          <div class="field-row" id="pw-geo-fields">
-            <div class="field">
-              <label>Country</label>
-              <select id="pw-geo-country"><option value="">— any —</option></select>
-            </div>
-            <div class="field">
-              <label>Region</label>
-              <input id="pw-geo-region" type="text" placeholder="New York" />
-            </div>
-            <div class="field">
-              <label>City</label>
-              <input id="pw-geo-city" type="text" placeholder="New York" />
-            </div>
-          </div>
+          <div id="pw-proxy-component"></div>
           <div class="actions">
             <button id="pw-fetch" class="btn-primary">Fetch sample</button>
           </div>

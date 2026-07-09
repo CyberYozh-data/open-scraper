@@ -11,6 +11,7 @@ class CyberYozhSession(ProxySession):
     provider: CyberYozhProxyProvider
     proxy_type_raw: str
     proxy_pool_id: str | None
+    max_retries: int | None = None
 
     lease: ProxyLease | None = None
     exclude_ids: set[str] | None = None
@@ -24,7 +25,7 @@ class CyberYozhSession(ProxySession):
         return self
 
     def max_attempts(self) -> int:
-        return self.provider.max_attempts(self.proxy_type_raw)
+        return self.provider.max_attempts(self.proxy_type_raw, override=self.max_retries)
 
     def current_proxy(self):
         return self.lease.config if self.lease else None

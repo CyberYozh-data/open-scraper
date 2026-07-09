@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import date, timedelta
 from typing import Awaitable, Callable
 
 import httpx
@@ -20,6 +21,18 @@ from ..ssrf import safe_get
 log = logging.getLogger(__name__)
 router = APIRouter()
 
+
+def _lastmod_date(raw: str | None) -> date | None:
+    """Parse a sitemap <lastmod> to a date (day granularity). Handles both
+    'YYYY-MM-DD' and full W3C datetimes by taking the date prefix — and stays
+    Python-3.10-safe (date.fromisoformat there only accepts 'YYYY-MM-DD')."""
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
+
 # (url, scrape_options) -> ScrapeResponse dict
 ScraperFetch = Callable[[str, dict], Awaitable[dict]]
 
@@ -33,6 +46,10 @@ def _proxy_scrape_options(req: MapRequest) -> dict:
         opts["proxy_pool_id"] = req.proxy_pool_id
     if req.proxy_geo:
         opts["proxy_geo"] = req.proxy_geo.model_dump()
+    if req.prem_proxy_options:
+        # Keep the JS-render seed fetch on the same premium target as the httpx
+        # discovery path; exclude_none so no null Literal reaches the scraper.
+        opts["prem_proxy_options"] = req.prem_proxy_options.model_dump(exclude_none=True)
     return opts
 
 
@@ -100,7 +117,7 @@ async def build_map(
         warnings.append(message)
         log.warning("map %s seed=%s", message, seed)
 
-    async def gather_sitemap() -> list[str]:
+    async def gather_sitemap() -> list[tuple[str, str | None]]:
         if not req.include_sitemap:
             return []
         try:
@@ -111,6 +128,9 @@ async def build_map(
                 max_urls=settings.map_max_urls,
                 max_sitemaps=settings.map_max_sitemaps,
                 check_ssrf=check_ssrf,
+                # Filter while collecting so the max_urls cap counts matches, not
+                # the first N of a huge sitemap (which starved e.g. /blog/).
+                match=req.search,
             )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             warn(f"sitemap discovery failed: {exc}")
@@ -119,9 +139,21 @@ async def build_map(
     async def gather_page_links() -> list[str]:
         if not req.include_page_links:
             return []
-        html, base_url, warning = await _fetch_seed_html(
-            req, seed, http_client, scraper_fetch, check_ssrf=check_ssrf
-        )
+        try:
+            html, base_url, warning = await asyncio.wait_for(
+                _fetch_seed_html(
+                    req, seed, http_client, scraper_fetch, check_ssrf=check_ssrf
+                ),
+                timeout=settings.map_render_timeout_ms / 1000,
+            )
+        except asyncio.TimeoutError:
+            # A stalled seed render must not hold the fast sitemap hostage —
+            # degrade to sitemap-only instead of hanging the whole /map.
+            warn(
+                f"seed render exceeded {settings.map_render_timeout_ms}ms — "
+                "sitemap-only results"
+            )
+            return []
         if warning:
             warn(warning)
         return extract_links(html or "", base_url=base_url)
@@ -129,7 +161,9 @@ async def build_map(
     # The two discovery phases are independent network work — overlap them.
     sitemap_pages, page_links = await asyncio.gather(gather_sitemap(), gather_page_links())
 
-    def add_if_in_scope(url: str) -> None:
+    lastmod_by_url: dict[str, str] = {}
+
+    def add_if_in_scope(url: str, lastmod: str | None = None) -> None:
         # Canonicalize so /map returns the same URL shape as /crawl (the engine
         # canonicalizes before dedup/scope too). Junk locs are skipped.
         try:
@@ -138,11 +172,13 @@ async def build_map(
             return
         if scope.allows(canon, 0) and dedup.add(canon):
             ordered.append(canon)
+            if lastmod:
+                lastmod_by_url[canon] = lastmod
 
     add_if_in_scope(seed)
-    for url in sitemap_pages:
-        add_if_in_scope(url)
-    for url in page_links:
+    for url, lastmod in sitemap_pages:
+        add_if_in_scope(url, lastmod)
+    for url in page_links:  # <a> links carry no lastmod
         add_if_in_scope(url)
 
     unique_in_scope = len(ordered)
@@ -150,15 +186,36 @@ async def build_map(
         needle = req.search.lower()
         ordered = [u for u in ordered if needle in u.lower()]
 
+    # Recency filter: published_after, or recent_days as a relative shorthand.
+    cutoff = req.published_after
+    if cutoff is None and req.recent_days is not None:
+        cutoff = date.today() - timedelta(days=req.recent_days)
+    if cutoff is not None:
+        had_any = bool(ordered)
+        ordered = [
+            u for u in ordered
+            if (d := _lastmod_date(lastmod_by_url.get(u))) is not None and d >= cutoff
+        ]
+        if had_any and not ordered:
+            warn("date filter matched no URLs (sitemap had no <lastmod> dates, "
+                 "or all were older than the cutoff)")
+
+    # Sort newest-first by lastmod; URLs without a date sort last (date.min).
+    if req.sort == "newest":
+        ordered.sort(key=lambda u: _lastmod_date(lastmod_by_url.get(u)) or date.min, reverse=True)
+
     returned = ordered[: req.limit]
+    returned_lastmod = {u: lastmod_by_url[u] for u in returned if u in lastmod_by_url}
     return MapResponse(
         seed_url=seed,
         count=len(returned),
         urls=returned,
+        lastmod=returned_lastmod,
         stats=MapStats(
             from_sitemap=len(sitemap_pages),
             from_page=len(page_links),
             unique_in_scope=unique_in_scope,
+            with_lastmod=len(returned_lastmod),
         ),
         took_ms=int((time.perf_counter() - started) * 1000),
         warnings=warnings,
@@ -178,6 +235,7 @@ async def _open_proxied_client(
             req.proxy_type,
             req.proxy_pool_id,
             req.proxy_geo.model_dump() if req.proxy_geo else None,
+            req.prem_proxy_options.model_dump(exclude_none=True) if req.prem_proxy_options else None,
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         log.warning("map proxy resolve failed seed=%s: %s", str(req.seed_url), exc)

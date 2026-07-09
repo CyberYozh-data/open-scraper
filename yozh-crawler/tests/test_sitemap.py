@@ -20,8 +20,24 @@ class TestParseSitemapXml:
             "</urlset>"
         )
         pages, sitemaps = parse_sitemap_xml(xml)
-        assert pages == ["https://x.com/a", "https://x.com/b"]
+        assert pages == [("https://x.com/a", None), ("https://x.com/b", None)]
         assert sitemaps == []
+
+    def test_urlset_extracts_lastmod(self):
+        xml = (
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            "<url><loc>https://x.com/a</loc><lastmod>2026-06-01</lastmod></url>"
+            "<url><loc>https://x.com/b</loc>"
+            "<lastmod>2026-06-10T08:30:00+00:00</lastmod></url>"
+            "<url><loc>https://x.com/c</loc></url>"  # no lastmod
+            "</urlset>"
+        )
+        pages, _ = parse_sitemap_xml(xml)
+        assert pages == [
+            ("https://x.com/a", "2026-06-01"),
+            ("https://x.com/b", "2026-06-10T08:30:00+00:00"),
+            ("https://x.com/c", None),
+        ]
 
     def test_sitemapindex_returns_child_sitemaps(self):
         xml = (
@@ -45,7 +61,7 @@ class TestParseSitemapXml:
             "<url><loc></loc></url><url><loc>https://x.com/a</loc></url></urlset>"
         )
         pages, _ = parse_sitemap_xml(xml)
-        assert pages == ["https://x.com/a"]
+        assert pages == [("https://x.com/a", None)]
 
 
 class TestParseRobotsSitemaps:
@@ -131,7 +147,7 @@ class TestCollectSitemapUrls:
         out = await collect_sitemap_urls(
             client, ["https://x.com/sitemap.xml"], max_urls=100, max_sitemaps=10
         )
-        assert out == ["https://x.com/a", "https://x.com/b"]
+        assert out == [("https://x.com/a", None), ("https://x.com/b", None)]
 
     @pytest.mark.asyncio
     async def test_respects_max_urls(self):
@@ -139,7 +155,26 @@ class TestCollectSitemapUrls:
         out = await collect_sitemap_urls(
             client, ["https://x.com/sitemap.xml"], max_urls=1, max_sitemaps=10
         )
-        assert out == ["https://x.com/a"]
+        assert out == [("https://x.com/a", None)]
+
+    @pytest.mark.asyncio
+    async def test_match_filter_counts_matches_against_cap(self):
+        # /blog/ is the 3rd of 3 urls; max_urls=1 with match must still return it
+        # (the cap counts matches, not the first N) — regression for the search
+        # filter starving on a big sitemap.
+        sitemap = (
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            "<url><loc>https://x.com/about</loc></url>"
+            "<url><loc>https://x.com/contact</loc></url>"
+            "<url><loc>https://x.com/blog/post-1</loc></url>"
+            "</urlset>"
+        )
+        client = _StubClient({"https://x.com/sitemap.xml": _Resp(200, sitemap)})
+        out = await collect_sitemap_urls(
+            client, ["https://x.com/sitemap.xml"],
+            max_urls=1, max_sitemaps=10, match="/blog/",
+        )
+        assert out == [("https://x.com/blog/post-1", None)]
 
     @pytest.mark.asyncio
     async def test_missing_sitemap_yields_nothing(self):

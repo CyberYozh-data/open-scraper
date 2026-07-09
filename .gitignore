@@ -157,5 +157,15 @@ cython_debug/
 temp/
 output
 
-parallel-mapping-teapot.md
-sessions-phase1-plan.md
+# Claude Code agent state (worktrees, settings, scheduled tasks) — host-local, never committed
+.claude/
+
+# Host-specific docker-compose overrides (one per dev server: k12, etc.)
+docker-compose.k12.yml
+
+# Runtime preset volume (mounted into web-scraper at ./data/presets) — user-defined / self-healed presets, not source
+/data/
+
+# Local SERP/anti-bot research & experiments — empirical probes, captured HTML,
+# results. Host-local, never committed (may contain proxy exit IPs / fetched pages).
+/research/

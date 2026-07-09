@@ -62,6 +62,37 @@ class TestUrlTemplate:
         scrape = materialize(preset, req)
         assert str(scrape.url) == "https://www.amazon.de/dp/B08N5WRWNW"
 
+    def test_locale_lr_fills_template(self):
+        """A locale's `lr` region code is exposed to url_template as {lr}."""
+        preset = _amazon_preset(
+            url_template="https://yandex.ru/search/?text={query}&lr={lr}",
+            locales={
+                "ru": LocaleProfile(domain="ru", country="RU", lr="225"),
+                "us": LocaleProfile(domain="ru", country="RU", lr="84"),
+            },
+            default_locale="ru",
+        )
+        scrape = materialize(
+            preset, PresetScrapeRequest(source="amazon_product", preset_params={"query": "x"}, locale="us")
+        )
+        assert str(scrape.url) == "https://yandex.ru/search/?text=x&lr=84"
+        # proxy still routes through the locale country (RU), not the lr region.
+        assert scrape.proxy_geo.country_code == "RU"
+
+    def test_preset_param_overrides_locale_lr(self):
+        preset = _amazon_preset(
+            url_template="https://yandex.ru/search/?text={query}&lr={lr}",
+            locales={"ru": LocaleProfile(domain="ru", country="RU", lr="225")},
+            default_locale="ru",
+        )
+        scrape = materialize(
+            preset,
+            PresetScrapeRequest(
+                source="amazon_product", preset_params={"query": "x", "lr": "10174"}, locale="ru"
+            ),
+        )
+        assert str(scrape.url) == "https://yandex.ru/search/?text=x&lr=10174"
+
     def test_default_locale_used_when_unset(self):
         preset = _amazon_preset()
         req = PresetScrapeRequest(
@@ -117,6 +148,16 @@ class TestRequestDefaults:
         assert scrape.proxy_type == "res_rotating"
         assert scrape.wait_until == "networkidle"
         assert scrape.stealth is True
+
+    def test_request_defaults_carry_max_retries(self):
+        preset = _amazon_preset(
+            request_defaults={"proxy_type": "res_rotating", "max_retries": 7}
+        )
+        req = PresetScrapeRequest(
+            source="amazon_product", preset_params={"asin": "X"}, locale="us"
+        )
+        scrape = materialize(preset, req)
+        assert scrape.max_retries == 7
 
     def test_locale_sets_proxy_geo(self):
         preset = _amazon_preset()
@@ -459,3 +500,20 @@ class TestMaterializeSessionId:
                 ),
             )
         assert issubclass(SessionConflictError, MaterializeError)
+
+
+def test_yandex_preset_uses_prem_and_warmup():
+    import json, pathlib
+    from src.presets.models import Preset
+    from src.presets.materializer import materialize, PresetScrapeRequest
+
+    raw = json.loads(
+        pathlib.Path("src/presets/builtin/yandex_search.json").read_text()
+    )
+    preset = Preset(**raw)
+    out = materialize(preset, PresetScrapeRequest(source="yandex_search", locale="ru", preset_params={"query": "купить ноутбук"}))
+    assert out.proxy_type == "prem_res_rotating"
+    assert out.prem_proxy_options.ip_filter == "quality-security"
+    assert out.warmup.type == "homepage"
+    assert out.proxy_geo.country_code == "RU"
+    assert out.browser_engine == "camoufox"

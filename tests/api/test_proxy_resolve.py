@@ -63,6 +63,62 @@ class TestResolveProxyEndpoint:
         assert kwargs["proxy_geo"] == {"country_code": "DE", "region": "Bavaria", "city": "Munich"}
 
     @pytest.mark.asyncio
+    async def test_prem_options_passed_to_resolver(self, mocker):
+        cfg = ProxyConfig(server="http://gate:10000", username="u", password="p")
+        spy = mocker.AsyncMock(return_value=_FakeSession(cfg))
+        mocker.patch.object(proxies_mod.proxy_resolver, "open_session", new=spy)
+        await resolve_proxy(
+            proxy_type="prem_res_rotating", country_code="RU",
+            ip_filter="quality-security", isp="ArtTelecom",
+            session_type="sticky", rotation_minutes=10, sub_user_id="su1",
+        )
+        _, kwargs = spy.call_args
+        assert kwargs["proxy_geo"] == {"country_code": "RU"}
+        assert kwargs["prem_proxy_options"] == {
+            "ip_filter": "quality-security", "isp": "ArtTelecom",
+            "session_type": "sticky", "rotation_minutes": 10, "sub_user_id": "su1",
+        }
+
+    @pytest.mark.asyncio
+    async def test_prem_options_omitted_when_unset(self, mocker):
+        cfg = ProxyConfig(server="http://gate:10000")
+        spy = mocker.AsyncMock(return_value=_FakeSession(cfg))
+        mocker.patch.object(proxies_mod.proxy_resolver, "open_session", new=spy)
+        await resolve_proxy(proxy_type="res_rotating", country_code="US")
+        _, kwargs = spy.call_args
+        assert kwargs["prem_proxy_options"] is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_prem_options_return_422(self, mocker):
+        # The /resolve helper must run its flat query params through the same
+        # PremProxyOptions validation /scrape uses — bad values are rejected
+        # before reaching the resolver, not silently passed upstream.
+        from fastapi import HTTPException
+
+        spy = mocker.patch.object(proxies_mod.proxy_resolver, "open_session")
+        for kwargs in (
+            {"ip_filter": "bogus"},
+            {"session_type": "sticky", "rotation_minutes": -5},
+            {"session_type": "sticky", "sticky_id": "x-filter-iqs"},
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await resolve_proxy(proxy_type="prem_res_rotating", **kwargs)
+            assert exc.value.status_code == 422
+        spy.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalid_country_code_returns_422(self, mocker):
+        from fastapi import HTTPException
+
+        spy = mocker.patch.object(proxies_mod.proxy_resolver, "open_session")
+        with pytest.raises(HTTPException) as exc:
+            await resolve_proxy(
+                proxy_type="prem_res_rotating", country_code="ru-r-77-ct-moscow"
+            )
+        assert exc.value.status_code == 422
+        spy.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_pool_exhausted_runtimeerror_maps_to_502(self, mocker):
         from fastapi import HTTPException
 

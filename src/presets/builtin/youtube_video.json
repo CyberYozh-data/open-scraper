@@ -1,12 +1,12 @@
 {
   "name": "youtube_video",
   "source": "youtube",
-  "description": "YouTube watch page. Title/channel/published come from stable <meta>/JSON-LD; views/likes are JS-rendered and self_heal-leaning. Uses mobile_shared proxy; domcontentloaded avoids hanging on YouTube's constant polling (late-hydrated views/likes lean on self_heal).",
+  "description": "YouTube watch page. Title/channel/published come from stable <meta>/JSON-LD; views/likes are JS-rendered and self_heal-leaning. Uses res_rotating proxy; domcontentloaded avoids hanging on YouTube's constant polling (late-hydrated views/likes lean on self_heal).",
   "kind": "builtin",
   "url_template": "https://www.youtube.com/watch?v={video_id}",
   "request_defaults": {
     "device": "desktop",
-    "proxy_type": "mobile_shared",
+    "proxy_type": "res_rotating",
     "stealth": true,
     "wait_until": "domcontentloaded",
     "timeout_ms": 60000,

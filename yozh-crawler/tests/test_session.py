@@ -133,6 +133,30 @@ def test_overrides_excludes_geo_when_none():
     assert "proxy_geo" not in s.overrides()
 
 
+def test_overrides_includes_prem_options_when_set():
+    pool = make_pool(
+        base_proxy_type="prem_res_rotating",
+        base_prem_proxy_options={"ip_filter": "quality-security"},
+    )
+    s = pool.acquire()
+    assert s.overrides()["prem_proxy_options"] == {"ip_filter": "quality-security"}
+
+
+def test_overrides_excludes_prem_options_when_none():
+    pool = make_pool(base_prem_proxy_options=None)
+    s = pool.acquire()
+    assert "prem_proxy_options" not in s.overrides()
+
+
+def test_fresh_session_carries_prem_options_after_retire():
+    pool = make_pool(base_prem_proxy_options={"ip_filter": "quality-security"})
+    s1 = pool.acquire()
+    s1.retired = True
+    s2 = pool.acquire()
+    assert s2 is not s1
+    assert s2.overrides()["prem_proxy_options"] == {"ip_filter": "quality-security"}
+
+
 # ─── stats ────────────────────────────────────────────────────────────────────
 
 def test_stats_when_no_session():

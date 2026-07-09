@@ -50,6 +50,7 @@ class ScraperClient:
         proxy_type: str,
         proxy_pool_id: str | None = None,
         proxy_geo: dict[str, str] | None = None,
+        prem_proxy_options: dict | None = None,
     ) -> str | None:
         """Ask the scraper to resolve an upstream proxy URL (reuses its CyberYozh
         resolution). Returns the SOCKS5 URL, or None for proxy_type=none / no
@@ -61,6 +62,17 @@ class ScraperClient:
             value = (proxy_geo or {}).get(key)
             if value:
                 params[key] = value
+        # prem_res_rotating targeting → flat query params the scraper's /resolve
+        # accepts. `zip` is sent as `zip_code` (the helper's param name).
+        for src_key, param in (
+            ("ip_filter", "ip_filter"), ("isp", "isp"), ("zip", "zip_code"),
+            ("session_type", "session_type"), ("sticky_id", "sticky_id"),
+            ("rotation_minutes", "rotation_minutes"), ("sub_user_id", "sub_user_id"),
+            ("protocol", "protocol"),
+        ):
+            value = (prem_proxy_options or {}).get(src_key)
+            if value is not None:
+                params[param] = str(value)
         try:
             r = await self._client.get("/api/v1/proxies/resolve", params=params)
         except httpx.HTTPError as e:

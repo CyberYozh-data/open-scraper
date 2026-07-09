@@ -143,3 +143,42 @@ class TestProxyResolver:
                     mock_provider_cls.assert_called_once()
                     call_kwargs = mock_provider_cls.call_args[1]
                     assert call_kwargs["geo"] == geo
+
+
+@pytest.mark.asyncio
+async def test_open_session_prem_returns_prem_session():
+    from pydantic import SecretStr
+    from src.proxy.cyberyozh.provider_v2 import PremProxySession
+    with patch("src.proxy.resolver.settings") as mock_settings:
+        mock_settings.cyberyozh_api_key = SecretStr("k")
+        mock_settings.cyberyozh_base_url = "https://app.cyberyozh.com"
+        resolver = ProxyResolver()
+        with patch.object(PremProxySession, "init", new=AsyncMock(return_value="SENTINEL")):
+            out = await resolver.open_session(
+                proxy_type="prem_res_rotating",
+                proxy_pool_id=None,
+                proxy_geo={"country_code": "RU"},
+                prem_proxy_options={"ip_filter": "quality-security"},
+            )
+    assert out == "SENTINEL"
+
+
+@pytest.mark.asyncio
+async def test_list_available_prem_returns_empty():
+    """list_available_proxies for prem_res_rotating: configured=True, items=[], no v1 call."""
+    from pydantic import SecretStr
+    with patch("src.proxy.resolver.settings") as mock_settings:
+        mock_settings.cyberyozh_api_key = SecretStr("k")
+        mock_settings.cyberyozh_base_url = "https://app.cyberyozh.com"
+        resolver = ProxyResolver()
+        # Replace _client with a mock so we can verify proxy_history is never called.
+        mock_client = Mock()
+        mock_client.proxy_history = AsyncMock(side_effect=AssertionError("proxy_history must not be called for prem"))
+        resolver._client = mock_client
+
+        result = await resolver.list_available_proxies("prem_res_rotating")
+
+    assert result.configured is True
+    assert result.items == []
+    assert result.category == "prem_res_rotating"
+    mock_client.proxy_history.assert_not_called()

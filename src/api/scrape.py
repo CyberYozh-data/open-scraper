@@ -8,6 +8,7 @@ from src.scrape_service import (
     BatchSessionConflict,
     InternalFieldsNotAllowed,
     JobNotFound,
+    QueueFull,
     scrape_service,
 )
 from src.schemas import (
@@ -43,6 +44,8 @@ async def scrape_page(request: ScrapeRequest) -> JobCreateResponse:
         ) from exc
     except SessionIncompatible as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except QueueFull as exc:
+        raise HTTPException(status_code=503, detail="queue_full") from exc
     return JobCreateResponse(job_id=job_id)
 
 
@@ -67,38 +70,44 @@ async def scrape_pages(request: BatchScrapeRequest) -> JobCreateResponse:
         ) from exc
     except SessionIncompatible as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except QueueFull as exc:
+        raise HTTPException(status_code=503, detail="queue_full") from exc
     return JobCreateResponse(job_id=job_id)
 
 
 @router.get("/{job_id}", response_model=JobStatusResponse, operation_id="get_job_status")
 async def scrape_status(job_id: str) -> JobStatusResponse:
     try:
-        job_record = await scrape_service.get_job_or_404(job_id)
+        meta = await scrape_service.get_job_status_or_404(job_id)
     except JobNotFound as exc:
         raise HTTPException(status_code=404, detail="job_not_found") from exc
     return JobStatusResponse(
-        job_id=job_record.job_id,
-        status=job_record.status,
-        done=job_record.done,
-        total=job_record.total,
-        error=job_record.error,
+        job_id=meta.job_id,
+        status=meta.status,
+        done=meta.done,
+        total=meta.total,
+        error=meta.error,
     )
 
 
 @router.get("/{job_id}/results", response_model=JobResultsResponse, operation_id="get_job_result")
 async def scrape_results(job_id: str) -> JobResultsResponse:
     try:
-        job_record = await scrape_service.get_job_or_404(job_id)
+        snap = await scrape_service.get_job_results_or_404(job_id)
     except JobNotFound as exc:
         raise HTTPException(status_code=404, detail="job_not_found") from exc
+    # Normalize: if no slots have been filled yet, render results as null to
+    # preserve the old contract (in-progress jobs returned null, not [null, ...]).
+    raw = snap.results
+    results = raw if raw and any(r is not None for r in raw) else None
     return JobResultsResponse(
-        job_id=job_record.job_id,
-        status=job_record.status,
-        pages=job_record.pages,
-        total=job_record.total,
-        done=job_record.done,
-        error=job_record.error,
-        results=job_record.results,
+        job_id=snap.job_id,
+        status=snap.status,
+        pages=snap.pages,
+        total=snap.total,
+        done=snap.done,
+        error=snap.error,
+        results=results,
     )
 
 
@@ -107,8 +116,7 @@ async def scrape_cancel(job_id: str) -> dict:
     """Cancel a scrape/batch job. In-flight pages finish; remaining pages are
     skipped and the job transitions to status="cancelled"."""
     try:
-        job_record = await scrape_service.get_job_or_404(job_id)
+        cancelled = await scrape_service.request_cancel(job_id)
     except JobNotFound as exc:
         raise HTTPException(status_code=404, detail="job_not_found") from exc
-    cancelled = await scrape_service.request_cancel(job_record.job_id)
     return {"job_id": job_id, "cancelled": cancelled}

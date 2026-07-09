@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import Mock, AsyncMock, MagicMock, call, patch
 import base64
 
-from src.browser.runner import PlaywrightRunner, FetchResult, DESKTOP, MOBILE
+from src.browser.runner import PlaywrightRunner, FetchResult, DESKTOP, MOBILE, classify_fetch
 from src.proxy.models import ProxyConfig
 from playwright.async_api import Error as PWError
 
@@ -77,10 +77,11 @@ class TestPlaywrightRunner:
 
                 call_kwargs = mock_playwright.chromium.launch.call_args[1]
                 assert call_kwargs["headless"] is True
-                assert call_kwargs["args"] == [
-                    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-                    "--force-webrtc-ip-handling-policy",
-                ]
+                # WebRTC flags present...
+                assert "--webrtc-ip-handling-policy=disable_non_proxied_udp" in call_kwargs["args"]
+                assert "--force-webrtc-ip-handling-policy" in call_kwargs["args"]
+                # ...alongside the always-on anti-automation flag.
+                assert "--disable-blink-features=AutomationControlled" in call_kwargs["args"]
 
                 await runner.stop()
 
@@ -104,9 +105,34 @@ class TestPlaywrightRunner:
 
                 call_kwargs = mock_playwright.chromium.launch.call_args[1]
                 assert call_kwargs["headless"] is True
-                assert call_kwargs.get("args") is None
+                # No WebRTC flags, but the anti-automation flag is always on.
+                assert call_kwargs["args"] == ["--disable-blink-features=AutomationControlled"]
 
                 await runner.stop()
+
+    @pytest.mark.asyncio
+    async def test_runner_start_always_disables_automation_controlled(self):
+        """Google (and other anti-bot SERPs) redirect a headless Chromium to a
+        /sorry captcha unless --disable-blink-features=AutomationControlled is
+        set; it must be present regardless of the WebRTC setting. Empirically
+        this flips Google from a captcha to a full rendered SERP on a clean IP."""
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+
+        mock_browser = AsyncMock()
+        mock_playwright = AsyncMock()
+        mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_playwright.stop = AsyncMock()
+        mock_async_playwright_instance = MagicMock()
+        mock_async_playwright_instance.start = AsyncMock(return_value=mock_playwright)
+        mock_async_playwright = MagicMock(return_value=mock_async_playwright_instance)
+
+        with patch("src.browser.runner.async_playwright", mock_async_playwright):
+            for webrtc in (True, False):
+                with patch("src.browser.runner.settings.webrtc_block", webrtc):
+                    await runner.start()
+                    args = mock_playwright.chromium.launch.call_args[1]["args"]
+                    assert "--disable-blink-features=AutomationControlled" in args
+                    await runner.stop()
 
     @pytest.mark.asyncio
     async def test_runner_stop(self):
@@ -214,6 +240,44 @@ class TestFetch:
         assert result.status_code == 200
         assert result.screenshot_b64 is None
         assert result.error is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_http_403_is_not_ok_and_blocked(self):
+        """A 403 still returns an HTML body (no Playwright error), but it's a
+        proxy ban — the fetch must be not-ok + blocked so the queue rotates."""
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+        runner._browser = AsyncMock()
+
+        mock_page = AsyncMock()
+        mock_response = Mock()
+        mock_response.status = 403
+        mock_page.goto = AsyncMock(return_value=mock_response)
+        # A generic edge error page (not a captcha phrase) — the old heuristic
+        # missed this, so the fetch was wrongly reported ok.
+        mock_page.content = AsyncMock(return_value="<html><body>Error Page</body></html>")
+        mock_page.url = "https://example.com"
+        mock_page.close = AsyncMock()
+
+        mock_context = AsyncMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_context.close = AsyncMock()
+
+        with patch.object(runner, "_new_context", return_value=mock_context):
+            result = await runner.fetch(
+                url="https://example.com",
+                device="desktop",
+                proxy=None,
+                headers=None,
+                wait_until="domcontentloaded",
+                wait_for_selector=None,
+                timeout_ms=None,
+                screenshot=False,
+            )
+
+        assert result.status_code == 403
+        assert result.ok is False
+        assert result.blocked is True
+        assert result.error and "403" in result.error
 
     @pytest.mark.asyncio
     async def test_fetch_with_proxy(self):
@@ -652,6 +716,56 @@ class TestCaptchaDetection:
         html = "<html><body><h1>Welcome</h1><p>Content</p></body></html>"
         assert runner._looks_like_captcha_or_block(html) is False
 
+    def test_large_content_page_with_trigger_phrase_not_flagged(self):
+        """A real, fully-rendered results page is large; a trigger phrase that
+        appears there is content (e.g. a SERP for a query *about* captchas /
+        anti-detect tooling), not a block. Real block/challenge interstitials
+        are tiny, so size separates them. Regression: searching "cyberyozh"
+        returned 7 organic results yet was flagged blocked, driving 5 wasteful
+        proxy-rotating retries (~140s) and a scary warning on a good page."""
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+        big_results = (
+            "<html><body>"
+            + "<div data-hveid='1'><h3>Result about captcha solving</h3>"
+            "<span>How to bypass unusual traffic checks — verify you are human"
+            "</span></div>" * 400  # well past the block-page size ceiling
+            + "</body></html>"
+        )
+        assert len(big_results) > 20_000
+        assert runner._looks_like_captcha_or_block(big_results) is False
+
+    def test_sorry_redirect_final_url_is_block(self):
+        """Google serves real blocks at /sorry/ with HTTP 200, so the redirect
+        URL — not the status code — is the unambiguous block signal."""
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+        html = "<html><body>Some short page</body></html>"
+        final_url = (
+            "https://www.google.com/sorry/index?continue=https://www.google.com/"
+            "search%3Fq%3Dcyberyozh"
+        )
+        assert runner._looks_like_captcha_or_block(html, final_url=final_url) is True
+
+    def test_yandex_showcaptcha_redirect_is_block(self):
+        """Yandex SmartCaptcha serves at /showcaptcha with HTTP 200; the redirect
+        URL marks the block so the worker rotates off a captcha'd exit instead of
+        treating the empty interstitial as a successful (zero-result) fetch."""
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+        # A real SmartCaptcha page is large enough (>20 KB) that the size ceiling
+        # would otherwise treat it as content — the URL signal is what flags it.
+        html = "<html><body>" + ("x" * 30000) + "</body></html>"
+        final_url = "https://yandex.com/showcaptcha?cc=1&retpath=aHR0cHM6&t=2"
+        assert runner._looks_like_captcha_or_block(html, final_url=final_url) is True
+
+    def test_small_block_page_still_flagged(self):
+        """The real /sorry interstitial (tiny, with trigger phrases) must keep
+        being flagged so the worker rotates off the burned exit."""
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+        html = (
+            "<html><body>Our systems have detected unusual traffic from your "
+            "computer network. <div data-sitekey='x'></div></body></html>"
+        )
+        assert runner._looks_like_captcha_or_block(html) is True
+
 
 class TestFetchResultElementStatus:
     def test_default_is_none(self):
@@ -776,3 +890,247 @@ class TestComputeElementClip:
         clip = await _compute_element_clip(locator)
         assert clip is not None
         assert clip["width"] > 0 and clip["height"] > 0
+
+
+class TestFetchFailurePathHonesty:
+    """H5: a failed fetch must report element_status='no_screenshot' (not None,
+    which the schema documents as 'legacy response') so consumers can tell a
+    real capture failure apart from a pre-field response."""
+
+    @pytest.mark.asyncio
+    async def test_goto_error_reports_no_screenshot_status(self):
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+        runner._browser = AsyncMock()
+
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock(side_effect=PWError("Timeout 30000ms exceeded"))
+        mock_page.close = AsyncMock()
+
+        mock_context = AsyncMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_context.close = AsyncMock()
+
+        with patch.object(runner, "_new_context", return_value=mock_context):
+            result = await runner.fetch(
+                url="https://example.com", device="desktop", proxy=None,
+                headers=None, wait_until="networkidle", wait_for_selector=None,
+                timeout_ms=None, screenshot=True, element_selector="#app",
+            )
+
+        assert result.ok is False
+        assert result.element_status == "no_screenshot"
+
+
+class TestFetchBlockedFlag:
+    """Captcha/block detection must set a structured `blocked` flag so the
+    queue layer can rotate the proxy and retry (a captcha means the IP is
+    burned), instead of giving up after one attempt."""
+
+    @pytest.mark.asyncio
+    async def test_captcha_content_sets_blocked(self):
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+        runner._browser = AsyncMock()
+
+        mock_page = AsyncMock()
+        mock_response = Mock()
+        mock_response.status = 200
+        mock_page.goto = AsyncMock(return_value=mock_response)
+        mock_page.content = AsyncMock(
+            return_value="<html><body>Our systems have detected unusual "
+                         "traffic from your computer network.</body></html>")
+        mock_page.url = "https://www.google.com/sorry/index"
+        mock_page.close = AsyncMock()
+
+        mock_context = AsyncMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_context.close = AsyncMock()
+
+        with patch.object(runner, "_new_context", return_value=mock_context):
+            result = await runner.fetch(
+                url="https://www.google.com/search?q=x", device="desktop",
+                proxy=None, headers=None, wait_until="domcontentloaded",
+                wait_for_selector=None, timeout_ms=None, screenshot=False,
+            )
+
+        assert result.ok is False
+        assert result.blocked is True
+
+    @pytest.mark.asyncio
+    async def test_clean_page_not_blocked(self):
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+        runner._browser = AsyncMock()
+
+        mock_page = AsyncMock()
+        mock_response = Mock()
+        mock_response.status = 200
+        mock_page.goto = AsyncMock(return_value=mock_response)
+        mock_page.content = AsyncMock(return_value="<html><body>Hello</body></html>")
+        mock_page.url = "https://example.com"
+        mock_page.close = AsyncMock()
+
+        mock_context = AsyncMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_context.close = AsyncMock()
+
+        with patch.object(runner, "_new_context", return_value=mock_context):
+            result = await runner.fetch(
+                url="https://example.com", device="desktop", proxy=None,
+                headers=None, wait_until="domcontentloaded", wait_for_selector=None,
+                timeout_ms=None, screenshot=False,
+            )
+
+        assert result.ok is True
+        assert result.blocked is False
+
+
+class TestFetchResourceCleanup:
+    """M4: context/page/SOCKS-bridge must not leak when page setup raises
+    before the main fetch try/finally is entered."""
+
+    @pytest.mark.asyncio
+    async def test_new_page_failure_closes_context_and_bridge(self):
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+        runner._browser = AsyncMock()
+
+        mock_context = AsyncMock()
+        mock_context.new_page = AsyncMock(side_effect=PWError("crashed"))
+        mock_context.close = AsyncMock()
+
+        bridge_cm = AsyncMock()
+        bridge_cm.__aexit__ = AsyncMock()
+
+        with patch.object(runner, "_new_context", return_value=mock_context), \
+                patch.object(runner, "resolve_proxy",
+                             AsyncMock(return_value=(None, bridge_cm))):
+            with pytest.raises(PWError):
+                await runner.fetch(
+                    url="https://example.com", device="desktop", proxy=None,
+                    headers=None, wait_until="domcontentloaded",
+                    wait_for_selector=None, timeout_ms=None, screenshot=False,
+                )
+
+        mock_context.close.assert_awaited_once()
+        bridge_cm.__aexit__.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_new_context_failure_closes_bridge(self):
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+        runner._browser = AsyncMock()
+
+        bridge_cm = AsyncMock()
+        bridge_cm.__aexit__ = AsyncMock()
+
+        with patch.object(runner, "_new_context",
+                          AsyncMock(side_effect=PWError("context boom"))), \
+                patch.object(runner, "resolve_proxy",
+                             AsyncMock(return_value=(None, bridge_cm))):
+            with pytest.raises(PWError):
+                await runner.fetch(
+                    url="https://example.com", device="desktop", proxy=None,
+                    headers=None, wait_until="domcontentloaded",
+                    wait_for_selector=None, timeout_ms=None, screenshot=False,
+                )
+
+        bridge_cm.__aexit__.assert_awaited_once()
+
+
+class TestBlockAssetsRoute:
+    """M5: asset-blocking route handler must be an awaitable coroutine (not a
+    fire-and-forget create_task) so abort/continue complete before teardown."""
+
+    @pytest.mark.asyncio
+    async def test_aborts_blocked_resource_types(self):
+        from src.browser.runner import _block_assets_route
+
+        for rtype in ("image", "media", "font"):
+            route = AsyncMock()
+            route.request = Mock(resource_type=rtype)
+            await _block_assets_route(route)
+            route.abort.assert_awaited_once()
+            route.continue_.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_continues_other_resource_types(self):
+        from src.browser.runner import _block_assets_route
+
+        route = AsyncMock()
+        route.request = Mock(resource_type="document")
+        await _block_assets_route(route)
+        route.continue_.assert_awaited_once()
+        route.abort.assert_not_called()
+
+
+class TestClassifyFetch:
+    """classify_fetch() maps (http status, captcha heuristic) -> (ok, blocked, error).
+
+    A ban/transient HTTP status must mark the fetch NOT ok so the queue's retry
+    loop reaches its rotation decision instead of short-circuiting on ok=True.
+    """
+
+    def test_plain_200_is_ok(self):
+        assert classify_fetch(200, captcha_detected=False) == (True, False, None)
+
+    def test_captcha_is_blocked(self):
+        ok, blocked, error = classify_fetch(200, captcha_detected=True)
+        assert ok is False
+        assert blocked is True
+        assert error and "captcha" in error.lower()
+
+    def test_ban_status_403_is_blocked(self):
+        ok, blocked, error = classify_fetch(403, captcha_detected=False)
+        assert ok is False
+        assert blocked is True
+        assert error and "403" in error
+
+    def test_rate_limit_429_is_blocked(self):
+        ok, blocked, _ = classify_fetch(429, captcha_detected=False)
+        assert ok is False and blocked is True
+
+    def test_transient_503_is_not_ok_but_not_burned(self):
+        ok, blocked, error = classify_fetch(503, captcha_detected=False)
+        assert ok is False
+        assert blocked is False
+        assert error and "503" in error
+
+    def test_genuine_404_stays_ok(self):
+        # A 404 is a real target response, not a proxy ban — must not trigger rotation.
+        assert classify_fetch(404, captcha_detected=False) == (True, False, None)
+
+    def test_missing_status_with_no_captcha_is_ok(self):
+        assert classify_fetch(None, captcha_detected=False) == (True, False, None)
+
+
+class TestChromeUaMetadata:
+    """Client-Hints metadata built for Emulation.setUserAgentOverride so the
+    Sec-CH-UA header matches the spoofed UA and never leaks 'HeadlessChrome'."""
+
+    def test_desktop_windows_chrome_ua(self):
+        from src.browser.runner import _chrome_ua_metadata
+        meta = _chrome_ua_metadata(DESKTOP["user_agent"])
+        assert meta is not None
+        assert meta["platform"] == "Windows"
+        assert meta["mobile"] is False
+        brand_names = [b["brand"] for b in meta["brands"]]
+        # No automation tell, and the real Chrome brands are present.
+        assert "HeadlessChrome" not in brand_names
+        assert "Google Chrome" in brand_names and "Chromium" in brand_names
+        # Version aligns with the UA's Chrome major (124 in the shipped preset).
+        assert all(b["version"] == "124" for b in meta["brands"]
+                   if b["brand"] in ("Chromium", "Google Chrome"))
+
+    def test_mobile_safari_ua_returns_none(self):
+        # The mobile preset is an iPhone Safari UA — it does not send Sec-CH-UA,
+        # so there is nothing to align and we must skip (return None).
+        from src.browser.runner import _chrome_ua_metadata
+        assert _chrome_ua_metadata(MOBILE["user_agent"]) is None
+
+    def test_non_chrome_ua_returns_none(self):
+        from src.browser.runner import _chrome_ua_metadata
+        assert _chrome_ua_metadata("Mozilla/5.0 (X11; Linux) Firefox/128.0") is None
+
+    def test_platform_follows_ua(self):
+        from src.browser.runner import _chrome_ua_metadata
+        mac = _chrome_ua_metadata(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        assert mac is not None and mac["platform"] == "macOS"

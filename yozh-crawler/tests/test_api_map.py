@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import date
+
 import pytest
 
 from src.api.map import build_map
@@ -40,6 +43,14 @@ _SITEMAP = (
     "</urlset>"
 )
 _SEED_HTML = '<html><body><a href="/p1">1</a><a href="https://x.com/p2">2</a></body></html>'
+_SITEMAP_DATED = (
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+    "<url><loc>https://x.com/old</loc><lastmod>2020-01-01</lastmod></url>"
+    "<url><loc>https://x.com/new</loc><lastmod>2026-06-15</lastmod></url>"
+    "<url><loc>https://x.com/mid</loc><lastmod>2023-03-03</lastmod></url>"
+    "<url><loc>https://x.com/undated</loc></url>"
+    "</urlset>"
+)
 
 
 def _req(**kw):
@@ -57,6 +68,77 @@ class TestBuildMap:
         assert res.urls == ["https://x.com/", "https://x.com/a"]
         assert res.stats.from_sitemap == 3
         assert res.stats.unique_in_scope == 2
+
+    @pytest.mark.asyncio
+    async def test_published_after_filters_by_lastmod(self):
+        client = _StubClient({"https://x.com/sitemap.xml": _Resp(200, _SITEMAP_DATED)})
+        res = await build_map(
+            _req(include_page_links=False, published_after=date(2024, 1, 1)),
+            http_client=client, scraper_fetch=None,
+        )
+        # Only /new (2026) is on/after the cutoff; old/mid/undated + the seed
+        # (no lastmod) are dropped. lastmod is echoed for the survivor.
+        assert res.urls == ["https://x.com/new"]
+        assert res.lastmod == {"https://x.com/new": "2026-06-15"}
+        assert res.stats.with_lastmod == 1
+
+    @pytest.mark.asyncio
+    async def test_sort_newest_orders_by_lastmod_undated_last(self):
+        client = _StubClient({"https://x.com/sitemap.xml": _Resp(200, _SITEMAP_DATED)})
+        res = await build_map(
+            _req(include_page_links=False, sort="newest"),
+            http_client=client, scraper_fetch=None,
+        )
+        assert res.urls[:3] == [
+            "https://x.com/new", "https://x.com/mid", "https://x.com/old",
+        ]
+        # seed + /undated carry no date -> sorted last (order among them unspecified)
+        assert set(res.urls[3:]) == {"https://x.com/", "https://x.com/undated"}
+
+    @pytest.mark.asyncio
+    async def test_recent_days_keeps_dated_drops_undated(self):
+        client = _StubClient({"https://x.com/sitemap.xml": _Resp(200, _SITEMAP_DATED)})
+        # Near-max window (~98y): every dated URL qualifies, undated (+seed) drop.
+        res = await build_map(
+            _req(include_page_links=False, recent_days=36_000),
+            http_client=client, scraper_fetch=None,
+        )
+        assert set(res.urls) == {
+            "https://x.com/old", "https://x.com/mid", "https://x.com/new",
+        }
+
+    def test_recent_days_rejects_out_of_range(self):
+        # Bounded so today()-timedelta(days=N) can't OverflowError into a 500.
+        import pydantic
+        with pytest.raises(pydantic.ValidationError):
+            _req(recent_days=10_000_000)
+
+    @pytest.mark.asyncio
+    async def test_published_after_then_sort_newest(self):
+        client = _StubClient({"https://x.com/sitemap.xml": _Resp(200, _SITEMAP_DATED)})
+        res = await build_map(
+            _req(include_page_links=False, published_after=date(2021, 1, 1), sort="newest"),
+            http_client=client, scraper_fetch=None,
+        )
+        # /old(2020) filtered out; /new(2026) before /mid(2023) after sort.
+        assert res.urls == ["https://x.com/new", "https://x.com/mid"]
+
+    @pytest.mark.asyncio
+    async def test_date_filter_empty_result_warns(self):
+        client = _StubClient({"https://x.com/sitemap.xml": _Resp(200, _SITEMAP_DATED)})
+        res = await build_map(
+            _req(include_page_links=False, published_after=date(2099, 1, 1)),
+            http_client=client, scraper_fetch=None,
+        )
+        assert res.urls == []
+        assert any("date filter matched no URLs" in w for w in res.warnings)
+
+    def test_lastmod_date_parsing(self):
+        from src.api.map import _lastmod_date
+        assert _lastmod_date("2026-06-01") == date(2026, 6, 1)
+        assert _lastmod_date("2026-06-01T08:30:00+00:00") == date(2026, 6, 1)
+        for bad in (None, "", "garbage", "2026-13-01", "2026"):
+            assert _lastmod_date(bad) is None
 
     @pytest.mark.asyncio
     async def test_page_links_via_httpx(self):
@@ -235,3 +317,43 @@ class TestMapProxy:
             extra_warnings=["proxy resolve failed; used direct"],
         )
         assert any("proxy resolve failed" in w for w in res.warnings)
+
+
+@pytest.mark.asyncio
+async def test_seed_render_timeout_falls_back_to_sitemap(monkeypatch):
+    # A stalled seed render must not hold the fast sitemap result hostage:
+    # /map should time out the render and return sitemap-only.
+    import src.api.map as mapmod
+
+    monkeypatch.setattr(mapmod.settings, "map_render_timeout_ms", 50)
+
+    async def hanging_render(url, opts):
+        await asyncio.sleep(5)  # never returns within the 50ms render cap
+
+    client = _StubClient({"https://x.com/sitemap.xml": _Resp(200, _SITEMAP)})
+    res = await build_map(
+        _req(include_page_links=True, render=True),
+        http_client=client,
+        scraper_fetch=hanging_render,
+    )
+    assert "https://x.com/a" in res.urls  # sitemap result survived the render timeout
+    assert any("sitemap-only" in w for w in res.warnings)
+
+
+class TestProxyScrapeOptions:
+    def test_includes_prem_options_on_render_path(self):
+        from src.api.map import _proxy_scrape_options
+        req = _req(
+            proxy_type="prem_res_rotating",
+            proxy_geo={"country_code": "RU"},
+            prem_proxy_options={"ip_filter": "quality-security"},
+        )
+        opts = _proxy_scrape_options(req)
+        assert opts["proxy_type"] == "prem_res_rotating"
+        assert opts["proxy_geo"]["country_code"] == "RU"
+        # prem targeting must reach the JS-render seed fetch too (exclude_none)
+        assert opts["prem_proxy_options"] == {"ip_filter": "quality-security"}
+
+    def test_empty_for_none(self):
+        from src.api.map import _proxy_scrape_options
+        assert _proxy_scrape_options(_req()) == {}

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 from fastapi import HTTPException
 
+from src.queue.store import get_job_store
+from src.queue.tasks import LOGIN_PAYLOAD_KEY, LOGIN_RESULT_KEY, LOGIN_KEY_TTL_S, login_task
 from src.sessions.models import (
     SessionCookieInjection,
     SessionCreateRequest,
@@ -14,8 +17,8 @@ from src.sessions.models import (
     SessionRecord,
 )
 from src.sessions.store import SessionIncompatible, get_session_store
+from src.settings import settings
 from src.utils.ids import new_request_id
-from src.worker_pool import worker_pool
 
 
 class StorageStateNotRevealed(ValueError):
@@ -23,6 +26,18 @@ class StorageStateNotRevealed(ValueError):
 
 
 log = logging.getLogger(__name__)
+
+_LOGIN_POLL_INTERVAL_S = 0.3
+
+
+def _loop_time() -> float:
+    """Monotonic clock seam (patchable in tests for a deterministic poll loop)."""
+    return asyncio.get_running_loop().time()
+
+
+async def _poll_sleep(seconds: float) -> None:
+    """Poll-interval sleep seam (patchable in tests to drive a virtual clock)."""
+    await asyncio.sleep(seconds)
 
 
 class SessionService:
@@ -63,13 +78,12 @@ class SessionService:
     async def login(self, session_id: str, body: SessionLoginRequest) -> SessionLoginResult:
         store = get_session_store()
         session_record = await store.get(session_id)
+        job_store = get_job_store()
 
         async with store.lock(session_id):
             await store.set_status(session_id, "logging_in", login_script=body.script)
-
-            job = {
-                "type": "login",
-                "job_id": new_request_id(),
+            login_id = new_request_id()
+            payload = {
                 "session_pin": {
                     "device": session_record.device,
                     "proxy_type": session_record.proxy_type,
@@ -84,13 +98,41 @@ class SessionService:
                 "storage_state": session_record.storage_state,
             }
             try:
-                worker_result = await worker_pool.submit(job)
-            except asyncio.TimeoutError as exc:
-                await store.set_status(session_id, "failed", last_error="login timed out")
-                raise HTTPException(status_code=504, detail="login_timed_out") from exc
-            except Exception as exc:  # pylint: disable=broad-except
-                await store.set_status(session_id, "failed", last_error=f"submit failed: {exc}")
+                await job_store.client.set(
+                    LOGIN_PAYLOAD_KEY.format(login_id),
+                    json.dumps(payload), ex=LOGIN_KEY_TTL_S,
+                )
+                await login_task.kiq(login_id)
+            except Exception as exc:  # noqa: BLE001 — don't leave the session stuck in logging_in
+                await store.set_status(session_id, "failed", last_error=f"login enqueue failed: {exc}")
                 raise
+
+            # Wait past the worker's own timeout by a grace margin: the worker
+            # measures login_task_timeout_s from task pickup, we measure from
+            # enqueue, so without slack a slow-but-successful login finishes just
+            # after our deadline → 504 + session marked failed + storage_state lost.
+            deadline = (
+                _loop_time()
+                + settings.login_task_timeout_s
+                + settings.login_result_grace_s
+            )
+            raw = None
+            while _loop_time() < deadline:
+                raw = await job_store.client.getdel(LOGIN_RESULT_KEY.format(login_id))
+                if raw is not None:
+                    break
+                await _poll_sleep(_LOGIN_POLL_INTERVAL_S)
+            if raw is None:
+                # Residual (accepted bound): if pickup skew exceeds the grace —
+                # e.g. the task sat behind a backlog and the worker started it
+                # >grace after enqueue — a later-successful login still 504s here
+                # and its storage_state (written to LOGIN_RESULT_KEY, TTL'd) is
+                # dropped. The worker is intentionally not a session writer (API
+                # is sole writer); widening this needs a different design.
+                await store.set_status(session_id, "failed", last_error="login timed out")
+                raise HTTPException(status_code=504, detail="login_timed_out")
+
+            worker_result = json.loads(raw)
 
             if not worker_result.get("ok", False):
                 error = worker_result.get("error", "worker_failed")

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.app import create_app
+from src.queue.store import get_job_store
+from src.queue.tasks import LOGIN_RESULT_KEY
 from src.sessions.store import (
     SessionExpired,
     SessionIncompatible,
@@ -67,9 +70,7 @@ class TestGetSession:
 class TestScrapeWithSessionId:
     def test_scrape_with_unknown_session_returns_404(self, client, mock_store, mocker):
         mock_store.get = AsyncMock(side_effect=SessionNotFound("sess_x"))
-        queue = AsyncMock()
-        queue.submit = AsyncMock(return_value="job_xx")
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
 
         response = client.post(
             "/api/v1/scrape/page",
@@ -115,18 +116,27 @@ class TestLoginSession:
         mock_store.set_status = AsyncMock()
         mock_store.update_storage_state = AsyncMock()
 
-        # Real Lock for the lock() call
         import asyncio as _asyncio
         real_lock = _asyncio.Lock()
         mock_store.lock = lambda session_id: real_lock
 
-        async def fake_submit(job, *, job_timeout_ms=None):
-            return {
-                "ok": True,
-                "login_result": SessionLoginResult(ok=True, took_ms=42).model_dump(),
-                "storage_state": {"cookies": [{"name": "sid", "value": "a"}], "origins": []},
-            }
-        mocker.patch("src.sessions.service.worker_pool.submit", new=fake_submit)
+        # Stub login_task.kiq: the task won't actually run; instead we
+        # pre-populate the result key so the polling loop finds it immediately.
+        worker_result = {
+            "ok": True,
+            "login_result": SessionLoginResult(ok=True, took_ms=42).model_dump(),
+            "storage_state": {"cookies": [{"name": "sid", "value": "a"}], "origins": []},
+        }
+
+        async def fake_kiq(login_id):
+            job_store = get_job_store()
+            await job_store.client.set(
+                LOGIN_RESULT_KEY.format(login_id),
+                json.dumps(worker_result),
+                ex=600,
+            )
+
+        mocker.patch("src.sessions.service.login_task.kiq", new=fake_kiq)
 
         response = client.post("/api/v1/sessions/sess_x/login", json={
             "script": {"steps": [{"op": "goto", "url": "https://x.com"}]},
@@ -136,6 +146,58 @@ class TestLoginSession:
         data = response.json()
         assert data["ok"] is True
         assert data["took_ms"] == 42
+        mock_store.update_storage_state.assert_awaited_once()
+
+    def test_login_slow_but_successful_is_not_timed_out(self, client, mock_store, mocker):
+        """A login that completes just after login_task_timeout_s (worker picked
+        it up late or it ran slow) must still be consumed, not 504'd with its
+        storage_state lost. The API wait deadline carries a grace margin beyond
+        the worker timeout to absorb queue-pickup skew."""
+        from src.sessions.models import SessionRecord, SessionLoginResult
+        from src.sessions import service as svc
+
+        session_record = SessionRecord(
+            session_id="sess_x", status="created",
+            created_at=1.0, expires_at=86401.0, last_used_at=1.0,
+            device="desktop", proxy_type="none",
+        )
+        mock_store.get = AsyncMock(return_value=session_record)
+        mock_store.set_status = AsyncMock()
+        mock_store.update_storage_state = AsyncMock()
+        import asyncio as _asyncio
+        real_lock = _asyncio.Lock()
+        mock_store.lock = lambda session_id: real_lock
+
+        mocker.patch.object(svc.settings, "login_task_timeout_s", 10.0)
+
+        worker_result = {
+            "ok": True,
+            "login_result": SessionLoginResult(ok=True, took_ms=11000).model_dump(),
+            "storage_state": {"cookies": [], "origins": []},
+        }
+        result_json = json.dumps(worker_result)
+
+        # Virtual clock: each poll sleep advances it; the worker result becomes
+        # available at t=12 — past the 10s worker timeout but within the grace.
+        vclock = [0.0]
+        mocker.patch("src.sessions.service._loop_time", side_effect=lambda: vclock[0])
+
+        async def fake_sleep(seconds):
+            vclock[0] += seconds
+        mocker.patch("src.sessions.service._poll_sleep", new=fake_sleep)
+
+        async def fake_getdel(key):
+            return result_json if vclock[0] >= 12.0 else None
+        mocker.patch("src.sessions.service.login_task.kiq", new=AsyncMock())
+        mocker.patch.object(get_job_store().client, "set", new=AsyncMock())
+        mocker.patch.object(get_job_store().client, "getdel", side_effect=fake_getdel)
+
+        response = client.post("/api/v1/sessions/sess_x/login", json={
+            "script": {"steps": [{"op": "goto", "url": "https://x.com"}]},
+            "creds": {"email": "u", "password": "p"},
+        })
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
         mock_store.update_storage_state.assert_awaited_once()
 
     def test_login_failure_sets_failed_status(self, client, mock_store, mocker):
@@ -152,15 +214,23 @@ class TestLoginSession:
         real_lock = _asyncio.Lock()
         mock_store.lock = lambda session_id: real_lock
 
-        async def fake_submit(job, *, job_timeout_ms=None):
-            return {
-                "ok": True,
-                "login_result": SessionLoginResult(
-                    ok=False, failed_step_index=1, error="selector not found",
-                ).model_dump(),
-                "storage_state": None,
-            }
-        mocker.patch("src.sessions.service.worker_pool.submit", new=fake_submit)
+        worker_result = {
+            "ok": True,
+            "login_result": SessionLoginResult(
+                ok=False, failed_step_index=1, error="selector not found",
+            ).model_dump(),
+            "storage_state": None,
+        }
+
+        async def fake_kiq(login_id):
+            job_store = get_job_store()
+            await job_store.client.set(
+                LOGIN_RESULT_KEY.format(login_id),
+                json.dumps(worker_result),
+                ex=600,
+            )
+
+        mocker.patch("src.sessions.service.login_task.kiq", new=fake_kiq)
 
         response = client.post("/api/v1/sessions/sess_x/login", json={
             "script": {"steps": [{"op": "goto", "url": "https://x.com"}]},
@@ -176,9 +246,7 @@ class TestLoginSession:
 
 class TestBatchScrapeWithSession:
     def test_batch_session_id_conflicts_with_page_returns_422(self, client, mock_store, mocker):
-        queue = AsyncMock()
-        queue.submit = AsyncMock(return_value="job_xx")
-        mocker.patch("src.scrape_service.get_job_queue", return_value=queue)
+        mocker.patch("src.scrape_service.scrape_page_task.kiq", new=AsyncMock())
 
         response = client.post("/api/v1/scrape/pages", json={
             "session_id": "sess_batch",
