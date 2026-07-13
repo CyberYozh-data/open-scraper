@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] - 2026-07-13
+
+Maintenance release: tighter anti-bot fingerprinting, premium-proxy routing for
+SERP/marketplace presets, and crawler fixes. The public HTTP API contract is
+unchanged.
+
+### Changed
+
+- Client Hints (`Sec-CH-UA*`) and WebGL vendor/renderer are now aligned with the
+  rest of the browser fingerprint, so they no longer contradict the spoofed
+  platform.
+- SERP and marketplace presets route through the premium proxy by default;
+  presets migrated from `res_rotating` to `prem_res_rotating` (`amazon_product`,
+  `amazon_search`, `bing_search`, `ebay_search`, `google_search`,
+  `google_shopping`, `linkedin_profile`, `walmart_product`, `youtube_video`).
+- Premium proxy v2 hardening: `provider_v2`, the username builder and the
+  resolver, with schema tightening in `proxy/base` and `schemas`.
+- Tester UI surfaces the applied parameters and request payload alongside the
+  proxy/warmup controls.
+
+### Fixed
+
+- Crawler dedup and scope fixes (`dedup`, `scope`, `engine`) and `/map`.
+
 ## [0.1.0] - 2026-07-09
 
 First tagged public release. Yozh Scraper becomes a horizontally scalable,
