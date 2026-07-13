@@ -19,7 +19,7 @@ from .schemas import (
     CrawlStats,
     ScrapeProxyType,
 )
-from .scope import CompositeScope
+from .scope import CompositeScope, strip_www
 from .session import ManagedSession
 from .settings import Settings
 
@@ -109,7 +109,10 @@ class CrawlEngine:
             lambda: asyncio.Semaphore(max(1, request.scope.per_domain_concurrency))
         )
 
-        seed_domain = (urlparse(str(request.seed_url)).hostname or "").lower()
+        # Politeness state (rps bucket, semaphore, 429 throttle) is keyed by
+        # the de-www'd host: same-domain scope treats www.X and X as one site,
+        # so they must also share one rate-limit budget.
+        seed_domain = strip_www((urlparse(str(request.seed_url)).hostname or "").lower())
         if seed_domain:
             self._limiter.set_rps(seed_domain, request.scope.per_domain_rps)
 
@@ -194,7 +197,7 @@ class CrawlEngine:
 
     # ──────────────────────────────────────────────────────────────────────
     async def _process(self, page_request: Request) -> None:
-        domain = (urlparse(page_request.url).hostname or "").lower()
+        domain = strip_www((urlparse(page_request.url).hostname or "").lower())
         domain_semaphore = self._per_domain_semas[domain]
 
         async with domain_semaphore:

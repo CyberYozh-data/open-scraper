@@ -5,6 +5,8 @@ import string
 from dataclasses import dataclass
 from typing import Any
 
+from src.proxy.base import ProxyConfigError
+
 _STICKY_ALPHABET = string.ascii_letters + string.digits
 
 # ip_filter enum -> username suffix token (no leading dash). max-size = omitted.
@@ -66,14 +68,28 @@ def gen_sticky_id(n: int = 8) -> str:
     return "".join(secrets.choice(_STICKY_ALPHABET) for _ in range(n))
 
 
-def _find_suffix(items: list[dict[str, Any]], *, key: str, value: str) -> str:
+def _find_suffix(
+    items: list[dict[str, Any]], *, key: str, value: str, field: str, country: str
+) -> str:
+    """`field`/`country` are for the error messages only — they name the
+    request field being resolved (region/city/isp/zip) and the country the
+    catalog lookup ran under, since the message reaches clients verbatim
+    (422 detail on /resolve, `error` on results)."""
     target = str(value).strip().lower()
+    matched_without_suffix = False
     for item in items:
         if str(item.get(key, "")).strip().lower() == target:
             suffix = item.get("suffix")
             if suffix:
                 return str(suffix)
-    raise ValueError(f"no v2 geo suffix for {key}={value!r}")
+            matched_without_suffix = True
+    if matched_without_suffix:
+        # The catalog knows the name but the entry carries no suffix —
+        # upstream data breakage, not user input (RuntimeError → 502).
+        raise RuntimeError(
+            f"v2 catalog entry for {field} {value!r} (country {country!r}) has no suffix"
+        )
+    raise ProxyConfigError(f"unknown {field} {value!r} for country {country!r} in the v2 geo catalog")
 
 
 async def resolve_geo_parts(
@@ -104,23 +120,28 @@ async def resolve_geo_parts(
     if zip_code and country_code and city:
         # zip lookup is scoped by city in the v2 API
         zips = await client.geo_zips(country_code, city)
-        parts.zip_suffix = _find_suffix(zips, key="zip", value=zip_code)
+        parts.zip_suffix = _find_suffix(
+            zips, key="zip", value=zip_code, field="zip", country=country_code)
     elif zip_code and country_code:
         # best-effort: some accounts allow zip without a city scope
         zips = await client.geo_zips(country_code, "")
-        parts.zip_suffix = _find_suffix(zips, key="zip", value=zip_code)
+        parts.zip_suffix = _find_suffix(
+            zips, key="zip", value=zip_code, field="zip", country=country_code)
     else:
         if region and country_code:
             regions = await client.geo_regions(country_code)
-            parts.region_suffix = _find_suffix(regions, key="name", value=region)
+            parts.region_suffix = _find_suffix(
+                regions, key="name", value=region, field="region", country=country_code)
         if city and country_code:
             cities = await client.geo_cities(country_code)
-            parts.city_suffix = _find_suffix(cities, key="name", value=city)
+            parts.city_suffix = _find_suffix(
+                cities, key="name", value=city, field="city", country=country_code)
 
     isp = opts.get("isp")
     if isp and country_code:
         isps = await client.geo_isps(country_code)
-        parts.isp_suffix = _find_suffix(isps, key="name", value=isp)
+        parts.isp_suffix = _find_suffix(
+            isps, key="name", value=isp, field="isp", country=country_code)
 
     parts.filter_suffix = IP_FILTER_SUFFIX.get(opts.get("ip_filter", "max-size-security"))
 

@@ -15,6 +15,7 @@ from taskiq import Context, TaskiqDepends
 
 from src.browser.camoufox_runner import CamoufoxRunner
 from src.browser.login_runner import LoginRunner
+from src.proxy.base import ProxyConfigError
 from src.proxy.resolver import proxy_resolver
 from src.queue import scrape_runner
 from src.queue.broker import broker
@@ -62,6 +63,9 @@ def make_error_payload(page: dict[str, Any], error: str) -> dict[str, Any]:
             # ScrapeMeta default of True.
             "fetch_ok": False,
         },
+        # First-class reason for clients; kept in warnings too so readers
+        # that predate the `error` field still see it.
+        "error": error,
         "warnings": [error],
     }
 
@@ -313,6 +317,11 @@ async def _run_login(runner, job: dict[str, Any]) -> dict[str, Any]:
             "login_result": result.model_dump(),
             "storage_state": new_state,
         }
+    except ProxyConfigError as exc:
+        # User input (unsatisfiable proxy targeting in the session pin), not a
+        # code failure — no traceback-bearing crash envelope.
+        log.warning("proxy config error in login: %s", exc)
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     except Exception as exc:  # pylint: disable=broad-except
         err_text = str(exc)
         tb_text = traceback.format_exc(limit=20)

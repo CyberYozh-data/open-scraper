@@ -6,6 +6,22 @@ from urllib.parse import urlparse
 from .schemas import CrawlScope
 
 
+def strip_www(host: str) -> str:
+    """``www.example.com`` is an alias of ``example.com``, not a distinct
+    site: www-canonical sites 301 the bare domain to ``www.`` (and vice
+    versa), so a seed on one host discovers every link on the other. Exactly
+    one leading ``www.`` label is stripped, and only when the remainder still
+    contains a dot — a degenerate seed (``www.com``, single-label hosts) must
+    not pair two unrelated owners. The alias is unified everywhere identity
+    matters: scope decisions, per-domain rate-limiting (engine), and dedup
+    fingerprints — while emitted URLs always keep their original spelling."""
+    if host.startswith("www."):
+        rest = host[4:]
+        if "." in rest:
+            return rest
+    return host
+
+
 class CompositeScope:
     """Decides whether a discovered URL is in-scope for the crawl.
 
@@ -16,6 +32,7 @@ class CompositeScope:
         self._scope = scope
         seed = urlparse(str(seed_url))
         self._seed_host = (seed.hostname or "").lower()
+        self._seed_host_dewww = strip_www(self._seed_host)
         self._seed_reg_domain = self._registrable(self._seed_host)
         self._includes = [re.compile(p) for p in scope.include_patterns]
         self._excludes = [re.compile(p) for p in scope.exclude_patterns]
@@ -38,7 +55,7 @@ class CompositeScope:
         if mode == "all":
             return True
         if mode == "same-domain":
-            return host == self._seed_host
+            return strip_www(host) == self._seed_host_dewww
         if mode == "subdomains":
             return host == self._seed_host or host.endswith("." + self._seed_reg_domain) or host == self._seed_reg_domain
         if mode == "regex":

@@ -487,6 +487,16 @@ class ScrapeResponse(BaseModel):
         ),
     )
     warnings: list[str] = Field(default_factory=list)
+    error: str | None = Field(
+        default=None,
+        description=(
+            "Why the page produced no result (proxy configuration error, "
+            "worker timeout, session failure, cancelled job slots). None on "
+            "success and on degraded-but-structured fetches (those report via "
+            "meta.fetch_ok and warnings). Also duplicated into warnings for "
+            "older clients."
+        ),
+    )
 
 
 class BatchScrapeRequest(BaseModel):

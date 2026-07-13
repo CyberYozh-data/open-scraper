@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from src.proxy.cyberyozh.provider_v2 import PremProxyProvider, PremProxySession
-from src.proxy.base import ProxyFailure
+from src.proxy.base import ProxyConfigError, ProxyFailure
 
 
 def _client():
@@ -79,6 +79,22 @@ async def test_session_recover_rotates_and_retries():
     ok = await session.on_failure(ProxyFailure(status_code=403, error="blocked"))
     assert ok is True
     assert session.current_proxy() is not None
+
+
+@pytest.mark.asyncio
+async def test_recover_propagates_config_error():
+    # recover() must not swallow ProxyConfigError into (lease, False): the
+    # request itself is unsatisfiable, so the typed error has to reach the
+    # worker's classification even if the geo cache is ever invalidated.
+    c = _client()
+    c.geo_regions.return_value = [{"code": 8, "name": "Ontario", "suffix": "r-8"}]
+    provider = PremProxyProvider(
+        client=c, proxy_geo={"country_code": "CA", "region": "Dagestan"}, prem_opts={},
+    )
+    with pytest.raises(ProxyConfigError):
+        await provider.recover(
+            lease=None, failure=ProxyFailure(status_code=None, error="timeout")
+        )
 
 
 @pytest.mark.asyncio

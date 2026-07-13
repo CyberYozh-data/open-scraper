@@ -43,6 +43,13 @@ _SITEMAP = (
     "</urlset>"
 )
 _SEED_HTML = '<html><body><a href="/p1">1</a><a href="https://x.com/p2">2</a></body></html>'
+_SITEMAP_WWW = (
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+    "<url><loc>https://www.x.com/</loc></url>"  # twin of the seed -> deduped
+    "<url><loc>https://www.x.com/a</loc></url>"
+    "<url><loc>https://y.com/evil</loc></url>"  # other domain -> still out of scope
+    "</urlset>"
+)
 _SITEMAP_DATED = (
     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
     "<url><loc>https://x.com/old</loc><lastmod>2020-01-01</lastmod></url>"
@@ -68,6 +75,16 @@ class TestBuildMap:
         assert res.urls == ["https://x.com/", "https://x.com/a"]
         assert res.stats.from_sitemap == 3
         assert res.stats.unique_in_scope == 2
+
+    @pytest.mark.asyncio
+    async def test_sitemap_www_alias_urls_stay_in_scope(self):
+        # www-canonical site, bare-domain seed: the sitemap lists www URLs;
+        # same-domain scope must keep them (they are the same site).
+        client = _StubClient({"https://x.com/sitemap.xml": _Resp(200, _SITEMAP_WWW)})
+        res = await build_map(
+            _req(include_page_links=False), http_client=client, scraper_fetch=None
+        )
+        assert res.urls == ["https://x.com/", "https://www.x.com/a"]
 
     @pytest.mark.asyncio
     async def test_published_after_filters_by_lastmod(self):

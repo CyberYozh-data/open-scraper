@@ -4,6 +4,7 @@ import re
 import pytest
 from unittest.mock import AsyncMock
 
+from src.proxy.base import ProxyConfigError
 from src.proxy.cyberyozh.username import (
     UsernameParts,
     assemble_username,
@@ -108,3 +109,38 @@ async def test_resolve_sticky_autogenerates_id_and_ttl():
     )
     assert parts.session_suffix and parts.session_suffix.startswith("s-")
     assert parts.ttl_suffix == "ttl-10m"
+
+
+@pytest.mark.asyncio
+async def test_resolve_unknown_region_raises_config_error():
+    # A region name that doesn't exist under the requested country (stale UI
+    # state, e.g. CA + Dagestan) must raise the typed ProxyConfigError. The
+    # message is client-facing (422 detail / result error) — it has to name
+    # the rejected field and the country the lookup ran under.
+    client = AsyncMock()
+    client.geo_regions.return_value = [{"code": 8, "name": "Ontario", "suffix": "r-8"}]
+    with pytest.raises(ProxyConfigError) as exc_info:
+        await resolve_username_parts(
+            client,
+            real_login="RL",
+            proxy_geo={"country_code": "CA", "region": "Dagestan"},
+            prem_opts=None,
+        )
+    msg = str(exc_info.value)
+    assert "region" in msg and "Dagestan" in msg and "CA" in msg
+
+
+@pytest.mark.asyncio
+async def test_resolve_catalog_entry_without_suffix_is_not_a_user_error():
+    # The catalog KNOWS the name but the entry carries no suffix — upstream
+    # data breakage, not user input: RuntimeError (→ 502), not ProxyConfigError.
+    client = AsyncMock()
+    client.geo_regions.return_value = [{"code": 5, "name": "Dagestan"}]
+    with pytest.raises(RuntimeError) as exc_info:
+        await resolve_username_parts(
+            client,
+            real_login="RL",
+            proxy_geo={"country_code": "RU", "region": "Dagestan"},
+            prem_opts=None,
+        )
+    assert not isinstance(exc_info.value, ProxyConfigError)

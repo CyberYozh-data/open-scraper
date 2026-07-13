@@ -6,6 +6,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from fastapi import APIRouter, HTTPException
 from pydantic import ValidationError
 
+from src.proxy.base import ProxyConfigError
 from src.proxy.models import ProxyConfig
 from src.proxy.resolver import CyberYozhAPIError, proxy_resolver
 from src.schemas import (
@@ -137,6 +138,14 @@ async def resolve_proxy(
         proxy_url = await _resolve_upstream_proxy_url(
             proxy_type, proxy_pool_id, geo.country_code, geo.region, geo.city, prem_proxy_options
         )
+    except ProxyConfigError as exc:
+        # Well-formed params the catalog can't satisfy (e.g. a region name from
+        # another country) — user input, 422 like the validation above.
+        log.warning(
+            "proxy resolve rejected proxy_type=%s pool=%r geo=%r/%r/%r prem=%r: %s",
+            proxy_type, proxy_pool_id, country_code, region, city, prem_proxy_options, exc,
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (CyberYozhAPIError, RuntimeError) as exc:
         # open_session raises bare RuntimeError for ordinary conditions like a
         # depleted pool / empty rotating credentials (see cyberyozh/provider.py);

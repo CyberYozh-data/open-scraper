@@ -20,7 +20,7 @@ from src.browser.runner import (
 )
 from src.markdown_build import apply as apply_markdown, resolve_formats
 from src.presets.worker_parse import apply as apply_parser
-from src.proxy.base import ProxyFailure
+from src.proxy.base import ProxyConfigError, ProxyFailure
 from src.proxy.resolver import proxy_resolver
 from src.settings import settings
 
@@ -65,8 +65,9 @@ async def run_scrape(
 ) -> dict[str, Any]:
     """Returns the same envelope the old result_q message carried, WITHOUT the
     outer "job_id" key:
-      {"ok": True, "result": {...}, "storage_state": ...}  on success
-      {"ok": False, "error": str, "traceback": str}        on failure
+      {"ok": True, "result": {...}, "storage_state": ...}   on success
+      {"ok": False, "error": str[, "traceback": str]}       on failure
+        (traceback only for unexpected crashes, not user config errors)
     """
     start_time = time.perf_counter()
 
@@ -302,6 +303,15 @@ async def run_scrape(
                 "warnings": warnings,
             },
             "storage_state": fetch_result.storage_state,
+        }
+
+    except ProxyConfigError as e:
+        # User input, not a code failure — WARNING without traceback.
+        log.warning("proxy config error for request_id=%s: %s", request_id, e)
+        return {
+            "ok": False,
+            # Same "TypeName: message" shape the session errors use in tasks.py.
+            "error": f"{type(e).__name__}: {e}",
         }
 
     except Exception as e:

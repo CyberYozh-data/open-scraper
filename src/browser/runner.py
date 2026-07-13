@@ -8,6 +8,7 @@ import math
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional, Literal
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Error as PWError
@@ -30,6 +31,13 @@ _stealth = Stealth(
     webgl_renderer_override=(
         "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)"
     ),
+)
+
+# WebRTC leak-protection init script, kept as a standalone .js asset so it reads
+# and edits as JavaScript (syntax highlighting, no Python-string escaping of the
+# regex/backslashes). Loaded once at import; see the file for the full rationale.
+_WEBRTC_STEALTH_JS = (Path(__file__).resolve().parent / "webrtc_stealth.js").read_text(
+    encoding="utf-8"
 )
 
 
@@ -622,95 +630,12 @@ class PlaywrightRunner:
             or effective_headers.get("accept-language")
         )
 
-        # WebRTC leak protection. The Chromium launch flags above are not
-        # always effective in headless mode (verified: without this script the
-        # real IP still leaks via ICE), so also neutralise WebRTC at the JS
-        # level. We KEEP RTCPeerConnection present and NATIVE-LOOKING — a deleted
-        # API (`typeof RTCPeerConnection === 'undefined'`) and a hand-rolled
-        # wrapper (non-native `toString()` / missing `generateCertificate`) are
-        # each their own automation tell. The constructor is fronted by a Proxy
-        # that forwards every static/`toString`/`length`/`instanceof` to the
-        # native impl, while each instance drops the ICE candidates (`typ
-        # host|srflx|prflx`) that would expose the real host/server IP. Normal
-        # event semantics are preserved: add/removeEventListener symmetry, a
-        # single-slot `onicecandidate`, and the end-of-candidates null event.
+        # WebRTC leak protection, applied at the JS level because the Chromium
+        # launch flags aren't always effective in headless mode. The script is
+        # kept in webrtc_stealth.js (loaded as _WEBRTC_STEALTH_JS); see that file
+        # for why the API is preserved native-looking rather than deleted.
         if settings.webrtc_block:
-            await context.add_init_script("""
-                (() => {
-                  const Orig = window.RTCPeerConnection || window.webkitRTCPeerConnection;
-                  if (Orig) {
-                    const LEAKY = /\\btyp\\s+(host|srflx|prflx)\\b/i;
-                    const isLeaky = (c) => !!c && LEAKY.test(c);
-                    const patch = (pc) => {
-                      const wrap = new WeakMap();
-                      const guardFor = (cb) => {
-                        let g = wrap.get(cb);
-                        if (!g) {
-                          g = (ev) => {
-                            if (ev && ev.candidate && isLeaky(ev.candidate.candidate)) return;
-                            return cb.call(pc, ev);
-                          };
-                          wrap.set(cb, g);
-                        }
-                        return g;
-                      };
-                      const rawAdd = EventTarget.prototype.addEventListener.bind(pc);
-                      const rawRemove = EventTarget.prototype.removeEventListener.bind(pc);
-                      Object.defineProperty(pc, 'addEventListener', {
-                        configurable: true, writable: true,
-                        value(type, cb, ...rest) {
-                          if (type === 'icecandidate' && typeof cb === 'function') {
-                            return rawAdd(type, guardFor(cb), ...rest);
-                          }
-                          return rawAdd(type, cb, ...rest);
-                        },
-                      });
-                      Object.defineProperty(pc, 'removeEventListener', {
-                        configurable: true, writable: true,
-                        value(type, cb, ...rest) {
-                          if (type === 'icecandidate' && typeof cb === 'function' && wrap.has(cb)) {
-                            return rawRemove(type, wrap.get(cb), ...rest);
-                          }
-                          return rawRemove(type, cb, ...rest);
-                        },
-                      });
-                      let slot = null, slotWrapped = null;
-                      Object.defineProperty(pc, 'onicecandidate', {
-                        configurable: true, enumerable: true,
-                        get() { return slot; },
-                        set(cb) {
-                          if (slotWrapped) rawRemove('icecandidate', slotWrapped);
-                          slot = (typeof cb === 'function') ? cb : null;
-                          slotWrapped = slot ? guardFor(slot) : null;
-                          if (slotWrapped) rawAdd('icecandidate', slotWrapped);
-                        },
-                      });
-                      return pc;
-                    };
-                    const handler = {
-                      construct(target, args) { return patch(Reflect.construct(target, args, target)); },
-                      get(target, prop, recv) {
-                        // Keep Function.prototype.toString native-looking ([native
-                        // code]); forward everything else unchanged so static
-                        // members keep their native identity and .name (binding
-                        // them would expose "bound generateCertificate" etc.).
-                        if (prop === 'toString') return target.toString.bind(target);
-                        return Reflect.get(target, prop, recv);
-                      },
-                    };
-                    const Proxied = new Proxy(Orig, handler);
-                    try { Orig.prototype.constructor = Proxied; } catch (_) {}
-                    try { window.RTCPeerConnection = Proxied; } catch (_) {}
-                    try { if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = Proxied; } catch (_) {}
-                  }
-                  if (navigator.mediaDevices) {
-                    try {
-                      navigator.mediaDevices.getUserMedia = () =>
-                        Promise.reject(new DOMException('Permission denied', 'NotAllowedError'));
-                    } catch (_) {}
-                  }
-                })();
-            """)
+            await context.add_init_script(_WEBRTC_STEALTH_JS)
 
         effective_block_assets = self.block_assets if block_assets is None else block_assets
         if effective_block_assets:
@@ -821,7 +746,9 @@ class PlaywrightRunner:
                             "userAgentMetadata": ua_metadata,
                         })
                 except Exception as exc:  # pylint: disable=broad-except
-                    log.debug("Client-Hints override failed: %s", exc)
+                    # Anti-bot-relevant: a silent no-op re-leaks "HeadlessChrome"
+                    # in Sec-CH-UA and gets scrapes blocked, so surface it.
+                    log.warning("Client-Hints override failed (Sec-CH-UA may leak HeadlessChrome): %s", exc)
         except BaseException:
             await _teardown()
             raise
