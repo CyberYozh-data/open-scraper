@@ -6,7 +6,7 @@
   "url_template": "https://www.bing.com/search?q={query}&cc={country}&setlang={lang}",
   "request_defaults": {
     "device": "desktop",
-    "proxy_type": "res_rotating",
+    "proxy_type": "prem_res_rotating",
     "stealth": false,
     "wait_until": "domcontentloaded",
     "timeout_ms": 30000,

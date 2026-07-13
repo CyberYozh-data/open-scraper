@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis.aioredis
 import pytest
 import pytest_asyncio
 
 import src.queue.store as store_mod
+from src.proxy.base import ProxyConfigError
 from src.queue import tasks
 from src.queue.broker import broker
 from src.queue.store import RedisJobStore, pack_payload, unpack_payload
@@ -73,8 +74,35 @@ async def test_task_failure_becomes_error_slot(store, monkeypatch):
     snap = await store.get_full(job_id)
     assert snap.status == "done"
     assert "browser exploded" in (snap.results[0].warnings or [])
+    # The reason must also be a first-class result field — clients need
+    # something structured to display, not only a warnings entry.
+    assert snap.results[0].error == "browser exploded"
     # Hard worker failure must report fetch_ok=False, not inherit the True default.
     assert snap.results[0].meta.fetch_ok is False
+
+
+async def test_login_config_error_classified_without_traceback(monkeypatch):
+    # A session pin with unsatisfiable proxy targeting is the same user-input
+    # class the scrape path reports — no traceback-bearing crash envelope.
+    monkeypatch.setattr(
+        tasks.proxy_resolver, "open_session",
+        AsyncMock(side_effect=ProxyConfigError("no v2 geo suffix for name='Dagestan'")),
+    )
+    runner = MagicMock()
+    runner.start = AsyncMock()
+    envelope = await tasks._run_login(runner, {
+        "session_pin": {
+            "proxy_type": "prem_res_rotating",
+            "proxy_geo": {"country_code": "CA", "region": "Dagestan"},
+            "device": "desktop",
+        },
+        "script": {}, "creds": {},
+    })
+    assert envelope["ok"] is False
+    # Same "TypeName: message" format the session errors use.
+    assert envelope["error"].startswith("ProxyConfigError:")
+    assert "Dagestan" in envelope["error"]
+    assert "traceback" not in envelope
 
 
 async def test_task_noops_on_cancelled_job(store, scrape_ok):

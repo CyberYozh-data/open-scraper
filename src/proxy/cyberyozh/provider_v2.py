@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.proxy.base import ProxyFailure, ProxyLease, ProxySession
+from src.proxy.base import ProxyConfigError, ProxyFailure, ProxyLease, ProxySession
 from src.proxy.cyberyozh.client_v2 import CyberYozhV2Client
 from src.proxy.cyberyozh.username import (
     UsernameParts,
@@ -116,6 +116,10 @@ class PremProxyProvider:
             self.prem_opts = opts
         try:
             return await self.acquire(), True
+        except ProxyConfigError:
+            # Unsatisfiable request — must reach the worker's classification,
+            # not degrade into a generic "recover failed".
+            raise
         except Exception as exc:  # pylint: disable=broad-except
             log.error("prem recover failed: %s", exc)
             return lease, False

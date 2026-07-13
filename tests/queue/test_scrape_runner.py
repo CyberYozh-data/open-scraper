@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.proxy.base import ProxyConfigError
 from src.queue.scrape_runner import looks_like_proxy_failure, run_scrape
 
 pytestmark = pytest.mark.asyncio
@@ -88,6 +90,25 @@ async def test_run_scrape_surfaces_fetch_failure_in_meta(monkeypatch):
     )
     assert out["ok"] is True  # envelope still carries a structured result
     assert out["result"]["meta"]["fetch_ok"] is False
+
+
+async def test_run_scrape_classifies_proxy_config_error(monkeypatch, caplog):
+    """An invalid proxy configuration (e.g. a region name from another country)
+    is user input, not a code failure: the envelope must carry a clear error
+    message and the log must stay at WARNING — no 'unexpected error' ERROR."""
+    monkeypatch.setattr(
+        "src.queue.scrape_runner.proxy_resolver.open_session",
+        AsyncMock(side_effect=ProxyConfigError("no v2 geo suffix for name='Dagestan'")),
+    )
+    with caplog.at_level(logging.WARNING, logger="src.queue.scrape_runner"):
+        out = await run_scrape(
+            MagicMock(), "req_cfg",
+            {"url": "https://e.com", "device": "desktop", "proxy_type": "prem_res_rotating"},
+            storage_state=None,
+        )
+    assert out["ok"] is False
+    assert out["error"].startswith("ProxyConfigError:") and "Dagestan" in out["error"]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
 async def test_run_scrape_rotates_proxy_on_captcha(monkeypatch):

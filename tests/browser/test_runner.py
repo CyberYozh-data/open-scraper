@@ -4,7 +4,9 @@ import pytest
 from unittest.mock import Mock, AsyncMock, MagicMock, call, patch
 import base64
 
-from src.browser.runner import PlaywrightRunner, FetchResult, DESKTOP, MOBILE, classify_fetch
+from src.browser.runner import (
+    PlaywrightRunner, FetchResult, DESKTOP, MOBILE, classify_fetch, _chrome_ua_metadata,
+)
 from src.proxy.models import ProxyConfig
 from playwright.async_api import Error as PWError
 
@@ -1101,36 +1103,30 @@ class TestClassifyFetch:
 
 
 class TestChromeUaMetadata:
-    """Client-Hints metadata built for Emulation.setUserAgentOverride so the
-    Sec-CH-UA header matches the spoofed UA and never leaks 'HeadlessChrome'."""
-
-    def test_desktop_windows_chrome_ua(self):
-        from src.browser.runner import _chrome_ua_metadata
-        meta = _chrome_ua_metadata(DESKTOP["user_agent"])
-        assert meta is not None
-        assert meta["platform"] == "Windows"
-        assert meta["mobile"] is False
-        brand_names = [b["brand"] for b in meta["brands"]]
-        # No automation tell, and the real Chrome brands are present.
-        assert "HeadlessChrome" not in brand_names
-        assert "Google Chrome" in brand_names and "Chromium" in brand_names
-        # Version aligns with the UA's Chrome major (124 in the shipped preset).
-        assert all(b["version"] == "124" for b in meta["brands"]
-                   if b["brand"] in ("Chromium", "Google Chrome"))
-
-    def test_mobile_safari_ua_returns_none(self):
-        # The mobile preset is an iPhone Safari UA — it does not send Sec-CH-UA,
-        # so there is nothing to align and we must skip (return None).
-        from src.browser.runner import _chrome_ua_metadata
-        assert _chrome_ua_metadata(MOBILE["user_agent"]) is None
+    """Client-Hints metadata builder that drops the HeadlessChrome Sec-CH-UA tell."""
 
     def test_non_chrome_ua_returns_none(self):
-        from src.browser.runner import _chrome_ua_metadata
-        assert _chrome_ua_metadata("Mozilla/5.0 (X11; Linux) Firefox/128.0") is None
+        # iPhone Safari (the mobile preset UA) sends no Sec-CH-UA at all.
+        assert _chrome_ua_metadata(MOBILE["user_agent"]) is None
+        assert _chrome_ua_metadata("Mozilla/5.0 (X11; Linux) Gecko/20100101 Firefox/125.0") is None
 
-    def test_platform_follows_ua(self):
-        from src.browser.runner import _chrome_ua_metadata
-        mac = _chrome_ua_metadata(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-        assert mac is not None and mac["platform"] == "macOS"
+    def test_windows_chrome_desktop_preset(self):
+        md = _chrome_ua_metadata(DESKTOP["user_agent"])
+        assert md is not None
+        assert md["platform"] == "Windows"
+        assert md["mobile"] is False
+        assert md["architecture"] == "x86" and md["bitness"] == "64"
+        brands = {b["brand"]: b["version"] for b in md["brands"]}
+        assert brands["Google Chrome"] == "124" and brands["Chromium"] == "124"
+        # fullVersionList mirrors brands with a full X.0.0.0 version
+        fv = {b["brand"]: b["version"] for b in md["fullVersionList"]}
+        assert fv["Google Chrome"] == "124.0.0.0"
+
+    def test_platform_mapping(self):
+        mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        android = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        linux = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        assert _chrome_ua_metadata(mac)["platform"] == "macOS"
+        amd = _chrome_ua_metadata(android)
+        assert amd["platform"] == "Android" and amd["mobile"] is True
+        assert _chrome_ua_metadata(linux)["platform"] == "Linux"

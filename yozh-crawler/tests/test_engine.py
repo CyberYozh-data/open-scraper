@@ -64,6 +64,37 @@ def _make_engine(
 # ─── basic crawl ──────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
+async def test_www_alias_pages_share_seed_rate_limit_bucket():
+    # www-canonical site behind a bare seed: www pages must inherit the
+    # seed's per_domain_rps bucket (and semaphore), not a fresh default-rps
+    # one — the alias is one physical server.
+    seed_html = '<html><body><a href="https://www.example.com/a">a</a></body></html>'
+    engine, pages, _, _ = _make_engine(
+        scope_kwargs={"max_pages": 5, "per_domain_rps": 250.0},
+        fetch_return=_scrape(raw_html=seed_html),
+    )
+    await asyncio.wait_for(engine.run(), timeout=5.0)
+
+    assert len(pages) == 2  # seed + the www-alias page
+    snap = engine._limiter.snapshot()
+    assert "www.example.com" not in snap
+    assert snap["example.com"]["rps"] == 250.0
+
+
+@pytest.mark.asyncio
+async def test_www_homepage_twin_is_not_fetched_twice():
+    # Bare seed on a www-canonical site: the homepage self-link resolves to
+    # https://www.example.com/ — the same page as the seed, not a second one.
+    seed_html = '<html><body><a href="https://www.example.com/">home</a></body></html>'
+    engine, pages, _, _ = _make_engine(
+        scope_kwargs={"max_pages": 5},
+        fetch_return=_scrape(raw_html=seed_html),
+    )
+    await asyncio.wait_for(engine.run(), timeout=5.0)
+    assert len(pages) == 1
+
+
+@pytest.mark.asyncio
 async def test_single_page_no_links():
     engine, pages, events, stats = _make_engine(scope_kwargs={"max_pages": 5})
     await asyncio.wait_for(engine.run(), timeout=5.0)

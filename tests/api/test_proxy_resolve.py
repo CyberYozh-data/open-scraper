@@ -4,6 +4,7 @@ import pytest
 
 from src.api import proxies as proxies_mod
 from src.api.proxies import _proxy_config_to_url, resolve_proxy
+from src.proxy.base import ProxyConfigError
 from src.proxy.models import ProxyConfig
 
 
@@ -130,6 +131,27 @@ class TestResolveProxyEndpoint:
         with pytest.raises(HTTPException) as exc:
             await resolve_proxy(proxy_type="res_rotating")
         assert exc.value.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_unsatisfiable_geo_maps_to_422(self, mocker):
+        # Well-formed params the catalog can't satisfy (e.g. a region name from
+        # another country) are user input like the validation failures above —
+        # 422, not an opaque 500.
+        from fastapi import HTTPException
+
+        mocker.patch.object(
+            proxies_mod.proxy_resolver,
+            "open_session",
+            new=mocker.AsyncMock(
+                side_effect=ProxyConfigError("no v2 geo suffix for name='Dagestan'")
+            ),
+        )
+        with pytest.raises(HTTPException) as exc:
+            await resolve_proxy(
+                proxy_type="prem_res_rotating", country_code="CA", region="Dagestan"
+            )
+        assert exc.value.status_code == 422
+        assert "Dagestan" in str(exc.value.detail)
 
     @pytest.mark.asyncio
     async def test_direct_session_returns_null(self, mocker):

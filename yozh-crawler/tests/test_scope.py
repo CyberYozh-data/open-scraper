@@ -23,6 +23,45 @@ def test_same_domain_rejects_subdomain():
     assert s.reason("https://blog.example.com/", 1) == "mode"
 
 
+def test_same_domain_accepts_www_alias_of_bare_seed():
+    # www-canonical site behind a bare-domain seed (seed 301s to www.):
+    # links discovered on the www host must stay in scope.
+    s = _scope(mode="same-domain", max_depth=3)
+    assert s.allows("https://www.example.com/about", depth=1)
+    assert not s.allows("https://wwwexample.com/", depth=1)
+    assert not s.allows("https://www.other.com/", depth=1)
+    assert s.reason("https://blog.example.com/", 1) == "mode"
+
+
+def test_same_domain_accepts_bare_alias_of_www_seed():
+    s = CompositeScope(
+        CrawlScope(mode="same-domain", max_depth=3), "https://www.example.com/"
+    )
+    assert s.allows("https://example.com/about", depth=1)
+    assert s.allows("https://www.example.com/x", depth=1)
+    assert not s.allows("https://blog.example.com/", depth=1)
+
+
+def test_same_domain_www_alias_requires_dotted_remainder():
+    # Degenerate seeds must not pair two unrelated owners: `www.com` is a
+    # registered site, not an alias of the `com` TLD (and vice versa).
+    s = CompositeScope(CrawlScope(mode="same-domain", max_depth=3), "https://www.com/")
+    assert not s.allows("https://com/", depth=1)
+    s2 = CompositeScope(CrawlScope(mode="same-domain", max_depth=3), "https://ru/")
+    assert not s2.allows("https://www.ru/", depth=1)
+
+
+def test_same_domain_www_strip_is_single_and_literal():
+    # Pin: exactly one leading `www.` label is an alias — `www.www.x` is a
+    # different host, not a deeper alias, from either seed form.
+    s = _scope(mode="same-domain", max_depth=3)
+    assert not s.allows("https://www.www.example.com/", depth=1)
+    s2 = CompositeScope(
+        CrawlScope(mode="same-domain", max_depth=3), "https://www.example.com/"
+    )
+    assert not s2.allows("https://www.www.example.com/", depth=1)
+
+
 def test_subdomains_accepts_subdomain():
     s = _scope(mode="subdomains", max_depth=3)
     assert s.allows("https://blog.example.com/", depth=1)

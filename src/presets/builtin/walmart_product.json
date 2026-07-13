@@ -6,7 +6,7 @@
   "url_template": "https://www.walmart.com/ip/{product_id}",
   "request_defaults": {
     "device": "desktop",
-    "proxy_type": "res_rotating",
+    "proxy_type": "prem_res_rotating",
     "browser_engine": "camoufox",
     "stealth": false,
     "wait_until": "domcontentloaded",

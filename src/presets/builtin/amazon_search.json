@@ -6,7 +6,7 @@
   "url_template": "https://www.amazon.{domain}/s?k={query}",
   "request_defaults": {
     "device": "desktop",
-    "proxy_type": "res_rotating",
+    "proxy_type": "prem_res_rotating",
     "stealth": true,
     "wait_until": "domcontentloaded",
     "timeout_ms": 60000,

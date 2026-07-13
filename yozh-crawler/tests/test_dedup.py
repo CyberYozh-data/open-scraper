@@ -23,6 +23,23 @@ def test_canonicalize_empty_path_becomes_slash():
     assert canonicalize_url("https://a.com") == "https://a.com/"
 
 
+def test_fingerprint_unifies_www_alias():
+    # www.X and X are one site (same-domain scope alias): the same path under
+    # either spelling is one page — no twin fetches, no double budget.
+    d = DedupSet()
+    assert d.add("https://x.com/a") is True
+    assert d.add("https://www.x.com/a") is False
+    assert "https://www.x.com/a" in d
+    # ...while the emitted canonical URL keeps its original host.
+    assert canonicalize_url("https://www.x.com/a") == "https://www.x.com/a"
+
+
+def test_fingerprint_keeps_degenerate_www_hosts_distinct():
+    d = DedupSet()
+    assert d.add("https://www.com/") is True
+    assert d.add("https://com/") is True
+
+
 def test_dedup_set_add_returns_false_on_dup():
     d = DedupSet()
     assert d.add("https://a.com/") is True

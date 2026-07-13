@@ -103,65 +103,10 @@ async function loadServerConfig() {
   } catch {}
 }
 
-// The country dropdown is shared by all proxy types, but its source depends on
-// the type: res_rotating targets the v1 residential pool (full ISO list from
-// /api/v1/proxies/countries, ~250), while prem_res_rotating targets the v2
-// premium catalog (~230). Filling the prem dropdown from v1 offered countries
-// the premium pool has no regions/cities for, so picking one left the cascade
-// empty — so a prem block draws from the v2 catalog instead, falling back to
-// the v1 list only if v2 is unavailable (e.g. no premium API key).
-const PREM_GEO = '/api/v2/prem-proxies/geo';
-let _v1CountryOptionsHtml = null;
-let _v2CountryOptionsPromise = null;
-
-// Replace a <select>'s options, keeping the current value if it's still one.
-function replaceOptions(sel, html) {
-  const prev = sel.value;
-  sel.innerHTML = html;
-  if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
-}
-
-// v2 premium country <option> HTML, fetched once per session. Caches the
-// in-flight Promise so the concurrent startup burst (one syncType per proxy
-// block) collapses to a single request. Resolves to '' on error/empty and does
-// NOT cache that, so a later call (e.g. after the Scraper URL is restored)
-// retries; loadCountries clears the cache when the target changes.
-function v2CountryOptions() {
-  if (_v2CountryOptionsPromise == null) {
-    _v2CountryOptionsPromise = apiCall(`${PREM_GEO}/countries`)
-      .then(r => (Array.isArray(r.data) && r.data.length
-        ? '<option value="">— any —</option>' +
-          r.data.map(c => `<option value="${escapeHtml(String(c.code))}">${escapeHtml(String(c.name))} (${escapeHtml(String(c.code))})</option>`).join('')
-        : ''))
-      .catch(() => '')
-      .then(html => { if (!html) _v2CountryOptionsPromise = null; return html; });
-  }
-  return _v2CountryOptionsPromise;
-}
-
-// Fill one country <select> from the source its block's proxy type wants: prem
-// blocks draw from the v2 premium catalog (each country resolves in the
-// region/city cascade), everything else from the v1 list. Prem falls back to
-// v1 if v2 is unavailable. No-op until loadCountries has cached the v1 list.
-async function populateCountrySelect(sel) {
-  if (!sel) return;
-  const prefix = sel.id.replace(/-geo-country$/, '');
-  const typeSel = document.getElementById(`${prefix}-proxy-type`);
-  if (typeSel && typeSel.value === 'prem_res_rotating') {
-    const html = await v2CountryOptions();
-    if (html) { replaceOptions(sel, html); return; }
-  }
-  if (_v1CountryOptionsHtml != null) replaceOptions(sel, _v1CountryOptionsHtml);
-}
-
 async function loadCountries() {
   const selects = ['s-geo-country', 'b-geo-country', 'c-geo-country', 'cp-geo-country', 'pw-geo-country', 'sess-geo-country', 'se-geo-country', 'mp-geo-country']
     .map(id => document.getElementById(id)).filter(Boolean);
   if (!selects.length) return;
-
-  // Drop the cached premium catalog so it is re-fetched against the current
-  // target (loadCountries also runs when the Scraper URL changes).
-  _v2CountryOptionsPromise = null;
 
   const { ok, data } = await apiCall('/api/v1/proxies/countries');
   if (!ok || !data?.countries) {
@@ -171,12 +116,14 @@ async function loadCountries() {
   }
 
   const sorted = [...data.countries].sort((a, b) => a.name.localeCompare(b.name));
-  _v1CountryOptionsHtml = '<option value="">— any —</option>' +
+  const optionsHtml = '<option value="">— any —</option>' +
     sorted.map(c => `<option value="${escapeHtml(c.code)}">${escapeHtml(c.name)} (${escapeHtml(c.code)})</option>`).join('');
 
-  // Fill each block's country dropdown from the source its proxy type wants —
-  // prem blocks from the v2 catalog, the rest from the v1 list just built.
-  selects.forEach(populateCountrySelect);
+  selects.forEach(sel => {
+    const prev = sel.value;
+    sel.innerHTML = optionsHtml;
+    if (prev) sel.value = prev;
+  });
 }
 // NB: countries are loaded after restoreState() (below), once the Scraper URL
 // points at the real target — calling it here would race the URL restore and
@@ -1878,7 +1825,7 @@ function renderProxyComponent(prefix, container) {
 
   // Cascade loaders (prem only). Region/city/zip/isp come from the v2 /geo
   // endpoints, scoped by the selections above them.
-  const GEO = PREM_GEO;
+  const GEO = '/api/v2/prem-proxies/geo';
   // All /geo lookups are scoped by country — skip the fetch (which would 422)
   // until a country is chosen. region/city/isp stay optional ("— any —").
   const loadRegions = () => cc() ? loadGeoSelect(premRegion, `${GEO}/regions`, { country_code: cc() }, { value: 'name', label: 'name', code: 'code' }) : null;
@@ -1921,12 +1868,11 @@ function renderProxyComponent(prefix, container) {
     if (premGeo) premGeo.style.display = isPrem ? '' : 'none';
     if (premZipToggleRow) premZipToggleRow.style.display = isPrem ? '' : 'none';
     if (premSessionRow) premSessionRow.style.display = isPrem ? '' : 'none';
-    if (isPrem) syncZip();
-    // Fill the country dropdown from this block's source (v2 for prem, v1
-    // otherwise), then cascade for an already-selected country (prem only).
-    populateCountrySelect(countrySel).then(() => {
-      if (isPrem && cc()) { loadRegions(); loadIsps(); }
-    });
+    if (isPrem) {
+      syncZip();
+      // Populate the cascade for an already-selected country (e.g. on restore).
+      if (cc()) { loadRegions(); loadIsps(); }
+    }
   };
 
   // Cascade wiring (guarded so a shared country dropdown only cascades for prem).

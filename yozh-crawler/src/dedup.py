@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
+from .scope import strip_www
+
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
@@ -30,7 +32,15 @@ def canonicalize_url(url: str) -> str:
 
 
 def fingerprint(url: str) -> str:
-    return hashlib.sha1(canonicalize_url(url).encode("utf-8")).hexdigest()
+    """SHA1 over the canonical URL with the host's leading ``www.`` stripped:
+    same-domain scope treats www.X and X as one site, so the same path under
+    either spelling is one page. Only identity is unified — canonicalize_url
+    never rewrites the host, so emitted/queued URLs keep their spelling."""
+    p = urlparse(canonicalize_url(url))
+    host = strip_www(p.hostname or "")
+    netloc = host if p.port is None else f"{host}:{p.port}"
+    dewww = urlunparse((p.scheme, netloc, p.path, p.params, p.query, ""))
+    return hashlib.sha1(dewww.encode("utf-8")).hexdigest()
 
 
 class DedupSet:

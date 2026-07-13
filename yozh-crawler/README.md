@@ -14,6 +14,10 @@ duplication.
 
 - **Scope predicates**: `same-domain` / `subdomains` / `all` / `regex` with
   include & exclude patterns, plus `max_depth` and `max_pages` caps.
+  `same-domain` treats `www.X` and `X` as the same site (www-canonical sites
+  301 one spelling to the other); the alias pair shares one rate-limit budget
+  and one dedup identity, so a page listed under both spellings is fetched
+  once.
 - **URL canonicalization + fingerprint dedup** (SHA1 over normalized URL) so
   different query orderings / trailing-slash variants collapse to one visit.
 - **Per-domain round-robin frontier** — one slow host can't starve others.

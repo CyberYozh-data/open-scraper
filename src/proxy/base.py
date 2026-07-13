@@ -6,6 +6,13 @@ from typing import Protocol
 from src.proxy.models import ProxyConfig
 
 
+class ProxyConfigError(ValueError):
+    """The request's proxy targeting can't be satisfied (e.g. a region name
+    that doesn't exist under the requested country): user input, not a code
+    or upstream failure — retries won't help. Consumers map it to a user
+    error (worker: warning + clean envelope; /resolve: 422)."""
+
+
 @dataclass(frozen=True)
 class ProxyFailure:
     status_code: int | None
