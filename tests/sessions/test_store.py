@@ -152,6 +152,39 @@ class TestPreconditions:
             )
         assert "device" in str(exc.value)
 
+    async def test_create_pins_viewport(self, store, now_clock):
+        store.set_clock(now_clock)
+        record = await store.create(
+            SessionCreateRequest(device="desktop", viewport={"width": 1366, "height": 768})
+        )
+        assert record.viewport is not None
+        assert record.viewport.width == 1366
+        assert record.viewport.height == 768
+
+    async def test_assert_compatible_fails_on_viewport_mismatch(self, store, now_clock):
+        store.set_clock(now_clock)
+        record = await store.create(
+            SessionCreateRequest(viewport={"width": 1366, "height": 768})
+        )
+        from src.schemas import Viewport
+        with pytest.raises(SessionIncompatible) as exc:
+            store.assert_compatible_with_request(
+                record, device="desktop", viewport=Viewport(width=1920, height=1080),
+                proxy_type="none", proxy_pool_id=None, proxy_geo=None, cookies=None,
+            )
+        assert "viewport" in str(exc.value)
+
+    async def test_assert_compatible_ok_when_request_viewport_unset(self, store, now_clock):
+        """An unset request viewport inherits the session's pin — not a mismatch."""
+        store.set_clock(now_clock)
+        record = await store.create(
+            SessionCreateRequest(viewport={"width": 1366, "height": 768})
+        )
+        store.assert_compatible_with_request(
+            record, device="desktop", viewport=None,
+            proxy_type="none", proxy_pool_id=None, proxy_geo=None, cookies=None,
+        )
+
     async def test_assert_compatible_fails_on_cookies_present(self, store, now_clock):
         store.set_clock(now_clock)
         record = await store.create(SessionCreateRequest())

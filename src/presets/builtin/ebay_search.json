@@ -1,7 +1,7 @@
 {
   "name": "ebay_search",
   "source": "ebay",
-  "description": "eBay search results (sorted newest). Selectors verified against examples/ebay_scraping.py. Note eBay injects a dummy first 'Shop on eBay' card the caller should drop.",
+  "description": "eBay search results (sorted newest), su-card layout. Returns title/price/url arrays for item listings in the results river. Titles and urls share the [href*='/itm/'] selector, so they stay structurally co-indexed and also exclude eBay's 'Shop on eBay' dummy and 'related searches' suggestion cards (which link to /sch/). Prices use a separate selector, so price-to-title alignment is best-effort: a listing with no price node (e.g. auction-only) shifts the price array. Per-listing condition/shipping aren't column-alignable here; use LLM extraction for reliable per-row data. Selectors verified against live markup 2026-07.",
   "kind": "builtin",
   "url_template": "https://www.ebay.{domain}/sch/i.html?_nkw={query}&_sop=12",
   "request_defaults": {
@@ -24,25 +24,18 @@
     "type": "css",
     "fields": {
       "titles": {
-        "selector": ".s-item__title",
+        "selector": ".srp-river-results .su-item-card__title[href*='/itm/']",
         "all": true,
         "required": true,
         "post_process": [{ "op": "strip" }]
       },
       "prices": {
-        "selector": ".s-item__price",
-        "all": true
-      },
-      "conditions": {
-        "selector": ".SECONDARY_INFO",
-        "all": true
-      },
-      "shipping": {
-        "selector": ".s-item__shipping",
-        "all": true
+        "selector": ".srp-river-results .su-item-card__price",
+        "all": true,
+        "post_process": [{ "op": "strip" }]
       },
       "urls": {
-        "selector": ".s-item__link",
+        "selector": ".srp-river-results .su-item-card__title[href*='/itm/']",
         "attr": "href",
         "all": true
       }
@@ -51,16 +44,14 @@
   "output_schema": {
     "type": "object",
     "properties": {
-      "titles":     { "type": "array", "items": { "type": "string" } },
-      "prices":     { "type": "array", "items": { "type": "string" } },
-      "conditions": { "type": "array", "items": { "type": "string" } },
-      "shipping":   { "type": "array", "items": { "type": "string" } },
-      "urls":       { "type": "array", "items": { "type": "string" } }
+      "titles": { "type": "array", "items": { "type": "string" } },
+      "prices": { "type": "array", "items": { "type": "string" } },
+      "urls":   { "type": "array", "items": { "type": "string" } }
     }
   },
   "self_heal": true,
   "prompt_schema": null,
   "llm_extract_prompt": null,
-  "version": 1,
-  "updated_at": 1747267200.0
+  "version": 2,
+  "updated_at": 1783814400.0
 }

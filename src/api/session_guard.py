@@ -38,6 +38,7 @@ async def validate_session_id(req: ScrapeRequest) -> None:
         store.assert_compatible_with_request(
             rec,
             device=req.device,
+            viewport=req.viewport,
             proxy_type=req.proxy_type,
             proxy_pool_id=req.proxy_pool_id,
             proxy_geo=req.proxy_geo,

@@ -31,6 +31,31 @@ log = logging.getLogger(__name__)
 # reuse them so the retry policy and the fetch verdict can't drift apart.
 _RETRYABLE_HTTP_STATUSES = HTTP_BAN_STATUSES | HTTP_TRANSIENT_STATUSES
 
+# Residential rotating proxy types whose exit country is otherwise random when
+# no proxy_geo.country_code is pinned. We default their country so the exit and
+# the browser timezone/locale stay aligned (see settings.default_proxy_country).
+# Mobile pools (mobile / mobile_shared) are intentionally excluded — their exit
+# country is set by the provider's pool, not steered by country_code here.
+_COUNTRY_DEFAULTED_PROXY_TYPES = frozenset({"res_rotating", "prem_res_rotating"})
+
+
+def apply_default_proxy_country(
+    proxy_type: str | None, proxy_geo: dict[str, str] | None
+) -> dict[str, str] | None:
+    """Pin a default country for residential rotating proxies with no country.
+
+    Keeps the proxy exit and the browser fingerprint (timezone/locale, derived
+    from the same proxy_geo via geo_profile) in the same country. An explicit
+    country_code always wins; other proxy types and pinned requests pass through.
+    """
+    if proxy_type not in _COUNTRY_DEFAULTED_PROXY_TYPES:
+        return proxy_geo
+    if proxy_geo and proxy_geo.get("country_code"):
+        return proxy_geo
+    country = settings.default_proxy_country
+    log.debug("defaulted %s exit country to %s (no proxy_geo.country_code)", proxy_type, country)
+    return {**(proxy_geo or {}), "country_code": country}
+
 
 def looks_like_proxy_failure(status_code: int | None, error: str | None) -> bool:
     if status_code is not None and status_code in _RETRYABLE_HTTP_STATUSES:
@@ -86,6 +111,8 @@ async def run_scrape(
         proxy_geo = {k: v for k, v in proxy_geo.items() if v is not None}
         if not proxy_geo:
             proxy_geo = None
+
+    proxy_geo = apply_default_proxy_country(proxy_type_raw, proxy_geo)
 
     log.info(
         "job received request_id=%s proxy_type=%s proxy_pool_id=%s url=%s",
@@ -151,6 +178,7 @@ async def run_scrape(
                 render=request.get("render", True),
                 cookies=request.get("cookies"),
                 storage_state=storage_state,
+                viewport=request.get("viewport"),
                 # Camoufox premium options; accepted-and-ignored by PlaywrightRunner
                 humanize=request.get("humanize", False),
                 spoof_os=request.get("spoof_os"),

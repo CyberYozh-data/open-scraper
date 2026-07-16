@@ -97,6 +97,7 @@ class ScrapeService:
         store.assert_compatible_with_request(
             session_record,
             device=page.device,
+            viewport=page.viewport,
             proxy_type=page.proxy_type,
             proxy_pool_id=page.proxy_pool_id,
             proxy_geo=page.proxy_geo,

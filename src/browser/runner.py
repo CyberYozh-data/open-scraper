@@ -31,6 +31,24 @@ _stealth = Stealth(
     webgl_renderer_override=(
         "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)"
     ),
+    # These evasions patch navigator getters in JS, whose `.toString()` returns
+    # non-native source — an integrity tell that anti-bots (e.g. ServicePipe)
+    # probe directly. Disable them and supply the same values natively instead:
+    #   - user_agent / platform: set via CDP Emulation.setUserAgentOverride below,
+    #     which the engine applies at the protocol level (native getter preserved).
+    #   - vendor / plugins / mimeTypes: headless Chromium already reports the real
+    #     Chrome values ("Google Inc." + the PDF viewer plugins), so no spoof needed.
+    #   - languages: Playwright's context `locale` sets navigator.languages natively.
+    navigator_user_agent=False,
+    navigator_platform=False,
+    navigator_vendor=False,
+    navigator_plugins=False,
+    navigator_languages=False,
+    # Clear the matching *_override values too: with the evasions off they are
+    # unused, and leaving them set makes playwright_stealth warn on every start
+    # ("override provided but evasion disabled") — misleading log noise.
+    navigator_platform_override=None,
+    navigator_languages_override=None,
 )
 
 # WebRTC leak-protection init script, kept as a standalone .js asset so it reads
@@ -41,10 +59,15 @@ _WEBRTC_STEALTH_JS = (Path(__file__).resolve().parent / "webrtc_stealth.js").rea
 )
 
 
+# Desktop default viewport (and matching window.screen). 1920x1080 @ DPR 1 is
+# the single most common real desktop resolution, so it blends in. Shared with
+# the Camoufox path so both engines default to the same size.
+DEFAULT_DESKTOP_VIEWPORT = {"width": 1920, "height": 1080}
+
 DESKTOP = {
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "viewport": {"width": 1280, "height": 800},
+    "viewport": DEFAULT_DESKTOP_VIEWPORT,
     "locale": "en-US",
     "timezone_id": "America/New_York",
     "color_scheme": "light",
@@ -101,6 +124,47 @@ def _chrome_ua_metadata(user_agent: str) -> dict | None:
         "model": "",
         "mobile": "Mobile" in user_agent or "Android" in user_agent,
     }
+
+
+def _navigator_platform_for_ua(user_agent: str) -> str:
+    """The `navigator.platform` string matching a UA's OS.
+
+    Set natively via CDP (Emulation.setUserAgentOverride) instead of a stealth JS
+    patch, so `navigator.platform`'s getter stays `[native code]`.
+    """
+    # Order matters: an iPhone UA carries "like Mac OS X", so the mobile checks
+    # must run before the desktop-Mac check or they'd be misread as MacIntel.
+    if "Windows" in user_agent:
+        return "Win32"
+    if "iPhone" in user_agent:
+        return "iPhone"
+    if "Android" in user_agent:
+        return "Linux armv8l"
+    if "Macintosh" in user_agent or "Mac OS X" in user_agent:
+        return "MacIntel"
+    return "Linux x86_64"
+
+
+_CHROME_UA_VERSION_RE = re.compile(r"Chrome/\d+(?:\.\d+)*")
+
+
+def _align_ua_to_engine(user_agent: str, browser_version: str) -> str:
+    """Rewrite the UA's Chrome version to match the real engine build.
+
+    The bundled Chromium (e.g. Playwright 1.57 ships Chrome-for-Testing 143)
+    drifts from a hardcoded UA string; advertising an old major while exposing a
+    newer engine's JS/CSS feature set is a bot tell. Chrome's own UA reduction
+    pins everything but the major to zero, so we mirror that: ``Chrome/<major>.0.0.0``.
+    Returns the UA unchanged if it carries no ``Chrome/`` token (non-Chrome UA)
+    or the version can't be parsed.
+    """
+    if not isinstance(browser_version, str):
+        return user_agent
+    major = browser_version.split(".", 1)[0]
+    if not major.isdigit() or not _CHROME_UA_VERSION_RE.search(user_agent):
+        return user_agent
+    return _CHROME_UA_VERSION_RE.sub(f"Chrome/{major}.0.0.0", user_agent)
+
 
 # Element-screenshot timing/padding constants. Not in Settings — per-deploy
 # variation has no realistic use case.
@@ -498,6 +562,12 @@ class PlaywrightRunner:
                     ])
             browser_type = getattr(self._playwright, self._engine)
             launch_kwargs = {"headless": self.headless}
+            # Drive a real Google Chrome (channel="chrome") instead of the bundled
+            # Chromium when configured — real branding/codecs and a populated
+            # navigator.plugins, and a newer engine. Chromium-only; the bundled
+            # Firefox/WebKit/Camoufox have no such channel.
+            if self._engine == "chromium" and settings.chrome_channel:
+                launch_kwargs["channel"] = settings.chrome_channel
             # No launch-level proxy on any engine. Playwright honours a
             # per-context proxy (set in _new_context) for Firefox/WebKit without
             # a launch placeholder, and a no-proxy context goes direct. The old
@@ -570,9 +640,14 @@ class PlaywrightRunner:
         proxy_geo: dict[str, str] | None = None,
         render: bool = True,
         storage_state: dict | None = None,
+        viewport: dict[str, int] | None = None,
     ) -> BrowserContext:
         assert self._browser is not None
         preset = DESKTOP if device == "desktop" else MOBILE
+        # A caller-supplied viewport overrides the device preset. window.screen
+        # is set to the same size (below) so screen and innerWidth stay
+        # consistent — a window larger than the screen is a fingerprint tell.
+        effective_viewport = viewport or preset["viewport"]
 
         proxy_arg = None
         if proxy is not None:
@@ -607,9 +682,18 @@ class PlaywrightRunner:
         if accept_language and not any(k.lower() == "accept-language" for k in effective_headers):
             effective_headers["Accept-Language"] = accept_language
 
+        # Advertise the real engine major in the UA (and, via _chrome_ua_metadata
+        # below, in Sec-CH-UA) so we don't claim an old Chrome while exposing a
+        # newer engine's features. Only meaningful on Chromium — Firefox/WebKit
+        # keep the preset UA, and Camoufox owns its own UA.
+        effective_ua = preset["user_agent"]
+        if self._engine == "chromium":
+            effective_ua = _align_ua_to_engine(effective_ua, self._browser.version)
+
         context = await self._browser.new_context(
-            user_agent=preset["user_agent"],
-            viewport=preset["viewport"],
+            user_agent=effective_ua,
+            viewport=effective_viewport,
+            screen=effective_viewport,
             locale=locale,
             timezone_id=timezone_id,
             color_scheme=preset.get("color_scheme", "light"),
@@ -622,7 +706,7 @@ class PlaywrightRunner:
         )
         # Stash applied fingerprint on the context so fetch() can surface it
         # in FetchResult without needing to re-derive the values.
-        context._applied_user_agent = preset["user_agent"]  # type: ignore[attr-defined]
+        context._applied_user_agent = effective_ua  # type: ignore[attr-defined]
         context._applied_locale = locale  # type: ignore[attr-defined]
         context._applied_timezone = timezone_id  # type: ignore[attr-defined]
         context._applied_accept_language = (  # type: ignore[attr-defined]
@@ -665,6 +749,7 @@ class PlaywrightRunner:
         render: bool = True,
         cookies: list[dict[str, Any]] | None = None,
         storage_state: dict | None = None,
+        viewport: dict[str, int] | None = None,
         # Camoufox-only premium options — accepted here so the call shape in
         # scrape_runner.py is identical for both runners; ignored by Chromium/Firefox/WebKit.
         humanize: bool = False,
@@ -705,7 +790,7 @@ class PlaywrightRunner:
             context = await self._new_context(
                 device=device, proxy=effective_proxy, headers=headers,
                 block_assets=block_assets, proxy_geo=proxy_geo, render=render,
-                storage_state=storage_state,
+                storage_state=storage_state, viewport=viewport,
             )
 
             if cookies:
@@ -743,6 +828,10 @@ class PlaywrightRunner:
                         cdp = await context.new_cdp_session(page)
                         await cdp.send("Emulation.setUserAgentOverride", {
                             "userAgent": ua,
+                            # Native navigator.platform (replaces the disabled
+                            # stealth navigator_platform JS patch that leaked its
+                            # source via toString).
+                            "platform": _navigator_platform_for_ua(ua),
                             "userAgentMetadata": ua_metadata,
                         })
                 except Exception as exc:  # pylint: disable=broad-except

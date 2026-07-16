@@ -66,7 +66,7 @@ class TestScrapePresetPage:
             "/api/v1/scrape/preset/page",
             json={
                 "source": "amazon_product",
-                "preset_params": {"asin": "B08N5WRWNW"},
+                "preset_params": {"asin": "B0CRTYZG5C"},
                 "locale": "us",
             },
         )

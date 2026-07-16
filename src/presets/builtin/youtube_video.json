@@ -1,7 +1,7 @@
 {
   "name": "youtube_video",
   "source": "youtube",
-  "description": "YouTube watch page. Title/channel/published come from stable <meta>/JSON-LD; views/likes are JS-rendered and self_heal-leaning. Uses res_rotating proxy; domcontentloaded avoids hanging on YouTube's constant polling (late-hydrated views/likes lean on self_heal).",
+  "description": "YouTube watch page. Title/channel/published come from stable <meta>/JSON-LD; views/likes are parsed from the in-page ytInitialData/ytInitialPlayerResponse JSON (viewCount/likeCount) instead of the JS-rendered DOM. Uses prem_res_rotating; domcontentloaded avoids hanging on YouTube's constant polling.",
   "kind": "builtin",
   "url_template": "https://www.youtube.com/watch?v={video_id}",
   "request_defaults": {
@@ -25,7 +25,7 @@
         "required": true
       },
       "channel": {
-        "selector": "link[itemprop='name'], span[itemprop='author'] link[itemprop='name']",
+        "selector": "link[itemprop='name']",
         "attr": "content"
       },
       "published_at": {
@@ -33,13 +33,34 @@
         "attr": "content"
       },
       "views": {
-        "selector": "meta[itemprop='interactionCount']",
-        "attr": "content",
-        "post_process": [{ "op": "parse_int" }]
+        "selector": "html",
+        "attr": "html",
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "\"viewCount\":\"(\\d+)\""
+            ]
+          },
+          {
+            "op": "parse_int"
+          }
+        ]
       },
       "likes": {
-        "selector": "button[aria-label*='like'] .yt-spec-button-shape-next__button-text-content",
-        "post_process": [{ "op": "parse_int" }]
+        "selector": "html",
+        "attr": "html",
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "\"likeCount\":\"(\\d+)\""
+            ]
+          },
+          {
+            "op": "parse_int"
+          }
+        ]
       }
     }
   },

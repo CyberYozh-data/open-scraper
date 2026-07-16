@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.proxy.base import ProxyConfigError
-from src.queue.scrape_runner import looks_like_proxy_failure, run_scrape
+from src.queue.scrape_runner import (
+    apply_default_proxy_country,
+    looks_like_proxy_failure,
+    run_scrape,
+)
+from src.settings import settings
 
 pytestmark = pytest.mark.asyncio
 
@@ -16,6 +21,24 @@ def test_proxy_failure_heuristics():
     assert looks_like_proxy_failure(None, "tunnel connection failed") is True
     assert looks_like_proxy_failure(404, "not found") is False
     assert looks_like_proxy_failure(None, None) is False
+
+
+def test_default_country_pins_rotating_residential_without_country():
+    d = settings.default_proxy_country
+    assert apply_default_proxy_country("prem_res_rotating", None) == {"country_code": d}
+    assert apply_default_proxy_country("res_rotating", {"city": "x"}) == {"city": "x", "country_code": d}
+
+
+def test_default_country_respects_explicit_country():
+    geo = {"country_code": "DE"}
+    assert apply_default_proxy_country("prem_res_rotating", geo) == geo
+
+
+def test_default_country_ignores_non_rotating_types():
+    # direct + static proxies keep whatever they were given (no random-country problem)
+    assert apply_default_proxy_country("none", None) is None
+    assert apply_default_proxy_country("res_static", None) is None
+    assert apply_default_proxy_country("dc_static", {"city": "x"}) == {"city": "x"}
 
 
 def test_proxy_failure_matches_firefox_error_codes():

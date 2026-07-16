@@ -133,6 +133,15 @@ async def _scrape_with_session(runner, request_id: str, page: dict[str, Any]) ->
         if page.get("cookies"):
             log.warning("session_id=%s came with cookies — ignoring to honor session pin", session_id)
             page = {**page, "cookies": None}
+        # The session's pinned viewport is authoritative: inject it so this
+        # scrape presents the same screen size the login used (and every other
+        # scrape on the session). A diverging request viewport was already
+        # rejected upstream (assert_compatible_with_request); an unset one
+        # inherits here. None means "use the engine's desktop default".
+        page = {
+            **page,
+            "viewport": record.viewport.model_dump() if record.viewport else None,
+        }
         envelope = await scrape_runner.run_scrape(runner, request_id, page, record.storage_state)
         if envelope.get("ok"):
             new_state = envelope.get("storage_state")
@@ -276,7 +285,11 @@ async def _run_login(runner, job: dict[str, Any]) -> dict[str, Any]:
     bridge_cm = None
     try:
         await runner.start()
-        proxy_geo = session_pin.get("proxy_geo") or None
+        # Same default-country rule as the scrape path, so the login handshake
+        # and the session's scrapes present one country (exit + timezone/locale).
+        proxy_geo = scrape_runner.apply_default_proxy_country(
+            session_pin["proxy_type"], session_pin.get("proxy_geo") or None
+        )
         session = await proxy_resolver.open_session(
             proxy_type=session_pin["proxy_type"],
             proxy_pool_id=session_pin.get("proxy_pool_id"),
@@ -298,6 +311,7 @@ async def _run_login(runner, job: dict[str, Any]) -> dict[str, Any]:
             proxy_geo=proxy_geo,
             render=True,
             storage_state=storage_state,
+            viewport=session_pin.get("viewport"),
         )
         page = await context.new_page()
         try:

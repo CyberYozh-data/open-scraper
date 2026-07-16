@@ -22,19 +22,43 @@
       "name": {
         "selector": "h1",
         "required": true,
-        "post_process": [{ "op": "strip" }]
+        "post_process": [
+          {
+            "op": "strip"
+          }
+        ]
       },
       "headline": {
         "selector": ".text-body-medium.break-words, .top-card-layout__headline",
-        "post_process": [{ "op": "strip" }]
+        "post_process": [
+          {
+            "op": "strip"
+          }
+        ]
       },
       "location": {
-        "selector": ".text-body-small.inline.t-black--light, .top-card-layout__first-subline",
-        "post_process": [{ "op": "strip" }]
+        "selector": "html",
+        "attr": "html",
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "\"addressLocality\":\"([^\"]+)\""
+            ]
+          }
+        ]
       },
       "current_position": {
-        "selector": "[aria-label='Current company'] span, .top-card-layout__entity-info",
-        "post_process": [{ "op": "strip" }]
+        "selector": "html",
+        "attr": "html",
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "\"worksFor\":\\[\\{\"@type\":\"Organization\",\"name\":\"([^\"]+)\""
+            ]
+          }
+        ]
       }
     }
   },

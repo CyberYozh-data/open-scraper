@@ -102,6 +102,37 @@ and discovery endpoints in [src/README.md](src/README.md#proxy-support)):
 The tester lists purchased proxies in each dropdown via
 `GET /api/v1/proxies/available?proxy_type=...` — no manual pool-id hunting.
 
+## Browser engine & fingerprint
+
+Scrapes render in a real browser; a few knobs pick the engine and how human the
+fingerprint looks (anti-bot systems cross-check these signals).
+
+**Engine** — set `browser_engine` per request:
+
+| `browser_engine`     | Engine | When |
+|----------------------|--------|------|
+| `chromium` (default) | Playwright Chromium, or **real Google Chrome** if `CHROME_CHANNEL=chrome` | general scraping |
+| `camoufox`           | anti-detect Firefox (engine-level fingerprint spoofing) | hostile anti-bot targets (Yandex, ServicePipe) — most consistent; canvas OS not detectable |
+
+**Real Chrome** — set `CHROME_CHANNEL=chrome` in `.env` to drive a real Google
+Chrome (bundled in the image) instead of Playwright's Chromium: real
+branding/codecs, a populated `navigator.plugins`, and a newer engine. Unset
+(default) = bundled Chromium.
+
+**Resolution** — `viewport: {width, height}` per request (default **1920×1080**);
+`window.screen` is set to match. Sessions pin it, so a session's login and every
+scrape on it share one screen size.
+
+**Automatic alignment** — the UA version tracks the real engine build, navigator
+getters stay native (no stealth-patch tells), and for residential rotating
+proxies without a pinned country `DEFAULT_PROXY_COUNTRY` (default `US`) pins the
+exit so the exit country and the browser timezone/locale stay aligned. Pin a
+different country with `proxy_geo.country_code`.
+
+The [visual tester](#visual-tester) exposes engine, resolution, device, stealth
+and proxy country in the scrape form. See [`.env.example`](.env.example) for all
+env vars.
+
 ## Presets & sessions
 
 Two higher-level features layer on raw scraping — both fully documented in
@@ -119,7 +150,7 @@ curl -X POST http://localhost:8000/api/v1/scrape/preset/page \
   -H 'Content-Type: application/json' \
   -d '{
     "source": "amazon_product",
-    "preset_params": {"asin": "B08N5WRWNW"},
+    "preset_params": {"asin": "B0CRTYZG5C"},
     "locale": "us",
     "llm": {"model": "openai/gpt-5.4-mini"}
   }'

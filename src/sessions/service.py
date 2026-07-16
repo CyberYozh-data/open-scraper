@@ -86,6 +86,10 @@ class SessionService:
             payload = {
                 "session_pin": {
                     "device": session_record.device,
+                    "viewport": (
+                        session_record.viewport.model_dump()
+                        if session_record.viewport else None
+                    ),
                     "proxy_type": session_record.proxy_type,
                     "proxy_pool_id": session_record.proxy_pool_id,
                     "proxy_geo": (

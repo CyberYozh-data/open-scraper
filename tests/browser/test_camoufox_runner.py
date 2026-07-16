@@ -28,6 +28,17 @@ def test_build_options_defaults_are_sane():
     assert opts["block_webgl"] is False
     assert opts.get("os") is None
     assert opts.get("addons") is None
+    assert "window" not in opts           # no viewport -> Camoufox picks its own
+
+
+def test_build_options_viewport_maps_to_window_tuple():
+    """A viewport is forwarded as Camoufox's window=(w, h); Camoufox then
+    derives a consistent screen >= window, fixing the screen<window tell."""
+    opts = build_camoufox_options(
+        proxy=None, block_assets=False, webrtc_block=False,
+        viewport={"width": 1920, "height": 1080},
+    )
+    assert opts["window"] == (1920, 1080)
 
 
 def test_runner_is_never_warm():

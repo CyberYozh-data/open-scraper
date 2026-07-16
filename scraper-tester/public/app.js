@@ -1001,6 +1001,11 @@ function buildScrapePayload() {
   payload.browser_engine = document.getElementById('s-browser-engine')?.value || 'chromium';
   Object.assign(payload, collectCamoufoxOpts('s'));
 
+  // Viewport (and matching window.screen). Blank inputs => server default 1920x1080.
+  const vpW = Number(document.getElementById('s-vp-width')?.value);
+  const vpH = Number(document.getElementById('s-vp-height')?.value);
+  if (vpW && vpH) payload.viewport = { width: vpW, height: vpH };
+
   // Optional per-request retry cap. Blank => server MAX_RETRIES default.
   const sMaxRetries = Number(document.getElementById('s-max-retries')?.value);
   if (sMaxRetries) payload.max_retries = sMaxRetries;

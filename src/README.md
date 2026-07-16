@@ -527,6 +527,8 @@ python geo_scraping.py
 | `wait_for_selector` | string | — | Wait for CSS selector before extracting |
 | `timeout_ms` | integer | — | Per-page timeout (ms), overrides global |
 | `device` | `desktop` \| `mobile` | `desktop` | Device emulation |
+| `browser_engine` | `chromium` \| `camoufox` | `chromium` | Rendering engine. `chromium` drives a real Google Chrome when `CHROME_CHANNEL=chrome`; `camoufox` is anti-detect Firefox for hostile anti-bot targets |
+| `viewport` | object | `1920×1080` (desktop) | `{ width, height }` in CSS px; `window.screen` is set to match. Sessions pin it across login + scrapes |
 | `headers` | object | — | Custom HTTP headers |
 | `cookies` | array | — | Cookies to inject |
 | `proxy_type` | string | `none` | See proxy types above |
@@ -535,7 +537,7 @@ python geo_scraping.py
 | `block_assets` | boolean | env | Block images/fonts/media to speed up load; falls back to the `BLOCK_ASSETS` env var when unset |
 | `raw_html` | boolean | `false` | Include raw HTML in response |
 | `screenshot` | boolean | `false` | Include full-page screenshot as base64 (triggers a scroll pass for lazy images when assets are not blocked) |
-| `stealth` | boolean | `true` | Apply `playwright-stealth` patches (navigator.webdriver, WebGL, Canvas, etc.) |
+| `stealth` | boolean | `true` | Apply anti-detection patches (`navigator.webdriver`, WebGL vendor/renderer). The UA, platform and other navigator getters are aligned natively (CDP / real engine) so their `.toString()` stays native — not JS-patched |
 | `extract` | object | — | Structured extraction rules |
 
 ### ExtractRule
@@ -615,7 +617,7 @@ curl -X POST http://localhost:8000/api/v1/scrape/preset/page \
   -H 'Content-Type: application/json' \
   -d '{
     "source": "amazon_product",
-    "preset_params": {"asin": "B08N5WRWNW"},
+    "preset_params": {"asin": "B0CRTYZG5C"},
     "locale": "us",
     "llm": {"model": "openai/gpt-5.4-mini"}
   }'

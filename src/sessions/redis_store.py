@@ -128,6 +128,7 @@ class RedisSessionStore:
             expires_at=now + req.ttl_seconds,
             last_used_at=now,
             device=req.device,
+            viewport=req.viewport,
             proxy_type=req.proxy_type,
             proxy_pool_id=req.proxy_pool_id,
             proxy_geo=req.proxy_geo,
@@ -284,6 +285,7 @@ class RedisSessionStore:
         session_record: SessionRecord,
         *,
         device: str,
+        viewport: Any | None = None,
         proxy_type: str,
         proxy_pool_id: str | None,
         proxy_geo: Any | None,
@@ -295,6 +297,14 @@ class RedisSessionStore:
         if device != session_record.device:
             raise SessionIncompatible(
                 f"session pinned device={session_record.device}, request asked device={device}"
+            )
+        # Only a request that *explicitly* sets a different viewport is rejected;
+        # an unset request viewport inherits the session's pinned size (injected
+        # at scrape time), so the screen stays identical across the session.
+        if viewport is not None and viewport != session_record.viewport:
+            raise SessionIncompatible(
+                f"session pinned viewport={session_record.viewport}, "
+                f"request asked viewport={viewport}"
             )
         if proxy_type != session_record.proxy_type:
             raise SessionIncompatible(
@@ -327,6 +337,7 @@ class RedisSessionStore:
             expires_at=session_record.expires_at,
             last_used_at=session_record.last_used_at,
             device=session_record.device,
+            viewport=session_record.viewport,
             proxy_type=session_record.proxy_type,
             proxy_pool_id=session_record.proxy_pool_id,
             proxy_geo=session_record.proxy_geo,
