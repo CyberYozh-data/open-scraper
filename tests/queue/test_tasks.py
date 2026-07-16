@@ -246,3 +246,41 @@ async def test_get_runner_no_deadlock_when_caller_holds_browser_lock(monkeypatch
             tasks._get_runner(ctx, "firefox"), timeout=2.0
         )  # must NOT deadlock
     assert runner._engine == "firefox"
+
+
+async def test_scrape_with_session_injects_pinned_viewport(monkeypatch):
+    """A session scrape presents the session's pinned viewport, overriding
+    whatever the request carried, so login and every scrape share one size."""
+    from src.schemas import Viewport
+    from src.sessions.models import SessionRecord
+
+    record = SessionRecord(
+        session_id="s1", status="ready", created_at=0, expires_at=1, last_used_at=0,
+        device="desktop", proxy_type="none",
+        viewport=Viewport(width=1366, height=768), storage_state=None,
+    )
+
+    class _Lock:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+    store = MagicMock()
+    store.lock = MagicMock(return_value=_Lock())
+    store.get = AsyncMock(return_value=record)
+    monkeypatch.setattr(tasks, "get_session_store", lambda: store)
+
+    captured = {}
+
+    async def fake_run_scrape(runner, request_id, page, storage_state):
+        captured["page"] = page
+        return {"ok": False}
+
+    monkeypatch.setattr(tasks.scrape_runner, "run_scrape", fake_run_scrape)
+
+    page = {"session_id": "s1", "url": "https://x", "viewport": {"width": 9999, "height": 9999}}
+    await tasks._scrape_with_session(MagicMock(), "req1", page)
+
+    assert captured["page"]["viewport"] == {"width": 1366, "height": 768}

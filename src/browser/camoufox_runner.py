@@ -15,6 +15,7 @@ from typing import Any, Literal, Optional
 from camoufox.async_api import AsyncCamoufox
 
 from src.browser.runner import (
+    DEFAULT_DESKTOP_VIEWPORT,
     FetchResult,
     _capture_screenshot,
     classify_fetch,
@@ -36,12 +37,17 @@ def build_camoufox_options(
     spoof_os: str | None = None,
     block_webgl: bool = False,
     addons: list | None = None,
+    viewport: dict[str, int] | None = None,
 ) -> dict:
     """Build the keyword-argument dict passed to AsyncCamoufox().
 
     Only non-default / non-None values that Camoufox actually accepts are
     included. ``geoip=True`` is always set so the browser locale/timezone
     aligns with the exit IP when a proxy is provided.
+
+    ``viewport`` is forwarded as Camoufox's ``window=(w, h)`` outer size;
+    Camoufox then derives a consistent screen (>= window), which fixes the
+    otherwise-random screen that could be smaller than the window (a tell).
     """
     opts: dict = {
         "headless": settings.headless,
@@ -57,6 +63,8 @@ def build_camoufox_options(
         opts["os"] = spoof_os
     if addons is not None:
         opts["addons"] = addons
+    if viewport is not None:
+        opts["window"] = (viewport["width"], viewport["height"])
     return opts
 
 
@@ -107,6 +115,7 @@ class CamoufoxRunner:
         render: bool = True,
         cookies: list[dict[str, Any]] | None = None,
         storage_state: dict | None = None,
+        viewport: dict[str, int] | None = None,
         # Camoufox premium options
         humanize: bool = False,
         spoof_os: str | None = None,
@@ -148,6 +157,10 @@ class CamoufoxRunner:
         )
         effective_timeout_ms = timeout_ms or self._timeout_ms
 
+        # Camoufox is desktop-only (mobile is rejected upstream), so default to
+        # the shared desktop viewport when unset. Passing an explicit window
+        # makes Camoufox derive a consistent screen (>= window) instead of a
+        # random one that can end up smaller than the window (a fingerprint tell).
         opts = build_camoufox_options(
             proxy=proxy_dict,
             block_assets=effective_block_assets,
@@ -156,6 +169,7 @@ class CamoufoxRunner:
             spoof_os=spoof_os,
             block_webgl=block_webgl,
             addons=addons,
+            viewport=viewport or DEFAULT_DESKTOP_VIEWPORT,
         )
 
         # UA is fingerprint-owned and filtered out; an explicit Accept-Language

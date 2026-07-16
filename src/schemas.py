@@ -103,6 +103,18 @@ class ProxyGeo(BaseModel):
         return v
 
 
+class Viewport(BaseModel):
+    """Browser viewport size in CSS pixels; window.screen is set to match.
+
+    Keeping screen and innerWidth/Height equal avoids a fingerprint tell: a
+    window larger than the reported screen is physically impossible and flags
+    automation. Bounds are generous but reject absurd values.
+    """
+
+    width: int = Field(ge=320, le=7680)
+    height: int = Field(ge=240, le=4320)
+
+
 class PremProxyOptions(BaseModel):
     """Targeting options for the v2 premium rotating gateway (prem_res_rotating).
 
@@ -239,6 +251,14 @@ class ScrapeRequest(BaseModel):
     timeout_ms: int | None = None
 
     device: Device = "desktop"
+    viewport: Viewport | None = Field(
+        default=None,
+        description=(
+            "Browser viewport size in CSS pixels; window.screen is set to match. "
+            "Defaults to 1920x1080 for desktop and the mobile preset's size for "
+            "device='mobile'. Applies to chromium and camoufox."
+        ),
+    )
     headers: Dict[str, str] | None = None
     cookies: list[Cookie] | None = None
 

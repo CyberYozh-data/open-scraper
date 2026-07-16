@@ -5,7 +5,14 @@ Example: Stealth Scraping — eBay Search Results
 eBay detects headless browsers and datacenter IPs. Bypass strategy:
 - stealth=True       removes headless browser fingerprints
 - res_rotating       residential rotating proxy for a clean IP each request
-- networkidle        waits for lazy-loaded listing cards to appear
+- domcontentloaded   eBay server-renders the su-card listing grid
+
+Extraction (eBay 2026 "su-card" layout):
+  Listings live under .srp-river-results; each card's title anchor is
+  .su-item-card__title. The [href*='/itm/'] filter keeps real item listings
+  and drops eBay's "Shop on eBay" dummy plus the injected "related searches"
+  suggestion cards (which link to /sch/ and carry no price), so titles,
+  prices and urls stay row-aligned.
 
 Requirements:
   - CYBERYOZH_API_KEY in .env file
@@ -20,6 +27,9 @@ from client_helpers import scrape_page, save_screenshot, console
 
 load_dotenv()
 
+# Real item listings only: title anchor whose href is an /itm/ page.
+_ITEM_TITLE = ".srp-river-results .su-item-card__title[href*='/itm/']"
+
 
 def scrape_ebay_search(query: str, max_items: int = 10) -> list:
     """
@@ -30,7 +40,7 @@ def scrape_ebay_search(query: str, max_items: int = 10) -> list:
         max_items: Max listings to return
 
     Returns:
-        List of dicts with title, price, condition, shipping, url
+        List of dicts with title, price, url
     """
     url = f"https://www.ebay.com/sch/i.html?_nkw={quote_plus(query)}&_sop=12"
     console.print(f"[bold cyan]eBay Search:[/bold cyan] '{query}'\n")
@@ -39,34 +49,24 @@ def scrape_ebay_search(query: str, max_items: int = 10) -> list:
         url=url,
         proxy_type="res_rotating",
         stealth=True,
-        wait_until="networkidle",
+        wait_until="domcontentloaded",
         screenshot=True,
         timeout_ms=60000,
         extract={
             "type": "css",
             "fields": {
                 "titles": {
-                    "selector": ".s-item__title",
+                    "selector": _ITEM_TITLE,
                     "attr": "text",
                     "all": True,
                 },
                 "prices": {
-                    "selector": ".s-item__price",
-                    "attr": "text",
-                    "all": True,
-                },
-                "conditions": {
-                    "selector": ".SECONDARY_INFO",
-                    "attr": "text",
-                    "all": True,
-                },
-                "shipping": {
-                    "selector": ".s-item__shipping",
+                    "selector": ".srp-river-results .su-item-card__price",
                     "attr": "text",
                     "all": True,
                 },
                 "links": {
-                    "selector": ".s-item__link",
+                    "selector": _ITEM_TITLE,
                     "attr": "href",
                     "all": True,
                 },
@@ -84,15 +84,7 @@ def scrape_ebay_search(query: str, max_items: int = 10) -> list:
     data = result.get("data") or {}
     titles = data.get("titles") or []
     prices = data.get("prices") or []
-    conditions = data.get("conditions") or []
-    shipping = data.get("shipping") or []
     links = data.get("links") or []
-
-    # eBay always injects a dummy first item "Shop on eBay"
-    if titles and "SHOP ON EBAY" in (titles[0] or "").upper():
-        titles, prices, conditions, shipping, links = (
-            titles[1:], prices[1:], conditions[1:], shipping[1:], links[1:]
-        )
 
     if not titles:
         console.print("\n  [yellow]⚠ No listings found — page may have shown a CAPTCHA[/yellow]")
@@ -107,13 +99,11 @@ def scrape_ebay_search(query: str, max_items: int = 10) -> list:
         item = {
             "title": (titles[i] if i < len(titles) else "").strip(),
             "price": (prices[i] if i < len(prices) else "").strip(),
-            "condition": (conditions[i] if i < len(conditions) else "").strip(),
-            "shipping": (shipping[i] if i < len(shipping) else "").strip(),
             "url": (links[i] if i < len(links) else "").split("?")[0],
         }
         items.append(item)
         console.print(f"  {i + 1}. [cyan]{item['title'][:70]}[/cyan]")
-        console.print(f"     {item['price']}  |  {item['condition']}  |  {item['shipping']}")
+        console.print(f"     {item['price']}  |  {item['url']}")
 
     return items
 

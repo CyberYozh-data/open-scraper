@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from src.schemas import Device, ProxyGeo, ScrapeProxyType
+from src.schemas import Device, ProxyGeo, ScrapeProxyType, Viewport
 
 SessionStatus = Literal["created", "logging_in", "ready", "expired", "failed"]
 
@@ -41,6 +41,16 @@ class LoginScript(BaseModel):
 
 class SessionCreateRequest(BaseModel):
     device: Device = "desktop"
+    viewport: Viewport | None = Field(
+        default=None,
+        description=(
+            "Browser viewport (and matching window.screen) pinned for this "
+            "session's login and every scrape on it. Defaults to the device "
+            "preset size when unset. Pinning it keeps the screen size identical "
+            "across the whole session — a size that changed mid-session would be "
+            "a fingerprint tell."
+        ),
+    )
     proxy_type: ScrapeProxyType = "none"
     proxy_pool_id: str | None = None
     proxy_geo: ProxyGeo | None = None
@@ -76,6 +86,7 @@ class SessionRecord(BaseModel):
     last_used_at: float
 
     device: Device
+    viewport: Viewport | None = None
     proxy_type: ScrapeProxyType
     proxy_pool_id: str | None = None
     proxy_geo: ProxyGeo | None = None
@@ -95,6 +106,7 @@ class SessionPublic(BaseModel):
     expires_at: float
     last_used_at: float
     device: Device
+    viewport: Viewport | None = None
     proxy_type: ScrapeProxyType
     proxy_pool_id: str | None = None
     proxy_geo: ProxyGeo | None = None

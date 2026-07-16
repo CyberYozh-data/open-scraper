@@ -43,6 +43,18 @@ class Settings(BaseSettings):
         alias="HEADLESS",
         description="Run browser in headless mode.",
     )
+    chrome_channel: str | None = Field(
+        default=None,
+        alias="CHROME_CHANNEL",
+        description=(
+            "Chromium engine channel. None (default) uses Playwright's bundled "
+            "Chromium. Set to 'chrome' to drive a real Google Chrome installed in "
+            "the image (better anti-bot: real branding/codecs + a populated "
+            "navigator.plugins, and a newer engine than the bundled build) — "
+            "requires `playwright install chrome` in the Dockerfile. The UA major "
+            "auto-tracks whatever engine actually launches."
+        ),
+    )
     block_assets: bool = Field(
         default=True,
         alias="BLOCK_ASSETS",
@@ -243,6 +255,20 @@ class Settings(BaseSettings):
         default="openai/gpt-5.4-mini",
         alias="DEFAULT_LLM_MODEL",
         description="Model used when a preset/request doesn't specify one.",
+    )
+    default_proxy_country: str = Field(
+        default="GB",
+        alias="DEFAULT_PROXY_COUNTRY",
+        description=(
+            "ISO-3166 alpha-2 country pinned for residential rotating proxies "
+            "(res_rotating / prem_res_rotating) when a request supplies no "
+            "proxy_geo.country_code. Without it the exit lands in a random "
+            "country while the browser timezone/locale stay this country's "
+            "defaults — a fingerprint mismatch. GB maps to Europe/London + "
+            "en-GB, so the exit and browser timezone/locale stay aligned. GB "
+            "is the default rather than US because several targets throttle "
+            "or block the US residential exit range."
+        ),
     )
     preset_llm_max_tokens: int = Field(
         default=4000,

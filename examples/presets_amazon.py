@@ -77,7 +77,7 @@ def scrape_amazon_preset(asin: str, locale: str = "us") -> dict:
 def main():
     if not os.getenv("CYBERYOZH_API_KEY"):
         console.print("[red]⚠ CYBERYOZH_API_KEY not set — Amazon needs a residential proxy[/red]\n")
-    scrape_amazon_preset("B08N5WRWNW", locale="us")
+    scrape_amazon_preset("B0CRTYZG5C", locale="us")
 
 
 if __name__ == "__main__":

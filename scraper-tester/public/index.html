@@ -91,6 +91,25 @@
             <input id="s-timeout" type="number" value="30000" />
           </div>
         </div>
+        <div class="field-row">
+          <div class="field">
+            <label style="display:flex;align-items:center;gap:0.35rem">
+              Resolution
+              <span class="info-icon" tabindex="0">
+                i
+                <div class="info-tooltip">
+                  <div>Browser viewport in CSS pixels; <b>window.screen</b> is set to match (a window larger than the screen is a bot tell). Blank = server default <b>1920 × 1080</b>. Applies to chromium and camoufox.</div>
+                  <div>Other fingerprint defaults (auto, not set here): UA tracks the real engine — <b>Chrome 143</b>; timezone/locale follow the proxy country (unset rotating residential defaults to <b>US</b> → America/New_York, en-US).</div>
+                </div>
+              </span>
+            </label>
+            <div style="display:flex;align-items:center;gap:0.4rem">
+              <input id="s-vp-width" type="number" min="320" max="7680" placeholder="1920" style="width:5.5rem" />
+              <span style="color:var(--text-tertiary)">×</span>
+              <input id="s-vp-height" type="number" min="240" max="4320" placeholder="1080" style="width:5.5rem" />
+            </div>
+          </div>
+        </div>
 
         <div class="field">
           <label style="display:flex;align-items:center;gap:0.35rem">

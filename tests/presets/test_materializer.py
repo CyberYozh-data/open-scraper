@@ -45,22 +45,22 @@ class TestUrlTemplate:
         preset = _amazon_preset()
         req = PresetScrapeRequest(
             source="amazon_product",
-            preset_params={"asin": "B08N5WRWNW"},
+            preset_params={"asin": "B0CRTYZG5C"},
             locale="us",
         )
         scrape = materialize(preset, req)
         assert isinstance(scrape, ScrapeRequest)
-        assert str(scrape.url) == "https://www.amazon.com/dp/B08N5WRWNW"
+        assert str(scrape.url) == "https://www.amazon.com/dp/B0CRTYZG5C"
 
     def test_locale_changes_domain(self):
         preset = _amazon_preset()
         req = PresetScrapeRequest(
             source="amazon_product",
-            preset_params={"asin": "B08N5WRWNW"},
+            preset_params={"asin": "B0CRTYZG5C"},
             locale="de",
         )
         scrape = materialize(preset, req)
-        assert str(scrape.url) == "https://www.amazon.de/dp/B08N5WRWNW"
+        assert str(scrape.url) == "https://www.amazon.de/dp/B0CRTYZG5C"
 
     def test_locale_lr_fills_template(self):
         """A locale's `lr` region code is exposed to url_template as {lr}."""
