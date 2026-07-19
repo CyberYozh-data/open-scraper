@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.2] - 2026-07-16
+
+Anti-bot and preset maintenance release: a hardened browser fingerprint, an
+optional real Google Chrome engine, optional headful rendering via Xvfb, a GB
+default for rotating residential exits, and repaired extraction selectors. The
+public HTTP API contract is unchanged.
+
+### Added
+
+- Optional real Google Chrome engine via `channel=chrome`: launches an actual
+  Chrome build (real branding/codecs, populated `navigator.plugins`) instead of
+  bundled Chromium. Chromium-family only; disabled by default.
+- Optional headful mode via Xvfb (`HEADLESS=false`): runs a visible browser
+  under a virtual display to defeat headless-detection tells, without a physical
+  screen.
+
+### Changed
+
+- Hardened fingerprint alignment: viewport/screen, UA version, stealth getters,
+  `navigator.platform` and proxy geo are kept mutually consistent so the browser
+  no longer contradicts its spoofed platform.
+- Default residential rotating exit country is now `GB` instead of `US`, keeping
+  the exit geo aligned with the default browser locale/timezone. Override with
+  `DEFAULT_PROXY_COUNTRY`.
+
+### Fixed
+
+- Repaired stale extraction selectors for `google_shopping`, `youtube`,
+  `linkedin`, and eBay search (`su-card` layout).
+- Swapped the dead Amazon example ASIN for a live one in the README and examples.
+
 ## [0.1.1] - 2026-07-13
 
 Maintenance release: tighter anti-bot fingerprinting, premium-proxy routing for
