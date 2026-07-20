@@ -78,6 +78,11 @@ services:
       - SCRAPER_URL=http://web-scraper:8000
       - HOST=0.0.0.0
       - PORT=8001
+      # Must match the scraper's SERVICE_TOKEN (web-scraper reads it via env_file).
+      # The crawler configures itself from this block, not a mounted .env, so the
+      # token has to be interpolated in explicitly or /map proxy resolution 401s
+      # and silently degrades to direct. Sourced from the same host .env.
+      - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     depends_on:
       - web-scraper
 

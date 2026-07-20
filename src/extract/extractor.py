@@ -52,6 +52,28 @@ def _apply_regex(value: Any, args: list[Any]) -> Any:
         return match.group(0)
 
 
+def _strip_tags(value: Any) -> str | None:
+    """Render an HTML fragment down to its text content.
+
+    Same normalisation as `_text` (tags dropped, entities decoded, whitespace
+    collapsed), so `attr='html'` + `regex` + `strip_tags` yields exactly what
+    `attr='text'` on the same node would have — which is what lets a field
+    anchor to an always-present container instead of an optional inner node
+    without changing the value it returns.
+    """
+    if value is None:
+        return None
+    text = str(value)
+    if "<" not in text and "&" not in text:
+        return " ".join(text.split())
+    # create_parent wraps loose/unbalanced fragments (a regex slice of a
+    # container's html is rarely a single well-formed element). A parser
+    # failure propagates to _apply_post_process, which warns and yields None
+    # rather than silently substituting cruder output.
+    frag = lxml_html.fragment_fromstring(text, create_parent="div")
+    return " ".join((frag.text_content() or "").split())
+
+
 def _parse_int(value: Any) -> int | None:
     if value is None:
         return None
@@ -160,6 +182,8 @@ def _apply_post_process(
             elif op == "strip":
                 chars = args[0] if args else None
                 current = str(current).strip(chars) if chars is not None else str(current).strip()
+            elif op == "strip_tags":
+                current = _strip_tags(current)
             elif op == "parse_int":
                 current = _parse_int(current)
             elif op == "parse_float":
@@ -223,5 +247,31 @@ def extract_fields(page_html: str, rule: ExtractRule) -> Tuple[Dict[str, Any], l
             processed = raw_values
 
         data[name] = processed if field_rule.all else processed[0]
+
+    # Every `all=true` field is matched against the whole document
+    # independently — there is no notion of a "row" in this engine. Callers
+    # nonetheless treat the resulting lists as parallel columns and zip them
+    # by index (prices[i] belongs to titles[i]), an assumption nothing here
+    # has ever verified. A length mismatch — including one field coming back
+    # unexpectedly empty — deserves a loud warning even though the request
+    # itself should still succeed.
+    #
+    # This is a LENGTH check, not an alignment check: compensating errors
+    # inside a single field (e.g. one card missing a rating while another
+    # renders an extra node) can leave all lengths equal while the rows are
+    # still misaligned. An empty `warnings` list here is not proof the rows
+    # line up.
+    all_field_lengths = {
+        name: len(data[name]) for name, field_rule in rule.fields.items() if field_rule.all
+    }
+    if len(all_field_lengths) >= 2 and len(set(all_field_lengths.values())) > 1:
+        summary = ", ".join(f"'{name}'={length}" for name, length in all_field_lengths.items())
+        warnings.append(
+            "row_alignment_mismatch: all=true fields have different lengths "
+            f"({summary}) — consumers that zip these lists by index may pair "
+            "values with the wrong row. If these fields are genuinely "
+            "independent and not meant to align row-by-row, this warning can "
+            "be ignored."
+        )
 
     return data, warnings

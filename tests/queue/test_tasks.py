@@ -248,6 +248,87 @@ async def test_get_runner_no_deadlock_when_caller_holds_browser_lock(monkeypatch
     assert runner._engine == "firefox"
 
 
+def _worker_ctx():
+    """A context shaped like the real worker's: an engine-keyed registry plus the
+    lifecycle counters _lifecycle_tick reads."""
+    import asyncio
+    import types
+
+    state = types.SimpleNamespace(
+        runners={},
+        pages_since_launch={"chromium": 0},
+        last_activity={"chromium": 111.0},
+        browser_lock=asyncio.Lock(),
+    )
+    return types.SimpleNamespace(state=state)
+
+
+async def test_pooled_run_records_against_the_pooled_engine(store, scrape_ok):
+    """The default launch mode is served by the warm runner, so its page count
+    and idle clock must advance — that is what governs retirement."""
+    ctx = _worker_ctx()
+    job_id = await store.create([ScrapeRequest(url="https://e.com")])
+    await tasks.scrape_page_task(job_id, 0, context=ctx)
+    assert ctx.state.pages_since_launch["chromium"] == 1
+    assert ctx.state.last_activity["chromium"] != 111.0  # idle clock refreshed
+
+
+async def test_ephemeral_run_leaves_pooled_lifecycle_counters_untouched(store, scrape_ok):
+    """A non-default launch mode runs on a throwaway browser. Recording it against
+    the engine key would refresh the *warm* browser's idle clock (so its 600s
+    window never elapses under headful traffic — two browsers, ~1GB of a ~1.25GB
+    budget) and inflate pages_since_launch with pages it never rendered."""
+    from src.settings import settings as _settings
+
+    ctx = _worker_ctx()
+    job_id = await store.create(
+        [ScrapeRequest(url="https://e.com", headless=not _settings.headless)]
+    )
+    await tasks.scrape_page_task(job_id, 0, context=ctx)
+    assert ctx.state.pages_since_launch == {"chromium": 0}
+    assert ctx.state.last_activity == {"chromium": 111.0}
+
+
+async def test_camoufox_run_leaves_pooled_lifecycle_counters_untouched(store, scrape_ok):
+    """Camoufox is per-request too; it must not record either. Today this only
+    holds by accident (it records under a key absent from state.runners)."""
+    ctx = _worker_ctx()
+    job_id = await store.create(
+        [ScrapeRequest(url="https://e.com", browser_engine="camoufox")]
+    )
+    await tasks.scrape_page_task(job_id, 0, context=ctx)
+    assert ctx.state.pages_since_launch == {"chromium": 0}
+    assert "camoufox" not in ctx.state.pages_since_launch
+
+
+async def test_request_headless_reaches_the_runner_selection(store, monkeypatch):
+    """Pins the whole seam: ScrapeRequest.headless -> model_dump -> the pages hash
+    -> page.get("headless") -> _get_runner. A typo in any hop (e.g. reading
+    "headless_mode") silently disables the feature while every other test passes."""
+    captured: dict[str, object] = {}
+
+    async def _capture(context, engine="chromium", headless=None):
+        captured["engine"] = engine
+        captured["headless"] = headless
+        return object()
+
+    monkeypatch.setattr(tasks, "_get_runner", _capture)
+    monkeypatch.setattr(tasks.scrape_runner, "run_scrape", AsyncMock(return_value=_ok_envelope()))
+
+    job_id = await store.create([ScrapeRequest(url="https://e.com", headless=False)])
+    await tasks.scrape_page_task(job_id, 0)
+    assert captured == {"engine": "chromium", "headless": False}
+
+    job_id = await store.create([ScrapeRequest(url="https://e.com", headless=True)])
+    await tasks.scrape_page_task(job_id, 0)
+    assert captured["headless"] is True
+
+    # Unset must stay None (the "use the server default" signal) — not False.
+    job_id = await store.create([ScrapeRequest(url="https://e.com")])
+    await tasks.scrape_page_task(job_id, 0)
+    assert captured["headless"] is None
+
+
 async def test_scrape_with_session_injects_pinned_viewport(monkeypatch):
     """A session scrape presents the session's pinned viewport, overriding
     whatever the request carried, so login and every scrape share one size."""

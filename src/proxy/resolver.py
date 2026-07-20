@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from src.proxy.base import ProxySession
+from src.proxy.base import ProxyConfigError, ProxySession
 from src.proxy.countries import COUNTRIES
 from src.proxy.cyberyozh.client import CyberYozhClient
 from src.proxy.cyberyozh.client_v2 import CyberYozhV2Client
@@ -74,12 +74,25 @@ class ProxyResolver:
         max_retries: int | None = None,
         prem_proxy_options: dict | None = None,
     ) -> ProxySession:
-        if not proxy_type or proxy_type == "none" or self._client is None:
+        if not proxy_type or proxy_type == "none":
             return DirectSession()
+
+        # A proxy was explicitly requested. If the provider isn't configured we
+        # must NOT silently fall back to direct egress: that would send the
+        # request from the real server IP while the response still reports the
+        # requested proxy_type. Fail closed — callers that want direct ask for
+        # proxy_type="none".
+        if self._client is None:
+            raise ProxyConfigError(
+                f"proxy_type={proxy_type!r} requested but no CyberYozh API key is configured"
+            )
 
         if proxy_type == "prem_res_rotating":
             if self._client_v2 is None:
-                return DirectSession()
+                raise ProxyConfigError(
+                    "proxy_type='prem_res_rotating' requested but the CyberYozh "
+                    "v2 rotating-proxy client is not configured"
+                )
             provider = PremProxyProvider(
                 client=self._client_v2,
                 proxy_geo=proxy_geo,

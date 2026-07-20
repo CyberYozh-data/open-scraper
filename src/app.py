@@ -9,6 +9,7 @@ from fastapi_mcp import FastApiMCP
 
 from src.api import prem_proxies
 from src.api.router import router
+from src.api.sessions import router as sessions_router
 from src.queue.broker import broker
 from src.queue.store import get_job_store, init_job_store
 from src.sessions.store import get_session_store, init_session_store
@@ -75,6 +76,26 @@ def disable_cors(app: FastAPI) -> FastAPI:
     return app
 
 
+def mcp_excluded_operations() -> list[str]:
+    """Operations kept off the (unauthenticated) MCP tool surface.
+
+    The REST routes gate these behind SERVICE_TOKEN, but the MCP transport
+    carries no such header, so they must not be advertised as agent tools:
+      - resolve_proxy: returns upstream proxy credentials (the crawler's /map).
+      - every /sessions op (CRIT-02): create/read/list/mutate/login/delete an
+        authenticated browser session — never an agent tool.
+
+    The session ops are derived from the router so a newly added session route
+    can't silently drift onto the MCP surface.
+    """
+    session_ops = [
+        route.operation_id
+        for route in sessions_router.routes
+        if getattr(route, "operation_id", None)
+    ]
+    return ["resolve_proxy", *session_ops]
+
+
 def create_app() -> FastAPI:
     setup_logging(settings.log_level, tag="M")
 
@@ -86,9 +107,7 @@ def create_app() -> FastAPI:
     app.include_router(router)
     app.include_router(prem_proxies.router)
 
-    # Exclude resolve_proxy: it returns upstream proxy credentials and is a
-    # service-to-service helper (the crawler's /map), not an agent tool.
-    mcp = FastApiMCP(app, exclude_operations=["resolve_proxy"])
+    mcp = FastApiMCP(app, exclude_operations=mcp_excluded_operations())
     mcp.mount_http()
 
     return app

@@ -1,7 +1,7 @@
 {
   "name": "google_search",
   "source": "google",
-  "description": "Google web search (organic results). Routes to country-specific domain (google.de, google.co.uk, ...) and matches proxy geo. Materializer must lowercase `country` for gl= and derive a language code for hl= from the locale.",
+  "description": "Google web search (organic results). Returns one flat array per field across organic results; consumers zip them by index. ROW-ALIGNMENT INVARIANT: every field must match exactly one node per result, so all four scope to #rso div.tF2Cxc — the organic-result container Google renders for EVERY result (div.g was retired) — which also keeps ads/PAA/nav blocks out. `snippets` anchors to div.tF2Cxc itself (not to div[data-sncf='1'], which exists ONLY when the result has a snippet) and digs the text out of that container's html by regex: a snippet-less result then yields null in its own slot instead of shrinking the array and silently shifting every later row up one. Never point a field at an element that only exists when its value does. Routes to country-specific domain (google.de, google.co.uk, ...) matching the locale's market country (gl=/hl=). The proxy exit follows `proxy_country` where set, not the market: the `us` locale exits via GB because Google blocks this proxy pool's US residential range. Materializer must lowercase `country` for gl= and derive a language code for hl= from the locale.",
   "kind": "builtin",
   "url_template": "https://www.google.{domain}/search?q={query}&gl={country}&hl={lang}",
   "request_defaults": {
@@ -14,7 +14,7 @@
     "block_assets": true
   },
   "locales": {
-    "us": { "domain": "com",   "country": "US" },
+    "us": { "domain": "com",   "country": "US", "proxy_country": "GB" },
     "uk": { "domain": "co.uk", "country": "GB" },
     "de": { "domain": "de",    "country": "DE" },
     "fr": { "domain": "fr",    "country": "FR" },
@@ -25,26 +25,18 @@
   "parsing_instructions": {
     "type": "css",
     "fields": {
-      "titles": {
-        "selector": "div.g h3, div[data-hveid] h3",
-        "all": true,
-        "required": true
-      },
-      "links": {
-        "selector": "div.g a[href^='http'], div[data-hveid] a[href^='http']",
-        "attr": "href",
-        "all": true
-      },
-      "snippets": {
-        "selector": "div[data-sncf='1'], .VwiC3b",
-        "all": true,
-        "post_process": [{ "op": "strip" }]
-      },
-      "result_blocks": {
-        "selector": "div[data-hveid]",
+      "titles":        { "selector": "#rso div.tF2Cxc h3", "all": true, "required": true },
+      "links":         { "selector": "#rso div.tF2Cxc a:has(h3)", "attr": "href", "all": true },
+      "snippets":      {
+        "selector": "#rso div.tF2Cxc",
         "attr": "html",
-        "all": true
-      }
+        "all": true,
+        "post_process": [
+          { "op": "regex", "args": ["(?s)data-sncf=[\"']1[\"'][^>]*>(.*?)</div>\\s*</div>"] },
+          { "op": "strip_tags" }
+        ]
+      },
+      "result_blocks": { "selector": "#rso div.tF2Cxc", "attr": "html", "all": true }
     }
   },
   "output_schema": {
@@ -58,6 +50,6 @@
   "self_heal": true,
   "prompt_schema": null,
   "llm_extract_prompt": null,
-  "version": 1,
-  "updated_at": 1747267200.0
+  "version": 2,
+  "updated_at": 1784246400.0
 }

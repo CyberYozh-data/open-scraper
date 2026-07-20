@@ -300,7 +300,11 @@ class TestComplexScenarios:
         assert len(data["paragraphs"]) == 2
         assert data["link"] == "https://example.com"
         assert len(data["items"]) == 3
-        assert warnings == []
+        # paragraphs (2) and items (3) are two unrelated all=true groups that
+        # happen to differ in length — exactly the accepted-noise case the
+        # row-alignment guard is designed to flag (see TestRowAlignmentGuard).
+        assert len(warnings) == 1
+        assert "row_alignment_mismatch" in warnings[0]
 
     def test_extract_with_warnings(self, sample_html):
         """Extract with warnings"""
@@ -340,3 +344,203 @@ class TestComplexScenarios:
 
         assert data["title"] == "Title with spaces"
         assert warnings == []
+
+
+class TestRowAlignmentGuard:
+    """Consumers zip `all=true` fields by index (prices[i] belongs to
+    titles[i]), but the engine extracts every field independently and never
+    checked they came out the same length. This silently misaligned three
+    shipped presets (amazon_search price/rating drift, amazon.co.uk empty
+    urls list, google_search doubled snippets) — these tests pin the guard
+    that turns that class of bug into a loud warning.
+
+    Known false negative: this is a LENGTH check, not an alignment check.
+    Compensating errors within a single field can cancel out — e.g. one
+    card missing a rating while another card renders an extra one — leaving
+    `titles=3, ratings=3` with no warning even though the rating for
+    product A is actually product B's. That is exactly the two known
+    amazon_search shapes (a card with no rating; a card with extra nodes)
+    co-occurring on one page. A clean `warnings == []` is not proof the
+    rows are aligned."""
+
+    def test_mismatched_all_field_lengths_emit_one_warning(self):
+        html = """
+        <html><body>
+            <span class="title">A</span>
+            <span class="title">B</span>
+            <span class="title">C</span>
+            <span class="price">10</span>
+            <span class="price">20</span>
+        </body></html>
+        """
+        rule = ExtractRule(
+            type="css",
+            fields={
+                "titles": FieldRule(selector=".title", all=True),
+                "prices": FieldRule(selector=".price", all=True),
+            },
+        )
+
+        data, warnings = extract_fields(html, rule)
+
+        assert data["titles"] == ["A", "B", "C"]
+        assert data["prices"] == ["10", "20"]
+        alignment_warnings = [w for w in warnings if "titles" in w and "prices" in w]
+        assert len(alignment_warnings) == 1
+        assert "'titles'=3" in alignment_warnings[0]
+        assert "'prices'=2" in alignment_warnings[0]
+
+    def test_equal_all_field_lengths_no_warning(self):
+        html = """
+        <html><body>
+            <span class="title">A</span>
+            <span class="title">B</span>
+            <span class="price">10</span>
+            <span class="price">20</span>
+        </body></html>
+        """
+        rule = ExtractRule(
+            type="css",
+            fields={
+                "titles": FieldRule(selector=".title", all=True),
+                "prices": FieldRule(selector=".price", all=True),
+            },
+        )
+
+        _, warnings = extract_fields(html, rule)
+
+        assert warnings == []
+
+    def test_single_all_field_has_nothing_to_compare(self):
+        """Only one `all=true` field in the rule -> no pairing to check."""
+        html = """
+        <html><body>
+            <span class="title">A</span>
+            <span class="title">B</span>
+        </body></html>
+        """
+        rule = ExtractRule(
+            type="css",
+            fields={
+                "titles": FieldRule(selector=".title", all=True),
+            },
+        )
+
+        _, warnings = extract_fields(html, rule)
+
+        assert warnings == []
+
+    def test_scalar_fields_are_ignored_by_the_guard(self):
+        """all=false fields only ever return the first match, so their
+        underlying selector cardinality (3 vs 1 nodes here) is irrelevant —
+        and must not be conflated with a real all=true mismatch."""
+        html = """
+        <html><body>
+            <p class="text">First</p>
+            <p class="text">Second</p>
+            <p class="text">Third</p>
+            <a class="link" href="https://example.com">Link</a>
+            <span class="title">A</span>
+            <span class="title">B</span>
+        </body></html>
+        """
+        rule = ExtractRule(
+            type="css",
+            fields={
+                "text": FieldRule(selector="p.text", attr="text", all=False),
+                "link": FieldRule(selector="a.link", attr="href", all=False),
+                "titles": FieldRule(selector=".title", all=True),
+            },
+        )
+
+        _, warnings = extract_fields(html, rule)
+
+        assert warnings == []
+
+    def test_empty_all_field_alongside_populated_one_warns(self):
+        """Mirrors the amazon.co.uk bug: urls=[] next to a fully populated
+        titles list on a page layout variant. Empty must count, not be
+        treated as 'nothing matched, nothing to warn about'."""
+        html = """
+        <html><body>
+            <span class="title">A</span>
+            <span class="title">B</span>
+        </body></html>
+        """
+        rule = ExtractRule(
+            type="css",
+            fields={
+                "titles": FieldRule(selector=".title", all=True),
+                "urls": FieldRule(selector=".missing-url", attr="href", all=True),
+            },
+        )
+
+        data, warnings = extract_fields(html, rule)
+
+        assert data["titles"] == ["A", "B"]
+        assert data["urls"] == []
+        alignment_warnings = [w for w in warnings if "titles" in w and "urls" in w]
+        assert len(alignment_warnings) == 1
+
+    def test_four_fields_three_agree_one_drifts_names_every_field(self):
+        """Mirrors the real shipped amazon_search shape (titles=22, urls=22,
+        prices=36, ratings=22): three of four `all=true` fields agree and
+        one drifts. The message must name every `all=true` field with its
+        length -- including the three that agree, not just the outlier --
+        which no 2-field test above can pin."""
+        titles_urls_ratings = "".join(
+            f'<span class="title">T{i}</span>'
+            f'<span class="url">https://example.com/{i}</span>'
+            f'<span class="rating">{i % 5}</span>'
+            for i in range(22)
+        )
+        extra_prices = "".join(f'<span class="price">{i}</span>' for i in range(36))
+        html = f"<html><body>{titles_urls_ratings}{extra_prices}</body></html>"
+
+        rule = ExtractRule(
+            type="css",
+            fields={
+                "titles": FieldRule(selector=".title", all=True),
+                "urls": FieldRule(selector=".url", all=True),
+                "prices": FieldRule(selector=".price", all=True),
+                "ratings": FieldRule(selector=".rating", all=True),
+            },
+        )
+
+        data, warnings = extract_fields(html, rule)
+
+        assert len(data["titles"]) == 22
+        assert len(data["urls"]) == 22
+        assert len(data["prices"]) == 36
+        assert len(data["ratings"]) == 22
+        alignment_warnings = [w for w in warnings if "row_alignment_mismatch" in w]
+        assert len(alignment_warnings) == 1
+        message = alignment_warnings[0]
+        assert "'titles'=22" in message
+        assert "'urls'=22" in message
+        assert "'prices'=36" in message
+        assert "'ratings'=22" in message
+
+    def test_guard_does_not_alter_returned_data(self):
+        """The guard only appends a warning; it must never reshape, pad, or
+        truncate the `data` it is inspecting."""
+        html = """
+        <html><body>
+            <span class="title">A</span>
+            <span class="title">B</span>
+            <span class="title">C</span>
+            <span class="price">10</span>
+        </body></html>
+        """
+        rule = ExtractRule(
+            type="css",
+            fields={
+                "titles": FieldRule(selector=".title", all=True),
+                "prices": FieldRule(selector=".price", all=True),
+            },
+        )
+
+        data, warnings = extract_fields(html, rule)
+
+        assert data == {"titles": ["A", "B", "C"], "prices": ["10"]}
+        assert len(warnings) == 1

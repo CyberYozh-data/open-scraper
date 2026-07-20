@@ -283,6 +283,135 @@ class TestProxyGeoOverride:
         )
 
 
+class TestProxyCountry:
+    """LocaleProfile.proxy_country decouples the proxy exit country from the
+    locale's market country (LocaleProfile.country). Some markets must not be
+    fetched through their own country's proxy exit (Google 429s the US
+    residential range), so a locale can pin a market (gl=/hl=) while exiting
+    through a different country.
+    """
+
+    def test_unset_proxy_country_falls_back_to_market_country(self):
+        preset = _amazon_preset()
+        req = PresetScrapeRequest(
+            source="amazon_product", preset_params={"asin": "X"}, locale="de"
+        )
+        scrape = materialize(preset, req)
+        assert scrape.proxy_geo.country_code == "DE"
+
+    def test_proxy_country_decouples_exit_from_market(self):
+        preset = _amazon_preset(
+            url_template="https://www.google.{domain}/search?q={query}&gl={country}&hl={lang}",
+            locales={
+                "us": LocaleProfile(domain="com", country="US", proxy_country="GB"),
+            },
+            default_locale="us",
+        )
+        req = PresetScrapeRequest(
+            source="amazon_product", preset_params={"query": "x"}, locale="us"
+        )
+        scrape = materialize(preset, req)
+        # Exit country follows the override ...
+        assert scrape.proxy_geo.country_code == "GB"
+        # ... but the market (gl=/hl=, and the domain) still reflects the
+        # locale's country, not the proxy exit. This is the assertion that
+        # would catch a naive fix that repoints the market too.
+        url = str(scrape.url)
+        assert "google.com" in url
+        assert "gl=us" in url
+        assert "hl=en" in url
+
+    def test_explicit_proxy_geo_overrides_proxy_country(self):
+        """The request_defaults/request_override escape hatch still wins,
+        even when the locale also sets proxy_country."""
+        preset = _amazon_preset(
+            request_defaults={
+                "device": "desktop",
+                "proxy_geo": {"country_code": "NL"},
+            },
+            locales={
+                "us": LocaleProfile(domain="com", country="US", proxy_country="GB"),
+            },
+            default_locale="us",
+        )
+        req = PresetScrapeRequest(
+            source="amazon_product", preset_params={"asin": "X"}, locale="us"
+        )
+        scrape = materialize(preset, req)
+        assert scrape.proxy_geo.country_code == "NL"
+
+    def test_derived_fields_follow_market_not_exit_on_non_degenerate_pair(self):
+        """US/GB (the shipped google_* pair) is degenerate on every axis
+        `derive_locale_profile()`/`_price_locale_for()` touch: both give
+        hl=en and price locale "us", so a naive refactor that repoints
+        either at the proxy exit instead of the market would still pass
+        every US/GB-based assertion above. DE market / GB exit is not
+        degenerate: it pins hl=, price-locale, and proxy exit to three
+        different, independently-checkable values."""
+        from src.extract.models import PostProcess
+
+        preset = _amazon_preset(
+            url_template="https://www.google.{domain}/search?q={query}&gl={country}&hl={lang}",
+            locales={
+                "de": LocaleProfile(domain="de", country="DE", proxy_country="GB"),
+            },
+            default_locale="de",
+            parsing_instructions=ParsingInstructions(
+                type="css",
+                fields={
+                    "price": FieldRule(
+                        selector=".price",
+                        post_process=[PostProcess(op="parse_price")],
+                    ),
+                },
+            ),
+        )
+        req = PresetScrapeRequest(
+            source="amazon_product", preset_params={"query": "x"}, locale="de"
+        )
+        scrape = materialize(preset, req)
+        # market (DE) drives the derived language, not the exit (GB) — a
+        # flip to en would silently mis-render hl= for every non-English
+        # market that has a proxy_country override.
+        assert "hl=de" in str(scrape.url)
+        # market drives price locale too: a flip to "us" would parse
+        # "12,34 €" as 1234.0 instead of 12.34.
+        assert scrape.extract.fields["price"].post_process[0].args == ["eu"]
+        # exit still follows proxy_country.
+        assert scrape.proxy_geo.country_code == "GB"
+
+
+class TestGoogleBuiltinPresetsExitViaGB:
+    """The shipped google_search / google_shopping presets flag the `us`
+    locale's proxy_country as GB: Google hard-blocks the proxy pool's US
+    residential exit range (429 'unusual traffic') while still wanting the
+    US market (gl=us)."""
+
+    @pytest.mark.parametrize(
+        "preset_file", ["google_search.json", "google_shopping.json"]
+    )
+    def test_us_locale_resolves_to_gb_exit_with_us_market(self, preset_file):
+        import json
+        import pathlib
+
+        raw = json.loads(
+            pathlib.Path(f"src/presets/builtin/{preset_file}").read_text()
+        )
+        preset = Preset(**raw)
+        scrape = materialize(
+            preset,
+            PresetScrapeRequest(
+                source=preset.name,
+                preset_params={"query": "test"},
+                locale="us",
+            ),
+        )
+        assert scrape.proxy_geo.country_code == "GB"
+        url = str(scrape.url)
+        assert "google.com" in url
+        assert "gl=us" in url
+
+
 class TestAiOnlyPreset:
     def test_ai_only_preset_has_no_extract(self):
         preset = _amazon_preset(
@@ -517,3 +646,11 @@ def test_yandex_preset_uses_prem_and_warmup():
     assert out.warmup.type == "homepage"
     assert out.proxy_geo.country_code == "RU"
     assert out.browser_engine == "camoufox"
+    # Yandex serves a transparent JS "browser check" interstitial
+    # (/showcaptchafast) that self-resolves and redirects to the real SERP a
+    # few seconds after domcontentloaded fires. Without wait_for_selector we
+    # snapshot the interstitial instead of the SERP. Preset/LocaleProfile use
+    # pydantic's default extra="ignore", so e.g. a misplaced key (outside
+    # request_defaults) would vanish silently instead of raising — this
+    # assertion is what stands between the fix and a silent regression.
+    assert out.wait_for_selector == "li.serp-item"

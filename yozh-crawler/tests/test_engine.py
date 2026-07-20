@@ -402,3 +402,107 @@ async def test_cancel_hard_stops_engine_immediately():
     await asyncio.wait_for(task, timeout=2.0)
 
     assert engine.cancelled
+
+
+# ─── HIGH-23: a completed job whose page was blocked/failed is NOT a success ────
+
+_AUTO = object()
+
+
+def _blocked(status: int, raw_html: str = "<html><body></body></html>", *, error=_AUTO) -> dict:
+    """A scraper ScrapeResponse for a page the scraper marked as not-genuine
+    content (captcha/ban/transient): job status=done, but meta.fetch_ok=False.
+
+    `error=None` models the load-bearing case: a soft block served at HTTP 200
+    with a structured body and NO top-level error — only meta.fetch_ok flags it.
+    """
+    resp: dict = {
+        "meta": {"status_code": status, "fetch_ok": False, "final_url": None},
+        "raw_html": raw_html,
+    }
+    err = f"HTTP {status}" if error is _AUTO else error
+    if err is not None:
+        resp["error"] = err
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_fetch_ok_false_transient_is_retried_then_failed_not_visited():
+    # meta.fetch_ok=False with a retryable status (503) must go through the
+    # retry path and end as a failed page — never counted as a visited success.
+    engine, pages, events, stats = _make_engine(
+        scope_kwargs={"max_pages": 5},
+        fetch_return=_blocked(503),
+    )
+    await asyncio.wait_for(engine.run(), timeout=5.0)
+
+    assert stats[-1].visited == 0
+    assert stats[-1].failed == 1
+    assert stats[-1].retries_total == 2  # max_retries; 503 is in retry_http_codes
+    assert any(p.error is not None for p in pages)
+    assert all(p.scrape_response is None for p in pages)
+
+
+@pytest.mark.asyncio
+async def test_fetch_ok_false_captcha_at_200_is_failed_and_links_not_walked():
+    # A captcha/interstitial served at HTTP 200 (fetch_ok=False) must be a
+    # failure, and its body must NOT feed link extraction — otherwise the
+    # crawler walks the block page's chrome as if it were real content.
+    calls = 0
+
+    async def fetch(url, opts):
+        nonlocal calls
+        calls += 1
+        return _blocked(200, raw_html='<a href="https://example.com/deep">x</a>')
+
+    engine, pages, events, stats = _make_engine(
+        scope_kwargs={"max_pages": 5},
+        fetch_side_effect=fetch,
+    )
+    await asyncio.wait_for(engine.run(), timeout=5.0)
+
+    assert stats[-1].visited == 0
+    assert stats[-1].failed == 1
+    assert stats[-1].retries_total == 0  # 200 not in retry_http_codes → not retried
+    assert calls == 1  # the /deep link from the block body was never fetched
+    assert any(p.error is not None for p in pages)
+
+
+@pytest.mark.asyncio
+async def test_fetch_ok_false_without_top_level_error_is_still_a_failure():
+    # The load-bearing HIGH-23 case: a soft block at HTTP 200 with a structured
+    # body and NO top-level error — only meta.fetch_ok=False marks it. This
+    # isolates the `not fetch_ok` clause of the gate (error is absent here).
+    calls = 0
+
+    async def fetch(url, opts):
+        nonlocal calls
+        calls += 1
+        return _blocked(200, raw_html='<a href="https://example.com/deep">x</a>', error=None)
+
+    engine, pages, events, stats = _make_engine(
+        scope_kwargs={"max_pages": 5},
+        fetch_side_effect=fetch,
+    )
+    await asyncio.wait_for(engine.run(), timeout=5.0)
+
+    assert stats[-1].visited == 0
+    assert stats[-1].failed == 1
+    assert calls == 1  # block body's link never walked
+    assert any(p.error is not None for p in pages)
+
+
+@pytest.mark.asyncio
+async def test_genuine_404_stays_a_visit_not_a_failure():
+    # A real target 404 (fetch_ok defaults True, no error) is a definitive
+    # server response, not a block — it must stay a visited page so the gate
+    # can't start silently dropping 404s.
+    engine, pages, events, stats = _make_engine(
+        scope_kwargs={"max_pages": 5},
+        fetch_return=_scrape(404),
+    )
+    await asyncio.wait_for(engine.run(), timeout=5.0)
+
+    assert stats[-1].visited == 1
+    assert stats[-1].failed == 0
+    assert any(p.status_code == 404 and p.error is None for p in pages)

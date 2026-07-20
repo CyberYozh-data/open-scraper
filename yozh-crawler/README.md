@@ -130,6 +130,10 @@ huge sitemap), `limit`, and proxy:
 set the scraper resolves the upstream URL (`GET /api/v1/proxies/resolve`, reusing
 its CyberYozh integration) and the crawler routes the robots/sitemap/seed
 fetches through it — useful for sites that block datacenter IPs or geo-restrict.
+That endpoint hands out reusable proxy credentials, so it is gated by a shared
+`SERVICE_TOKEN`: set the same value in the crawler's and scraper's env and the
+crawler sends it as `X-Service-Token` automatically. If it is unset (or the two
+sides disagree) the scraper refuses to resolve and `/map` degrades to direct.
 
 **Recency filter / sort** (sitemap `<lastmod>`): `published_after` (`YYYY-MM-DD`,
 keep URLs modified on/after that date), `recent_days` (shorthand: within the last

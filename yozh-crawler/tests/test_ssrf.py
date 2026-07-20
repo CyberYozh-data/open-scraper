@@ -29,7 +29,48 @@ class TestIpIsPublic:
     def test_rejects_non_public(self, ip):
         assert _ip_is_public(ip) is False
 
-    @pytest.mark.parametrize("ip", ["8.8.8.8", "1.1.1.1"])
+    @pytest.mark.parametrize(
+        "ip",
+        [
+            "100.64.0.1",        # CGNAT / RFC 6598 (shared-ISP NAT; Tailscale etc.)
+            "100.127.255.254",   # CGNAT upper edge
+        ],
+    )
+    def test_rejects_cgnat(self, ip):
+        assert _ip_is_public(ip) is False
+
+    @pytest.mark.parametrize(
+        "ip",
+        [
+            "::ffff:169.254.169.254",  # IPv4-mapped link-local (cloud metadata)
+            "::ffff:10.0.0.1",         # IPv4-mapped RFC1918
+            "::ffff:127.0.0.1",        # IPv4-mapped loopback
+        ],
+    )
+    def test_rejects_ipv4_mapped_private(self, ip):
+        assert _ip_is_public(ip) is False
+
+    @pytest.mark.parametrize(
+        "ip",
+        [
+            "::ffff:100.64.0.1",  # IPv4-mapped CGNAT (unwrap + CGNAT rule together)
+            "100.64.0.0",         # CGNAT lower edge
+            "::10.0.0.1",         # IPv4-compatible IPv6 embedding RFC1918
+            "::169.254.169.254",  # IPv4-compatible IPv6 embedding link-local metadata
+            "64:ff9b::a00:1",     # NAT64 (RFC 6052) embedding 10.0.0.1
+            "2002:0a00:0001::",   # 6to4 embedding 10.0.0.1
+            "2002:a9fe:a9fe::",   # 6to4 embedding 169.254.169.254 (metadata)
+            "0.0.0.1",            # 0.0.0.0/8 "this network"
+            "240.0.0.1",          # class-E reserved
+        ],
+    )
+    def test_rejects_embedded_and_reserved(self, ip):
+        # These rely on ipaddress's is_reserved/is_private classification, which
+        # is version-dependent stdlib behaviour — pin it so an interpreter bump
+        # can't silently reopen an SSRF hole.
+        assert _ip_is_public(ip) is False
+
+    @pytest.mark.parametrize("ip", ["8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"])
     def test_allows_public(self, ip):
         assert _ip_is_public(ip) is True
 

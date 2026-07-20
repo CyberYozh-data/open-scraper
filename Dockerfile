@@ -33,9 +33,9 @@ RUN python -m camoufox fetch
 # is set. Kept before COPY src so a source change doesn't re-pull it.
 RUN playwright install chrome
 
-# Xvfb (virtual X display) so the browser can run *headful* (HEADLESS=false) on a
-# headless server — headful drops the `--headless` tell some anti-bots flag. The
-# entrypoint only starts Xvfb when HEADLESS=false; default headless runs skip it.
+# Xvfb (virtual X display) so the browser can run *headful* on a headless
+# server. Launch mode is per-request, so the entrypoint starts Xvfb
+# unconditionally — one idle process per container, independent of HEADLESS.
 RUN apt-get update && apt-get install -y --no-install-recommends xvfb \
     && rm -rf /var/lib/apt/lists/*
 
@@ -52,6 +52,6 @@ RUN chmod +x /app/scripts/docker-entrypoint.sh
 ENV HOST=0.0.0.0
 ENV PORT=8000
 
-# Entrypoint conditionally starts Xvfb (headful) then execs the CMD / compose command.
+# Entrypoint starts Xvfb (headful support is per-request) then execs the CMD / compose command.
 ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
 CMD ["python", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

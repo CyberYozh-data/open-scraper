@@ -77,18 +77,39 @@ class TestProxyResolver:
             assert isinstance(session, DirectSession)
 
     @pytest.mark.asyncio
-    async def test_open_session_no_client(self):
-        """open_session without client → DirectSession"""
+    async def test_open_session_proxy_requested_but_no_client_fails_closed(self):
+        """A proxy explicitly requested with no provider configured must fail
+        closed (ProxyConfigError), never silently fall back to direct egress —
+        that would expose the real server IP while the response still claims the
+        requested proxy. Callers that want direct ask for proxy_type='none'."""
+        from src.proxy.base import ProxyConfigError
+
         with patch("src.proxy.resolver.settings") as mock_settings:
             mock_settings.cyberyozh_api_key = None
 
             resolver = ProxyResolver()
-            session = await resolver.open_session(
-                proxy_type="mobile",
-                proxy_pool_id=None,
-            )
+            with pytest.raises(ProxyConfigError):
+                await resolver.open_session(proxy_type="mobile", proxy_pool_id=None)
 
-            assert isinstance(session, DirectSession)
+    @pytest.mark.asyncio
+    async def test_open_session_prem_without_v2_client_fails_closed(self):
+        """prem_res_rotating with the v2 client unconfigured must also fail
+        closed rather than silently go direct."""
+        from pydantic import SecretStr
+
+        from src.proxy.base import ProxyConfigError
+
+        with patch("src.proxy.resolver.settings") as mock_settings:
+            mock_settings.cyberyozh_api_key = SecretStr("k")
+            mock_settings.cyberyozh_base_url = "https://app.cyberyozh.com"
+
+            resolver = ProxyResolver()
+            resolver._client_v2 = None  # v1 present, v2 gateway missing
+
+            with pytest.raises(ProxyConfigError):
+                await resolver.open_session(
+                    proxy_type="prem_res_rotating", proxy_pool_id=None
+                )
 
     @pytest.mark.asyncio
     async def test_open_session_cyberyozh(self, mocker):

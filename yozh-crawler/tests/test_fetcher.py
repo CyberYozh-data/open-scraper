@@ -25,6 +25,22 @@ def client():
     return ScraperClient(base_url="http://scraper", poll_interval_ms=1, timeout_ms=5_000)
 
 
+# ─── service token header ───────────────────────────────────────────────────────
+
+def test_service_token_sets_header():
+    c = ScraperClient(
+        base_url="http://scraper", poll_interval_ms=1, timeout_ms=5_000,
+        service_token="s3cret",
+    )
+    # The scraper gates /proxies/resolve on this header; it must ride on every call.
+    assert c._client.headers.get("X-Service-Token") == "s3cret"
+
+
+def test_no_service_token_omits_header():
+    c = ScraperClient(base_url="http://scraper", poll_interval_ms=1, timeout_ms=5_000)
+    assert "X-Service-Token" not in c._client.headers
+
+
 # ─── happy path ───────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

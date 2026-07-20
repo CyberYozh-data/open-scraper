@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from typing import Awaitable, Callable
 
 import httpx
-from fastapi import APIRouter, Request as FastapiRequest
+from fastapi import APIRouter, HTTPException, Request as FastapiRequest
 
 from ..dedup import DedupSet, canonicalize_url
 from ..linkextract import extract_links
@@ -75,7 +75,14 @@ async def _fetch_seed_html(
             result = await scraper_fetch(
                 seed, {"render": True, "raw_html": True, **_proxy_scrape_options(req)}
             )
-            final_url = (result.get("meta") or {}).get("final_url") or seed
+            meta = result.get("meta") or {}
+            # A completed scrape can still be a block/error page (captcha/ban/
+            # transient all set meta.fetch_ok=False). Don't hand its body back as
+            # the seed — mirror the non-render path, which warns on a non-200.
+            if not meta.get("fetch_ok", True) or result.get("error"):
+                reason = result.get("error") or f"HTTP {meta.get('status_code')}"
+                return None, seed, f"seed render blocked/failed ({reason})"
+            final_url = meta.get("final_url") or seed
             return result.get("raw_html"), final_url, None
         except Exception as exc:  # pylint: disable=broad-exception-caught
             return None, seed, f"seed render failed: {exc}"
@@ -227,8 +234,10 @@ async def _open_proxied_client(
 ) -> httpx.AsyncClient | None:
     """Resolve the upstream proxy and build a per-request client over it.
 
-    None means "go direct" — resolution and client-construction failures
-    degrade to a warning rather than 500-ing the request.
+    None means the requested proxy could not be provided — the caller fails the
+    request closed rather than degrading to direct egress (an explicit proxy
+    request must never silently leak the crawler's real IP). Appends the reason
+    to ``warns`` so the caller can surface it.
     """
     try:
         proxy_url = await scraper.resolve_proxy(
@@ -239,12 +248,13 @@ async def _open_proxied_client(
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         log.warning("map proxy resolve failed seed=%s: %s", str(req.seed_url), exc)
-        warns.append(f"proxy resolve failed ({exc}); used direct")
+        warns.append(f"proxy resolve failed ({exc})")
         return None
     if not proxy_url:
+        warns.append("proxy resolve returned no upstream URL")
         return None
-    # Needs httpx[socks] for socks5; guarded so a malformed URL degrades to
-    # direct rather than 500-ing.
+    # Needs httpx[socks] for socks5; a malformed URL fails the request closed
+    # (below) rather than silently going direct.
     try:
         return httpx.AsyncClient(
             proxy=proxy_url,
@@ -252,8 +262,14 @@ async def _open_proxied_client(
             follow_redirects=False,
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        log.warning("map proxy client init failed seed=%s: %s", str(req.seed_url), exc)
-        warns.append(f"proxy client init failed ({exc}); used direct")
+        # Never interpolate the exception text here: an httpx proxy error can
+        # embed the credentialed proxy URL, and this reason flows into the log
+        # and the 502 response body. Report the type only (mirrors the scraper's
+        # "never log the resolved URL" discipline).
+        log.warning(
+            "map proxy client init failed seed=%s: %s", str(req.seed_url), type(exc).__name__
+        )
+        warns.append("proxy client init failed")
         return None
 
 
@@ -265,21 +281,24 @@ async def create_map(req: MapRequest, app_req: FastapiRequest) -> MapResponse:
 
     if req.proxy_type and req.proxy_type != "none":
         client = await _open_proxied_client(scraper, req, warns)
-        if client is not None:
-            # SSRF guard off: egress is via the upstream proxy, not the crawler.
-            try:
-                return await build_map(
-                    req, http_client=client, scraper_fetch=scraper.fetch,
-                    check_ssrf=False, extra_warnings=warns,
-                )
-            finally:
-                await client.aclose()
-        if not warns:
-            warns.append("proxy unavailable; used direct")
-        log.warning(
-            "map proxy unavailable seed=%s proxy_type=%s; used direct",
-            str(req.seed_url), req.proxy_type,
-        )
+        if client is None:
+            # Fail closed: an explicit proxy was requested but could not be
+            # provided. Degrading to a direct fetch would leak the crawler's
+            # real IP while the caller believes egress went through the proxy.
+            reason = warns[-1] if warns else "proxy unavailable"
+            log.warning(
+                "map proxy required but unavailable seed=%s proxy_type=%s: %s",
+                str(req.seed_url), req.proxy_type, reason,
+            )
+            raise HTTPException(status_code=502, detail=f"proxy required but unavailable: {reason}")
+        # SSRF guard off: egress is via the upstream proxy, not the crawler.
+        try:
+            return await build_map(
+                req, http_client=client, scraper_fetch=scraper.fetch,
+                check_ssrf=False, extra_warnings=warns,
+            )
+        finally:
+            await client.aclose()
 
     return await build_map(
         req, http_client=state.http_client, scraper_fetch=scraper.fetch,

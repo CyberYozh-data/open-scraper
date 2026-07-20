@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from src.api.service_auth import require_service_token
 from src.sessions.service import StorageStateNotRevealed, session_service
 from src.sessions.models import (
     SessionCookieInjection,
@@ -22,7 +23,14 @@ from src.sessions.store import (
 
 
 log = logging.getLogger(__name__)
-router = APIRouter()
+
+# CRIT-02: every /sessions operation creates, reveals, mutates, logs into, or
+# deletes an authenticated browser session (cookies + storage_state). None of it
+# is safe for an anonymous caller — without ownership, a leaked/enumerated
+# session_id is a full account hijack. Gate the whole surface behind the shared
+# SERVICE_TOKEN (fail-closed), same as /proxies/resolve. Per-owner ownership is
+# a separate follow-up for when a multi-tenant consumer actually exists.
+router = APIRouter(dependencies=[Depends(require_service_token)])
 
 
 @router.post("", response_model=SessionCreated, operation_id="create_session")
@@ -57,6 +65,10 @@ async def get_session_storage_state(
     session_id: str,
     reveal: int = Query(0, ge=0, le=1, description="Set 1 to return cookies + localStorage."),
 ) -> dict:
+    # INTENTIONALLY NOT MOUNTED (no @router decorator, not added anywhere): this
+    # reveals raw cookies + localStorage and has no route. If you ever wire it
+    # up, mount it on THIS router so it inherits the require_service_token gate —
+    # never on a separate ungated router.
     try:
         return await session_service.get_storage_state(session_id, reveal)
     except StorageStateNotRevealed as exc:

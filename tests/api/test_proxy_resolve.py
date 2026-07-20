@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import pytest
+from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from src.api import proxies as proxies_mod
 from src.api.proxies import _proxy_config_to_url, resolve_proxy
 from src.proxy.base import ProxyConfigError
 from src.proxy.models import ProxyConfig
+from src.settings import settings
 
 
 class TestProxyConfigToUrl:
@@ -162,3 +165,83 @@ class TestResolveProxyEndpoint:
         )
         out = await resolve_proxy(proxy_type="res_rotating")
         assert out.proxy_url is None
+
+
+class TestResolveProxyServiceAuth:
+    """CRIT-01: GET /proxies/resolve returns a URL with embedded, reusable proxy
+    credentials, so it must never be reachable without the shared SERVICE_TOKEN.
+    Fail-closed: with no token configured it refuses to serve credentials at all.
+
+    These exercise the FastAPI dependency over the HTTP stack (the unit tests
+    above call the endpoint function directly and bypass route dependencies).
+    """
+
+    @staticmethod
+    def _client() -> TestClient:
+        from src.app import create_app
+
+        # No lifespan (`with`) — the auth gate needs neither Redis nor the job
+        # store, and skipping startup keeps the test hermetic.
+        return TestClient(create_app())
+
+    @pytest.mark.parametrize(
+        "token, header, status",
+        [
+            (None, None, 503),  # unset -> fail closed, refuse to serve
+            (SecretStr(""), "", 503),  # empty is "unconfigured" too -> fail closed
+            (SecretStr("s3cret"), None, 401),  # configured, header missing
+            (SecretStr("s3cret"), "wrong", 401),  # configured, wrong header
+        ],
+    )
+    def test_rejects_without_valid_token(self, monkeypatch, mocker, token, header, status):
+        monkeypatch.setattr(settings, "service_token", token)
+        spy = mocker.patch.object(proxies_mod.proxy_resolver, "open_session")
+        headers = {} if header is None else {"X-Service-Token": header}
+        resp = self._client().get(
+            "/api/v1/proxies/resolve",
+            params={"proxy_type": "res_rotating"},
+            headers=headers,
+        )
+        assert resp.status_code == status
+        spy.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_ascii_header_is_rejected_not_500(self, monkeypatch):
+        # ASGI servers decode raw header bytes as latin-1, so the token string
+        # reaching the guard can hold code points 128-255. hmac.compare_digest
+        # raises TypeError on a str with non-ASCII — the guard must encode first
+        # and return a clean 401, not a 500. (The httpx TestClient refuses to
+        # send non-ASCII headers, so this exercises the dependency directly.)
+        from fastapi import HTTPException
+
+        from src.api.service_auth import require_service_token
+
+        monkeypatch.setattr(settings, "service_token", SecretStr("s3cret"))
+        with pytest.raises(HTTPException) as exc:
+            await require_service_token(x_service_token="\xff\xfe")
+        assert exc.value.status_code == 401
+
+    def test_none_proxy_type_still_requires_token(self, monkeypatch):
+        # proxy_type=none short-circuits inside the handler, but the gate runs
+        # first — don't even confirm the endpoint shape to an anonymous caller.
+        monkeypatch.setattr(settings, "service_token", SecretStr("s3cret"))
+        resp = self._client().get(
+            "/api/v1/proxies/resolve", params={"proxy_type": "none"}
+        )
+        assert resp.status_code == 401
+
+    def test_correct_header_allows(self, monkeypatch, mocker):
+        monkeypatch.setattr(settings, "service_token", SecretStr("s3cret"))
+        cfg = ProxyConfig(server="socks5://h:1080", username="u", password="p")
+        mocker.patch.object(
+            proxies_mod.proxy_resolver,
+            "open_session",
+            new=mocker.AsyncMock(return_value=_FakeSession(cfg)),
+        )
+        resp = self._client().get(
+            "/api/v1/proxies/resolve",
+            params={"proxy_type": "res_rotating", "country_code": "US"},
+            headers={"X-Service-Token": "s3cret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["proxy_url"] == "socks5://u:p@h:1080"

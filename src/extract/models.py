@@ -9,6 +9,7 @@ ExtractType = Literal["css", "xpath"]
 PostProcessOp = Literal[
     "regex",
     "strip",
+    "strip_tags",
     "parse_int",
     "parse_float",
     "parse_price",
@@ -27,7 +28,10 @@ class PostProcess(BaseModel):
             "returns a capture group; 'parse_price' (args=['us'|'eu']?) and "
             "'parse_int'/'parse_float' coerce to numbers; 'strip' (args=[chars]?), "
             "'lowercase', 'uppercase', and 'replace' (args=[old, new]) are "
-            "string ops."
+            "string ops. 'strip_tags' renders an HTML fragment down to its "
+            "text (tags dropped, entities decoded, whitespace collapsed) — "
+            "pair it with attr='html' + 'regex' to read a value out of an "
+            "always-present container without the container's markup."
         ),
     )
     args: list[Any] = Field(default_factory=list)

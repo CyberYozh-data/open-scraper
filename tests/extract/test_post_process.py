@@ -179,6 +179,55 @@ class TestStringOps:
         assert data["t"] == "Hello Earth"
 
 
+class TestStripTagsOp:
+    """strip_tags exists so a field can anchor to an always-present container
+    (attr='html' + regex) and still return text — see google_search.snippets.
+    """
+
+    def _run(self, html: str, ops: list[PostProcess], attr: str = "text"):
+        rule = ExtractRule(
+            type="css",
+            fields={"t": FieldRule(selector=".p", attr=attr, post_process=ops)},
+        )
+        return extract_fields(html, rule)
+
+    def test_drops_tags_decodes_entities_collapses_whitespace(self):
+        html = "<div class='p'><span>a &amp; <em>b</em>\n   c</span></div>"
+        data, warnings = self._run(html, [PostProcess(op="strip_tags")], attr="html")
+        assert data["t"] == "a & b c"
+        assert warnings == []
+
+    def test_matches_attr_text_for_the_same_node(self):
+        """The whole point: html+strip_tags == what attr='text' returned."""
+        html = "<div class='p'>x <em>y</em>  &amp;  <span>z</span></div>"
+        as_text, _ = self._run(html, [])
+        as_html, _ = self._run(html, [PostProcess(op="strip_tags")], attr="html")
+        assert as_html["t"] == as_text["t"] == "x y & z"
+
+    def test_handles_unbalanced_fragment_from_a_regex_slice(self):
+        # A regex slice of a container's html is rarely well-formed; stray
+        # close tags must not blow up or leak.
+        html = "<div class='p'><span>text</span></div></div></div></div>"
+        data, warnings = self._run(html, [PostProcess(op="strip_tags")], attr="html")
+        assert data["t"] == "text"
+        assert warnings == []
+
+    def test_plain_text_passthrough_is_whitespace_collapsed(self):
+        html = "<div class='p'>  plain   text  </div>"
+        data, _ = self._run(html, [PostProcess(op="strip_tags")])
+        assert data["t"] == "plain text"
+
+    def test_none_from_earlier_op_stays_none(self):
+        # regex miss -> None -> strip_tags must not coerce it to "None".
+        html = "<div class='p'>no digits here</div>"
+        data, _ = self._run(
+            html,
+            [PostProcess(op="regex", args=[r"(\d+)"]), PostProcess(op="strip_tags")],
+            attr="html",
+        )
+        assert data["t"] is None
+
+
 class TestLogSpamDedupe:
     def test_invalid_regex_emits_single_warning_for_list_field(self):
         rule = ExtractRule(
