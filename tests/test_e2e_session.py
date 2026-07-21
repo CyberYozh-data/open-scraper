@@ -13,8 +13,15 @@ import httpx
 import pytest
 import uvicorn
 from fastapi import FastAPI, Form, Request, Response
+from pydantic import SecretStr
 
 from src.app import create_app
+from src.settings import settings
+
+# The /sessions surface is gated behind SERVICE_TOKEN (CRIT-02). This test
+# drives a real uvicorn instance rather than the shared TestClient fixture, so
+# it configures the token itself and presents it on every call.
+_SERVICE_TOKEN = "test-e2e-svc-token"
 
 
 def _free_port() -> int:
@@ -101,7 +108,9 @@ async def _setup_inmemory_broker_state() -> None:
     reason="Playwright not installed locally",
 )
 @pytest.mark.asyncio
-async def test_session_login_and_authenticated_scrape():
+async def test_session_login_and_authenticated_scrape(monkeypatch):
+    monkeypatch.setattr(settings, "service_token", SecretStr(_SERVICE_TOKEN))
+
     target_port = _free_port()
     scraper_port = _free_port()
 
@@ -140,6 +149,7 @@ async def test_session_login_and_authenticated_scrape():
         async with httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{scraper_port}/api/v1",
             timeout=120,
+            headers={"X-Service-Token": _SERVICE_TOKEN},
         ) as api_client:
             response = await api_client.post("/sessions", json={"ttl_seconds": 600})
             response.raise_for_status()
