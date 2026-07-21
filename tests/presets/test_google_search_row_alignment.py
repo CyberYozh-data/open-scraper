@@ -2,9 +2,11 @@
 
 extract_fields matches each field's selector against the whole document
 independently and returns flat parallel arrays; consumers zip them by index.
-Any field matching a different number of nodes per result silently misaligns
-the response — no exception, no warning, just wrong data lined up under the
-wrong result.
+Any field matching a different number of nodes per result misaligns the
+response — no exception, just wrong data lined up under the wrong result.
+The `row_alignment_mismatch` guard catches the subset where the field lengths
+end up unequal; a value corrupted in place keeps the lengths equal and stays
+invisible to it.
 
 pydantic's default `extra="ignore"` means a typo'd JSON key vanishes
 silently instead of failing validation, so these tests don't just check the
@@ -135,7 +137,9 @@ class TestGoogleSearchSnippetlessResult:
     organic result (the rich/featured GitHub result) carries no data-sncf
     node. While `snippets` selected `div[data-sncf='1']` directly — a node
     that exists only when the snippet does — that gave snippets=5 against
-    titles=6 and shifted every snippet up one row, with no warning at all.
+    titles=6 and shifted every snippet up one row. It went unnoticed because
+    the `row_alignment_mismatch` guard did not exist yet; it would report the
+    same shape today, though the anchoring below is what prevents it.
     """
 
     def setup_method(self):
@@ -195,8 +199,9 @@ class TestGoogleSearchKnownAlignmentLimitations:
     NOT fixed — documented so the next maintainer sees the real boundary of
     the fix instead of trusting the scoping blindly. `snippets` is anchored to
     the always-present result container, but titles/links still rest on a
-    1-h3-per-result assumption, so this remains the array-grow class: silent,
-    warning-free, and wrong for every row after the first offender.
+    1-h3-per-result assumption, so this remains the array-grow class: wrong
+    for every row after the first offender. The `row_alignment_mismatch` guard
+    reports it (the grown fields end up longer), but does not prevent it.
     """
 
     def setup_method(self):
@@ -240,7 +245,12 @@ class TestGoogleSearchKnownAlignmentLimitations:
         assert len(data["links"]) == 4
         assert len(data["snippets"]) == 2
         assert len(data["result_blocks"]) == 2
-        assert not warnings  # silently misaligned
+        # Misaligned and reported: titles/links (4) outrun the anchored
+        # fields (2), which is exactly the shape the length guard detects.
+        assert len(warnings) == 1
+        assert warnings[0].startswith("row_alignment_mismatch:")
+        assert "'titles'=4" in warnings[0]
+        assert "'snippets'=2" in warnings[0]
 
         # Snippet stays one-per-result (alignment holds), but the sitelink text
         # rendered after it bleeds into the FIRST result's own snippet. The
@@ -274,9 +284,13 @@ class TestGoogleSearchSnippetRegexBoundary:
     likeliest real drift — Google need only render a single inline node after
     the snippet to blank the whole column.
 
-    All three are silent (`warnings == []`) and none breaks alignment: the
-    wrong, short or None value always lands in its OWN row's slot, never a
-    neighbour's, because the field stays anchored to div.tF2Cxc.
+    None of the three breaks alignment: the wrong, short or None value always
+    lands in its OWN row's slot, never a neighbour's, because the field stays
+    anchored to div.tF2Cxc. They are therefore invisible to the
+    `row_alignment_mismatch` length guard too — it compares field lengths, and
+    a corrupted-but-present value keeps the lengths equal. The lone exception
+    below is a trailing <h3>, which trips the guard by growing `titles`; that
+    is the array-grow class riding along, not the snippet regex being caught.
 
     Measured 2026-07-17 on the live captures (google.co.uk ?q=github,
     ?q=python+tutorial, plus the preset corpus — 17 snippet-bearing blocks):
@@ -289,21 +303,44 @@ class TestGoogleSearchSnippetRegexBoundary:
     def setup_method(self):
         self.preset = _load("google_search")
 
-    def _snippets(self, block_body: str):
+    def _extract(self, block_body: str):
         serp = f'<html><body><div id="rso"><div class="tF2Cxc">{block_body}</div></div></body></html>'
-        data, warnings = extract_fields(serp, self.preset.parsing_instructions)
-        assert not warnings  # every mode is silent
+        return extract_fields(serp, self.preset.parsing_instructions)
+
+    def _snippets(self, block_body: str):
+        """Snippets for a one-result SERP, asserting the mode was alignment
+        neutral: the corrupted value landed in its own row's slot, leaving
+        every parallel array the same length and the guard quiet."""
+        data, warnings = self._extract(block_body)
+        assert not warnings, warnings
         return data["snippets"]
 
+    @staticmethod
+    def _block_with_trailing(tag: str) -> str:
+        return (
+            '<div class="yuRUbf"><a href="https://a.example"><h3>T</h3></a></div>'
+            '<div class="VwiC3b" data-sncf="1">Snippet text</div>'
+            f"<{tag}>trailing inline node</{tag}>"
+        )
+
     def test_mode_b_non_div_sibling_after_snippet_deletes_it(self):
-        # <span>/<h3>/<a> after the snippet: the regex needs a `</div></div>`
-        # pair and never finds one, so the snippet vanishes entirely.
-        for tag in ("span", "h3", "a"):
-            assert self._snippets(
-                '<div class="yuRUbf"><a href="https://a.example"><h3>T</h3></a></div>'
-                '<div class="VwiC3b" data-sncf="1">Snippet text</div>'
-                f"<{tag}>trailing inline node</{tag}>"
-            ) == [None], tag
+        # <span>/<a> after the snippet: the regex needs a `</div></div>`
+        # pair and never finds one, so the snippet vanishes entirely — the
+        # None still occupies its own slot, so no array changes length.
+        for tag in ("span", "a"):
+            assert self._snippets(self._block_with_trailing(tag)) == [None], tag
+
+    def test_mode_b_trailing_h3_also_grows_titles(self):
+        # <h3> is the one trailing node that is not alignment neutral: it
+        # deletes the snippet like any non-div sibling AND matches the titles
+        # selector, so titles outrun the anchored fields. That length gap —
+        # not the snippet deletion — is what the guard can see.
+        data, warnings = self._extract(self._block_with_trailing("h3"))
+
+        assert data["snippets"] == [None]
+        assert data["titles"] == ["T", "trailing inline node"]
+        assert len(warnings) == 1
+        assert warnings[0].startswith("row_alignment_mismatch:")
 
     def test_mode_b_keeps_the_none_in_its_own_slot(self):
         # The deletion is bounded to the offending row: the next result keeps

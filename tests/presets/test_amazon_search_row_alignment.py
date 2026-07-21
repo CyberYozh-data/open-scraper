@@ -2,9 +2,10 @@
 
 extract_fields matches each field's selector against the whole document
 independently and returns flat parallel arrays; consumers zip them by index.
-Any field matching a different number of nodes per card silently misaligns
-the response — no exception, no warning, just wrong data lined up under the
-wrong product.
+Any field matching a different number of nodes per card misaligns the
+response — no exception, just wrong data lined up under the wrong product.
+The `row_alignment_mismatch` guard catches the subset where the lengths end
+up unequal; compensating errors within one field still slip through.
 
 The invariant that makes null-in-slot work is *container presence*, not
 selector optionality: every field anchors to a per-card container Amazon
@@ -221,6 +222,10 @@ class TestAmazonSearchExtraction:
         came back equal, extract_fields grew per-row alignment and the
         container-anchor requirement can be relaxed; until then, never point
         a field at an element that exists only when its value does.
+
+        The shrink is no longer silent: the `row_alignment_mismatch` guard
+        sees the unequal lengths and warns. That warning is the safety net,
+        not the fix — it reports the corruption rather than preventing it.
         """
         html = _amazon_page(
             [
@@ -240,10 +245,13 @@ class TestAmazonSearchExtraction:
 
         assert len(data["titles"]) == 2
         assert len(data["urls"]) == 2
-        # The array SHRANK — this is the silent-misalignment failure mode.
+        # The array SHRANK — this is the misalignment failure mode.
         assert len(data["prices"]) == 1
         assert data["prices"] == [19.99]
-        assert not warnings  # silently wrong: no warning is emitted
+        # Wrong, but not silent: the length guard flags the shrunk field.
+        assert len(warnings) == 1
+        assert warnings[0].startswith("row_alignment_mismatch:")
+        assert "'prices'=1" in warnings[0]
 
 
 class TestAmazonSearchPriceValueTraps:
