@@ -47,6 +47,20 @@ class TestLocaleProfile:
         assert loc.country == "DE"
         assert loc.locale is None
 
+    def test_proxy_country_defaults_to_none(self):
+        """Unset proxy_country means 'exit through the market country' —
+        the materializer falls back to `country` when this is None."""
+        loc = LocaleProfile(domain="com", country="US")
+        assert loc.proxy_country is None
+
+    def test_proxy_country_can_diverge_from_market_country(self):
+        """A locale can pin the market (gl=/hl=) to one country while
+        exiting through a different one, e.g. Google's US residential
+        proxy range is hard-blocked so the `us` locale must exit via GB."""
+        loc = LocaleProfile(domain="com", country="US", proxy_country="GB")
+        assert loc.country == "US"
+        assert loc.proxy_country == "GB"
+
     def test_explicit_override_kept(self):
         loc = LocaleProfile(
             domain="com",

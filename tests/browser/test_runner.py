@@ -60,6 +60,26 @@ class TestPlaywrightRunner:
             await runner.stop()
 
     @pytest.mark.asyncio
+    async def test_stop_stops_the_driver_even_when_browser_close_raises(self):
+        """A wedged / OOM-killed browser raises on close(). If that skips
+        playwright.stop() the node driver process leaks — and for an ephemeral
+        runner (never in state.runners) no lifecycle path can ever reclaim it."""
+        runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
+        mock_browser = AsyncMock()
+        mock_browser.close = AsyncMock(side_effect=PWError("browser wedged"))
+        mock_playwright = AsyncMock()
+        mock_playwright.stop = AsyncMock()
+        runner._browser = mock_browser
+        runner._playwright = mock_playwright
+
+        await runner.stop()  # must not raise: teardown is best-effort
+
+        mock_playwright.stop.assert_awaited_once()  # the driver was reclaimed
+        # Handles cleared regardless, so the next start() rebuilds from scratch.
+        assert runner._browser is None
+        assert runner._playwright is None
+
+    @pytest.mark.asyncio
     async def test_runner_start_with_webrtc_block(self):
         """Start browser with WebRTC blocking enabled"""
         runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
@@ -161,6 +181,10 @@ class TestPlaywrightRunner:
         Without this guarantee an idle-shutdown that hits a broken Chromium
         would keep ._browser set, and the next idempotent start() would skip
         re-launching, so the next fetch() reuses a dead Browser handle.
+
+        stop() no longer propagates the close failure: teardown is best-effort so
+        that playwright.stop() always runs (see the driver-leak test above). Every
+        caller already discarded this exception anyway.
         """
         runner = PlaywrightRunner(headless=True, block_assets=False, timeout_ms=30000)
 
@@ -170,8 +194,7 @@ class TestPlaywrightRunner:
         runner._browser = mock_browser
         runner._playwright = mock_playwright
 
-        with pytest.raises(RuntimeError, match="wedged Chromium"):
-            await runner.stop()
+        await runner.stop()
 
         # Handles cleared before close() ran, so the next start() will rebuild.
         assert runner._browser is None

@@ -49,14 +49,29 @@ class LocaleProfile(BaseModel):
     """Per-locale request shaping.
 
     `domain` is the TLD-suffix used by `url_template` (e.g. `de` → `amazon.de`).
-    `country` is the ISO 3166-1 alpha-2 code routed to proxy + browser
-    fingerprint. `locale`, `timezone`, `accept_language` may be omitted —
+    `country` is the ISO 3166-1 alpha-2 **market** code: it fills the
+    `url_template`'s `{country}`/`{lang}` placeholders (e.g. `gl=`/`hl=` on a
+    search engine) and seeds `derive_locale_profile()`'s locale/timezone/
+    accept_language lookup. It does NOT necessarily control the proxy exit —
+    see `proxy_country`.
+
+    `proxy_country` is the ISO 3166-1 alpha-2 code for the proxy **exit**
+    (and, via `proxy_geo`, the browser's timezone/fingerprint — see
+    `src/browser/runner.py`'s `resolve_profile(proxy_geo.country_code, ...)`).
+    Defaults to `country` when unset, which is the common case where market
+    and exit coincide. Set it explicitly when they must diverge: e.g. Google
+    hard-blocks the proxy pool's US residential range with a 429 "unusual
+    traffic" response, so `google_search`'s `us` locale wants the US market
+    (`gl=us`) but must exit through a different country (GB).
+
+    `locale`, `timezone`, `accept_language` may be omitted —
     `derive_locale_profile()` fills them from `src/browser/geo_profile.py`
-    using `country` as the lookup key.
+    using `country` (the market) as the lookup key.
     """
 
     domain: str
     country: str
+    proxy_country: str | None = None
     locale: str | None = None
     timezone: str | None = None
     accept_language: str | None = None

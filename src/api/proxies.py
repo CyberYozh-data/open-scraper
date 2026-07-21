@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import ValidationError
 
+from src.api.service_auth import require_service_token
 from src.proxy.base import ProxyConfigError
 from src.proxy.models import ProxyConfig
 from src.proxy.resolver import CyberYozhAPIError, proxy_resolver
@@ -72,6 +73,7 @@ async def list_proxy_countries() -> CountriesResponse:
     "/resolve",
     response_model=ProxyResolveResponse,
     operation_id="resolve_proxy",
+    dependencies=[Depends(require_service_token)],
 )
 async def resolve_proxy(
     proxy_type: ScrapeProxyType,
@@ -97,11 +99,14 @@ async def resolve_proxy(
 
     Reuses the same CyberYozh resolution `/scrape` uses and returns the upstream
     proxy URL so service-to-service callers (e.g. the crawler's /map) can proxy
-    their own httpx fetches. `proxy_type=none` (or no proxy configured) → null.
+    their own httpx fetches. `proxy_type=none` → null. A real proxy_type with no
+    provider configured fails closed (422) rather than returning null and
+    letting the caller proceed direct — it never silently degrades egress.
 
     Security: the returned URL embeds proxy credentials. This is an internal,
-    same-trust-domain helper (it is excluded from the MCP tool surface and must
-    not be exposed publicly).
+    same-trust-domain helper — it is excluded from the MCP tool surface and
+    guarded by the SERVICE_TOKEN gate (X-Service-Token header, fail-closed when
+    unset); it must not be exposed to untrusted callers.
     """
     if proxy_type == "none":
         return ProxyResolveResponse(proxy_url=None)

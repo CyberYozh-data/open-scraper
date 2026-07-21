@@ -119,6 +119,20 @@ Chrome (bundled in the image) instead of Playwright's Chromium: real
 branding/codecs, a populated `navigator.plugins`, and a newer engine. Unset
 (default) = bundled Chromium.
 
+**Launch mode** — set `headless` per request to override the server's `HEADLESS`
+default:
+
+| `headless`        | Launch mode | When |
+|-------------------|-------------|------|
+| unset (default)   | the server's `HEADLESS` setting | almost always |
+| `true`            | forces headless | speed; the target doesn't check |
+| `false`           | forces headful (needs an X display — the image runs Xvfb) | targets that fingerprint headless Chromium |
+
+Only the server default stays warm. Asking for the *other* mode launches a
+throwaway browser for that request — ~1-2s extra and no idle RAM, the same
+trade-off `camoufox` makes. Independent of `warmup`, which controls session
+warm-up rather than how the browser launches.
+
 **Resolution** — `viewport: {width, height}` per request (default **1920×1080**);
 `window.screen` is set to match. Sessions pin it, so a session's login and every
 scrape on it share one screen size.

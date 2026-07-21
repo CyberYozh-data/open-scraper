@@ -676,8 +676,18 @@ the model string; the default is `DEFAULT_LLM_MODEL` (`openai/gpt-5.4-mini`).
 `FieldRule.post_process` is an ordered transform chain applied to matched
 values (per-item when `all: true`): `regex` (args `[pattern, group?]`),
 `parse_int`, `parse_float`, `parse_price` (args `["us"|"eu"]` for separator
-disambiguation), `strip`, `lowercase`, `uppercase`, `replace` (args
-`[old, new]`). A field may also override the rule's `type` (css/xpath).
+disambiguation), `strip`, `strip_tags`, `lowercase`, `uppercase`, `replace`
+(args `[old, new]`). A field may also override the rule's `type` (css/xpath).
+
+`strip_tags` renders an HTML fragment down to its text (tags dropped,
+entities decoded, whitespace collapsed). Pair `attr: "html"` + `regex` +
+`strip_tags` to read a value out of a container that is always present even
+when the value is missing — the row-alignment trick `amazon_search` and
+`google_search` rely on. Fields returning flat parallel arrays (`all: true`)
+must match exactly one node per row: a selector pointed at an element that
+only exists when its value does silently shrinks the array and shifts every
+later row, whereas an always-present container yields `null` in the right
+slot.
 
 ## Search
 

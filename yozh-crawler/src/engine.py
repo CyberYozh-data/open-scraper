@@ -228,14 +228,37 @@ class CrawlEngine:
             took_ms = int((time.perf_counter() - start) * 1000)
             meta = scrape_response.get("meta") or {}
             status_code = meta.get("status_code")
+            # meta.fetch_ok is the scraper's authoritative "genuine content"
+            # signal: captcha/ban/transient all set it False even when the HTTP
+            # status is 200 (see the scraper's classify_fetch). A blocked page is
+            # not a healthy session and not a rate-limit win, so factor it in.
+            fetch_ok = bool(meta.get("fetch_ok", True))
 
-            is_success = status_code is not None and 200 <= int(status_code) < 400
+            is_success = fetch_ok and status_code is not None and 200 <= int(status_code) < 400
             self._sessions.release(session, status_code=status_code, ok=is_success)
 
             if status_code in (429, 503):
                 self._limiter.on_429(domain)
             elif is_success:
                 self._limiter.on_success(domain)
+
+        # A completed scraper job can still carry a page the scraper marked as
+        # not-genuine content (fetch_ok=False — captcha/ban/transient) or an
+        # explicit error. Route it through the same retry/backoff path as a
+        # transport error instead of counting it as a visited page and walking
+        # links out of a block/error body (RETRY_HTTP_CODES / max_retries still
+        # apply via _handle_failure).
+        if not fetch_ok or scrape_response.get("error"):
+            await self._handle_failure(
+                page_request,
+                ScraperError(
+                    status_code=status_code,
+                    message=scrape_response.get("error") or f"page fetch not ok (HTTP {status_code})",
+                    retryable=True,
+                ),
+                took_ms,
+            )
+            return
 
         # Extract links from raw_html BEFORE dropping heavy payload below —
         # otherwise disabling scraping leaves the crawler with nothing to walk.

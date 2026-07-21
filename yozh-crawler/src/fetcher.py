@@ -26,13 +26,24 @@ class ScraperClient:
     one page); we unwrap results[0] for the caller.
     """
 
-    def __init__(self, base_url: str, poll_interval_ms: int, timeout_ms: int) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        poll_interval_ms: int,
+        timeout_ms: int,
+        service_token: str | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._poll = poll_interval_ms / 1000.0
         self._timeout_s = timeout_ms / 1000.0
+        # The scraper gates its credential-bearing /proxies/resolve endpoint on a
+        # shared SERVICE_TOKEN (X-Service-Token). Send it on every call so /map's
+        # proxy resolution is authorised; harmless on the ungated /scrape routes.
+        headers = {"X-Service-Token": service_token} if service_token else None
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=httpx.Timeout(self._timeout_s),
+            headers=headers,
         )
 
     async def close(self) -> None:
@@ -53,8 +64,9 @@ class ScraperClient:
         prem_proxy_options: dict | None = None,
     ) -> str | None:
         """Ask the scraper to resolve an upstream proxy URL (reuses its CyberYozh
-        resolution). Returns the SOCKS5 URL, or None for proxy_type=none / no
-        proxy configured."""
+        resolution). Returns the SOCKS5 URL, or None for proxy_type=none. A real
+        proxy_type the scraper can't provide (e.g. no key configured) comes back
+        as a non-200 and raises ScraperError — it never returns None as "direct"."""
         params: dict[str, str] = {"proxy_type": proxy_type}
         if proxy_pool_id:
             params["proxy_pool_id"] = proxy_pool_id

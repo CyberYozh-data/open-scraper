@@ -5,8 +5,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from src.app import create_app
+from src.settings import settings
 from src.queue.store import get_job_store
 from src.queue.tasks import LOGIN_RESULT_KEY
 from src.sessions.store import (
@@ -17,9 +19,13 @@ from src.sessions.store import (
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    # The /sessions surface is gated behind SERVICE_TOKEN (CRIT-02); configure a
+    # token and send it by default so these behavioural tests exercise the
+    # handlers rather than the gate (the gate itself is covered separately).
+    monkeypatch.setattr(settings, "service_token", SecretStr("test-svc-token"))
     app = create_app()
-    with TestClient(app) as test_client:
+    with TestClient(app, headers={"X-Service-Token": "test-svc-token"}) as test_client:
         yield test_client
 
 
@@ -255,3 +261,87 @@ class TestBatchScrapeWithSession:
             ],
         })
         assert response.status_code == 422
+
+
+class TestSessionsServiceAuth:
+    """CRIT-02: the whole /sessions surface is hijack-bearing (list/get/use/
+    login/cookies/delete an authenticated browser session), so it must never be
+    reachable without the shared SERVICE_TOKEN — same fail-closed gate as
+    /proxies/resolve. These use tokenless clients over the HTTP stack."""
+
+    @staticmethod
+    def _client() -> TestClient:
+        # No lifespan (`with`): the gate rejects before any handler/Redis work.
+        return TestClient(create_app())
+
+    def test_list_no_token_configured_refuses(self, monkeypatch):
+        monkeypatch.setattr(settings, "service_token", None)
+        resp = self._client().get("/api/v1/sessions")
+        assert resp.status_code == 503
+
+    def test_list_configured_but_missing_header_rejected(self, monkeypatch):
+        monkeypatch.setattr(settings, "service_token", SecretStr("s3cret"))
+        resp = self._client().get("/api/v1/sessions")
+        assert resp.status_code == 401
+
+    @pytest.mark.parametrize(
+        "method, path, body",
+        [
+            ("post", "/api/v1/sessions", {}),
+            ("get", "/api/v1/sessions/sess_x", None),
+            ("delete", "/api/v1/sessions/sess_x", None),
+            ("post", "/api/v1/sessions/sess_x/cookies", {"cookies": []}),
+            ("post", "/api/v1/sessions/sess_x/login", {"steps": []}),
+        ],
+    )
+    def test_every_session_op_is_gated(self, monkeypatch, method, path, body):
+        monkeypatch.setattr(settings, "service_token", SecretStr("s3cret"))
+        client = self._client()
+        resp = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
+        assert resp.status_code == 401
+
+    @pytest.mark.parametrize(
+        "method, path, body",
+        [
+            ("post", "/api/v1/sessions", {}),
+            ("get", "/api/v1/sessions/sess_x", None),
+            ("delete", "/api/v1/sessions/sess_x", None),
+            ("post", "/api/v1/sessions/sess_x/cookies", {"cookies": []}),
+            ("post", "/api/v1/sessions/sess_x/login", {"steps": []}),
+        ],
+    )
+    def test_every_session_op_fails_closed_when_token_unset(self, monkeypatch, method, path, body):
+        # Whole surface fails closed (503), not just list_sessions.
+        monkeypatch.setattr(settings, "service_token", None)
+        client = self._client()
+        resp = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
+        assert resp.status_code == 503
+
+    def test_session_ops_excluded_from_mcp_surface(self):
+        # The session operations are hijack-bearing and must not be advertised as
+        # (unauthenticated) MCP tools. Derived exclusion → a new session route
+        # can't silently drift onto the MCP surface.
+        from src.app import mcp_excluded_operations
+        from src.api.sessions import router as sessions_router
+
+        excluded = set(mcp_excluded_operations())
+        session_ops = {
+            route.operation_id
+            for route in sessions_router.routes
+            if getattr(route, "operation_id", None)
+        }
+        assert session_ops  # sanity: the router actually has operation_ids
+        assert session_ops <= excluded
+        assert "resolve_proxy" in excluded
+
+    def test_correct_token_passes_gate(self, monkeypatch, mocker):
+        monkeypatch.setattr(settings, "service_token", SecretStr("s3cret"))
+        mocker.patch(
+            "src.api.sessions.session_service.list_all",
+            new=AsyncMock(return_value=[]),
+        )
+        resp = self._client().get(
+            "/api/v1/sessions", headers={"X-Service-Token": "s3cret"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"items": []}

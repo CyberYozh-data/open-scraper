@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     )
     scraper_job_poll_interval_ms: int = Field(default=250, alias="SCRAPER_JOB_POLL_INTERVAL_MS")
     scraper_job_timeout_ms: int = Field(default=120_000, alias="SCRAPER_JOB_TIMEOUT_MS")
+    service_token: str = Field(
+        default="",
+        alias="SERVICE_TOKEN",
+        description=(
+            "Shared secret for the scraper's credential-bearing internal endpoints "
+            "(GET /api/v1/proxies/resolve). Sent as the X-Service-Token header on "
+            "every scraper call. Must match the scraper's SERVICE_TOKEN."
+        ),
+    )
 
     workers: int = Field(
         default=2,

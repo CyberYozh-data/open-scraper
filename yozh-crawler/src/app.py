@@ -27,6 +27,7 @@ async def lifespan(app: FastAPI):
         base_url=settings.scraper_url,
         poll_interval_ms=settings.scraper_job_poll_interval_ms,
         timeout_ms=settings.scraper_job_timeout_ms,
+        service_token=settings.service_token,
     )
     store = JobStore()
     runner = JobRunner(store=store, scraper=scraper, limiter=domain_limiter, settings=settings)

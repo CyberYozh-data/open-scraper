@@ -11,6 +11,7 @@
     "warmup": { "type": "homepage" },
     "browser_engine": "camoufox",
     "wait_until": "domcontentloaded",
+    "wait_for_selector": "li.serp-item",
     "timeout_ms": 45000,
     "block_assets": false
   },
@@ -76,6 +77,6 @@
   "self_heal": true,
   "prompt_schema": null,
   "llm_extract_prompt": null,
-  "version": 1,
-  "updated_at": 1747267200.0
+  "version": 2,
+  "updated_at": 1784160000.0
 }

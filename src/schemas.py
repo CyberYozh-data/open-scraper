@@ -363,6 +363,18 @@ class ScrapeRequest(BaseModel):
             "engines that fingerprint Chromium (e.g. Yandex SmartCaptcha)."
         ),
     )
+    headless: bool | None = Field(
+        default=None,
+        description=(
+            "Launch mode for this request. Unset (default) uses the server's "
+            "HEADLESS default; true forces headless; false forces headful "
+            "(headful needs an X display — the container runs Xvfb). This is "
+            "independent of `warmup`, which controls session warm-up, not how "
+            "the browser launches. Asking for the non-default mode launches a "
+            "throwaway browser for this request instead of using the warm one, "
+            "so it costs ~1-2s extra and no idle RAM."
+        ),
+    )
     humanize: bool = Field(
         default=False,
         description="Camoufox only: human-like cursor movement. No-op on other engines.",

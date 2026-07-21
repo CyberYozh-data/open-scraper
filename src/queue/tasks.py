@@ -14,6 +14,7 @@ from typing import Any
 from taskiq import Context, TaskiqDepends
 
 from src.browser.camoufox_runner import CamoufoxRunner
+from src.browser.ephemeral_runner import EphemeralPlaywrightRunner
 from src.browser.login_runner import LoginRunner
 from src.proxy.base import ProxyConfigError
 from src.proxy.resolver import proxy_resolver
@@ -71,18 +72,56 @@ def make_error_payload(page: dict[str, Any], error: str) -> dict[str, Any]:
 
 
 # --- worker-state access seams (real values set by worker.py startup hook) ---
-async def _get_runner(context: Context, engine: str = "chromium"):
-    """Return the runner for `engine`.
+def _effective_headless(headless: bool | None) -> bool:
+    """Resolve the per-request launch mode; None = the server default."""
+    return settings.headless if headless is None else headless
+
+
+def _is_pooled(engine: str, headless: bool | None) -> bool:
+    """True when this engine + launch mode is served by the WARM runner held in
+    state.runners — i.e. the run that _lifecycle_tick's counters describe.
+
+    Single source of truth for the routing decision: _get_runner uses it to pick
+    the runner, and the task uses it to decide whether the run may touch that
+    engine's lifecycle counters. The two must never drift — recording an
+    ephemeral run against the pooled key refreshes the warm browser's idle clock
+    (so its window never elapses while a second browser is being launched per
+    request) and inflates pages_since_launch with pages it never rendered."""
+    return engine != "camoufox" and _effective_headless(headless) == settings.headless
+
+
+async def _get_runner(
+    context: Context, engine: str = "chromium", headless: bool | None = None
+):
+    """Return the runner for `engine` at the requested launch mode.
+
+    `headless` is the per-request override (None = the server default). The warm
+    pool only ever holds the DEFAULT launch mode: a warm Chromium costs
+    ~400-500 MB RSS against a ~1.25 GB per-worker budget, so keeping both modes
+    warm would OOM the container. A request for the non-default mode gets a
+    throwaway browser instead — the same trade-off Camoufox already makes.
 
     Camoufox is per-request (fresh fingerprint — strongest anti-detect posture,
     zero idle RAM); native Playwright engines are warm and lazily registered in
     state.runners so the lifecycle loop can retire/restart them independently."""
+    effective_headless = _effective_headless(headless)
     if engine == "camoufox":
-        return CamoufoxRunner(timeout_ms=settings.request_timeout_ms)
+        return CamoufoxRunner(
+            timeout_ms=settings.request_timeout_ms, headless=effective_headless
+        )
     # Imported lazily (not at module scope): worker.py imports this module at
     # load time, so a top-level `from src.queue.worker import _new_runner` is a
     # circular import that crashes the worker entrypoint (worker:broker).
     from src.queue.worker import _new_runner
+
+    if not _is_pooled(engine, headless):
+        # Non-default launch mode: throwaway browser, never pooled (see docstring).
+        return EphemeralPlaywrightRunner(
+            engine=engine,
+            headless=effective_headless,
+            block_assets=settings.block_assets,
+            timeout_ms=settings.request_timeout_ms,
+        )
 
     state = context.state
     # Caller holds state.browser_lock (see _browser_guard); do NOT re-acquire — asyncio.Lock is not reentrant.
@@ -110,12 +149,14 @@ def _browser_guard(context: Context):
 
 
 def _record_page(context: Context, engine: str = "chromium") -> None:
-    """Bump the per-engine retirement counter + idle clock. No-op when running
-    outside a real worker (InMemoryBroker tests lack these state fields, or
-    context is an unresolved Dependency when the task is called directly).
+    """Bump the per-engine retirement counter + idle clock. Call ONLY for a run
+    that used the pooled runner (see _is_pooled) — these are the exact keys
+    _lifecycle_tick reads to govern the warm browser, so a run on a throwaway
+    browser must not touch them.
 
-    Task 5 will pass the real engine; the default keeps existing call sites
-    (tasks.py:176 and :222) working without change."""
+    No-op when running outside a real worker (InMemoryBroker tests lack these
+    state fields, or context is an unresolved Dependency when the task is called
+    directly)."""
     state = getattr(context, "state", None)
     if state is None or not hasattr(state, "pages_since_launch"):
         return
@@ -196,7 +237,11 @@ async def scrape_page_task(
 
     async def _scrape() -> dict[str, Any]:
         async with _browser_guard(context):
-            runner = await _get_runner(context, page.get("browser_engine", "chromium"))
+            runner = await _get_runner(
+                context,
+                page.get("browser_engine", "chromium"),
+                page.get("headless"),
+            )
             if page.get("session_id"):
                 return await _scrape_with_session(runner, request_id, page)
             return await scrape_runner.run_scrape(runner, request_id, page, None)
@@ -213,7 +258,12 @@ async def scrape_page_task(
                       job_id, page_index, request_id)
         envelope = {"ok": False, "error": str(exc) or type(exc).__name__}
     finally:
-        _record_page(context, page.get("browser_engine", "chromium") if page is not None else "chromium")
+        # Only a run that used the warm runner may advance its lifecycle
+        # counters. An ephemeral (non-default launch mode) or camoufox run gets
+        # its own throwaway browser, which no lifecycle path governs.
+        engine = page.get("browser_engine", "chromium")
+        if _is_pooled(engine, page.get("headless")):
+            _record_page(context, engine)
 
     payload = (
         envelope["result"] if envelope.get("ok")

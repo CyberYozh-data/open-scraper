@@ -41,7 +41,13 @@ class Settings(BaseSettings):
     headless: bool = Field(
         default=True,
         alias="HEADLESS",
-        description="Run browser in headless mode.",
+        description=(
+            "Default browser launch mode. A request's `headless` field "
+            "overrides it per scrape; a request asking for the non-default "
+            "mode gets a throwaway browser, so the warm pool never holds both "
+            "modes. Xvfb runs regardless, so headful requests work even when "
+            "this is true."
+        ),
     )
     chrome_channel: str | None = Field(
         default=None,
@@ -202,6 +208,21 @@ class Settings(BaseSettings):
         default=2 * 1024 * 1024,
         alias="SESSION_STORAGE_STATE_MAX_BYTES",
         description="Per-session storage_state byte cap. Rejected on overflow.",
+    )
+
+    # =====================
+    # Service-to-service auth
+    # =====================
+    service_token: SecretStr | None = Field(
+        default=None,
+        alias="SERVICE_TOKEN",
+        description=(
+            "Shared secret guarding credential-bearing internal endpoints "
+            "(GET /api/v1/proxies/resolve). Callers on the internal network "
+            "(the crawler's /map) present it as the X-Service-Token header. "
+            "When unset, those endpoints refuse to serve rather than leak "
+            "proxy credentials (fail-closed)."
+        ),
     )
 
     # =====================

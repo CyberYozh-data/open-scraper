@@ -33,6 +33,7 @@ def build_camoufox_options(
     proxy: dict | None,
     block_assets: bool,
     webrtc_block: bool,
+    headless: bool | None = None,
     humanize: bool = False,
     spoof_os: str | None = None,
     block_webgl: bool = False,
@@ -50,7 +51,7 @@ def build_camoufox_options(
     otherwise-random screen that could be smaller than the window (a tell).
     """
     opts: dict = {
-        "headless": settings.headless,
+        "headless": settings.headless if headless is None else headless,
         "geoip": True,
         "block_images": bool(block_assets),
         "block_webrtc": bool(webrtc_block),
@@ -77,8 +78,10 @@ class CamoufoxRunner:
     stop() are no-ops so the worker can treat runners uniformly.
     """
 
-    def __init__(self, timeout_ms: int) -> None:
+    def __init__(self, timeout_ms: int, headless: bool | None = None) -> None:
         self._timeout_ms = timeout_ms
+        # Per-request launch mode; None = the server's HEADLESS default.
+        self._headless = settings.headless if headless is None else headless
 
     def is_started(self) -> bool:
         """Always False — Camoufox launches per request, nothing stays warm."""
@@ -165,6 +168,7 @@ class CamoufoxRunner:
             proxy=proxy_dict,
             block_assets=effective_block_assets,
             webrtc_block=settings.webrtc_block,
+            headless=self._headless,
             humanize=humanize,
             spoof_os=spoof_os,
             block_webgl=block_webgl,

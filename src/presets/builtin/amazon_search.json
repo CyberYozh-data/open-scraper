@@ -1,7 +1,7 @@
 {
   "name": "amazon_search",
   "source": "amazon",
-  "description": "Amazon search results page. Returns one array per field across result cards. Localizes by domain (.com/.co.uk/.de). block_assets off so lazy product images load.",
+  "description": "Amazon search results page. Returns one flat array per field across result cards; consumers zip them by index. ROW-ALIGNMENT INVARIANT: each field must match exactly one node per card, so every field anchors to a per-card container Amazon renders on EVERY card (title-recipe / price-recipe / asin-faceout-container) and digs the value out of that container's html by regex. A container that is present but empty yields null in the correct slot; a selector that matches NOTHING does not yield null — it shrinks the array and silently misaligns every row after it. So never point a field at an element that only exists when the value does (e.g. .a-price .a-offscreen directly): anchor to the always-present container instead. Localizes by domain (.com/.co.uk/.de). block_assets off so lazy product images load.",
   "kind": "builtin",
   "url_template": "https://www.amazon.{domain}/s?k={query}",
   "request_defaults": {
@@ -22,25 +22,34 @@
     "type": "css",
     "fields": {
       "titles": {
-        "selector": "div[data-component-type='s-search-result'] h2 span",
+        "selector": "div[data-component-type='s-search-result'] [data-cy='title-recipe'] h2",
         "all": true,
         "required": true,
         "post_process": [{ "op": "strip" }]
       },
       "urls": {
-        "selector": "div[data-component-type='s-search-result'] a.a-link-normal.s-line-clamp-2",
+        "selector": "div[data-component-type='s-search-result'] [data-cy='title-recipe'] > a[href]",
         "attr": "href",
         "all": true
       },
       "prices": {
-        "selector": "div[data-component-type='s-search-result'] .a-price .a-offscreen",
+        "selector": "div[data-component-type='s-search-result'] [data-cy='price-recipe']",
+        "attr": "html",
         "all": true,
-        "post_process": [{ "op": "parse_price" }]
+        "post_process": [
+          { "op": "regex", "args": ["a-offscreen[^>]*>[^<]*?(\\d[\\d.,]*\\d|\\d)"] },
+          { "op": "parse_price" }
+        ]
       },
       "ratings": {
-        "selector": "div[data-component-type='s-search-result'] .a-icon-alt",
+        "selector": "div[data-component-type='s-search-result'] [data-cy='asin-faceout-container']",
+        "attr": "html",
         "all": true,
-        "post_process": [{ "op": "regex", "args": ["([\\d.]+)"] }, { "op": "parse_float" }]
+        "post_process": [
+          { "op": "regex", "args": ["a-icon-alt[^>]*>(?:\\s|<[a-zA-Z][^>]*>)*(\\d[.,]\\d)"] },
+          { "op": "replace", "args": [",", "."] },
+          { "op": "parse_float" }
+        ]
       }
     }
   },
@@ -56,6 +65,6 @@
   "self_heal": true,
   "prompt_schema": null,
   "llm_extract_prompt": null,
-  "version": 1,
-  "updated_at": 1747267200.0
+  "version": 2,
+  "updated_at": 1784246400.0
 }

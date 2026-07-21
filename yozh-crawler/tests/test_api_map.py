@@ -5,7 +5,12 @@ from datetime import date
 
 import pytest
 
-from src.api.map import build_map
+from types import SimpleNamespace
+
+from fastapi import HTTPException
+
+from src.api.map import build_map, create_map
+from src.fetcher import ScraperError
 from src.schemas import CrawlScope, MapRequest
 
 
@@ -183,6 +188,27 @@ class TestBuildMap:
         )
         assert calls and calls[0][1].get("render") is True
         assert "https://x.com/p1" in res.urls
+
+    @pytest.mark.asyncio
+    async def test_render_blocked_seed_is_not_used(self):
+        # HIGH-23: a rendered seed the scraper marked fetch_ok=False (captcha/
+        # ban) must not have its block body walked for links; it degrades to a
+        # warning like a non-200 seed, yielding no page links.
+        async def fake_fetch(url, opts):
+            return {
+                "meta": {"status_code": 503, "fetch_ok": False},
+                "raw_html": _SEED_HTML,
+                "error": "HTTP 503",
+            }
+
+        client = _StubClient({})
+        res = await build_map(
+            _req(include_sitemap=False, render=True),
+            http_client=client,
+            scraper_fetch=fake_fetch,
+        )
+        assert "https://x.com/p1" not in res.urls
+        assert any("render" in w.lower() for w in res.warnings)
 
     @pytest.mark.asyncio
     async def test_search_filter(self):
@@ -374,3 +400,50 @@ class TestProxyScrapeOptions:
     def test_empty_for_none(self):
         from src.api.map import _proxy_scrape_options
         assert _proxy_scrape_options(_req()) == {}
+
+
+# ─── HIGH-11: /map fails closed when an explicit proxy can't be provided ────────
+
+def _app_req(scraper, http_client):
+    return SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(scraper_client=scraper, http_client=http_client)
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_map_explicit_proxy_unavailable_fails_closed():
+    # An explicit proxy the scraper can't provide (its fail-closed 422 → a
+    # ScraperError here) must FAIL the /map request, not silently degrade to a
+    # direct fetch that leaks the crawler's real IP.
+    async def resolve_proxy(*a, **k):
+        raise ScraperError(status_code=422, message="no CyberYozh key", retryable=False)
+
+    scraper = SimpleNamespace(resolve_proxy=resolve_proxy, fetch=None)
+    req = _req(include_sitemap=False, proxy_type="res_rotating")
+
+    with pytest.raises(HTTPException) as exc:
+        await create_map(req, _app_req(scraper, _StubClient({})))
+    assert exc.value.status_code == 502
+    assert "proxy required" in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_map_proxy_none_still_goes_direct():
+    # proxy_type=none is a legitimate explicit direct request — the fail-closed
+    # guard must not touch it (nor try to resolve a proxy).
+    resolve_called = False
+
+    async def resolve_proxy(*a, **k):
+        nonlocal resolve_called
+        resolve_called = True
+        return None
+
+    scraper = SimpleNamespace(resolve_proxy=resolve_proxy, fetch=None)
+    client = _StubClient({"https://x.com/": _Resp(200, _SEED_HTML)})
+    req = _req(include_sitemap=False)  # proxy_type defaults to "none"
+
+    res = await create_map(req, _app_req(scraper, client))
+    assert resolve_called is False
+    assert "https://x.com/p2" in res.urls

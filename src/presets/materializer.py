@@ -217,7 +217,9 @@ def materialize(preset: Preset, req: PresetScrapeRequest) -> ScrapeRequest:
         merged["session_id"] = resolved_sid
 
     if "proxy_geo" not in merged:
-        merged["proxy_geo"] = {"country_code": locale.country}
+        merged["proxy_geo"] = {
+            "country_code": locale.proxy_country or locale.country
+        }
     else:
         # Escape hatch: a preset/request can pin proxy_geo independent of the
         # locale's country. Legitimate but easy to get wrong, so make the
@@ -230,9 +232,10 @@ def materialize(preset: Preset, req: PresetScrapeRequest) -> ScrapeRequest:
         )
         log.info(
             "preset %r: proxy_geo pinned to %s by request_defaults/override, "
-            "decoupled from locale country %s",
+            "decoupled from locale exit %s (market country %s)",
             preset.name,
             override_cc,
+            locale.proxy_country or locale.country,
             locale.country,
         )
 

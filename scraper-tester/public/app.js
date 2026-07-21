@@ -216,6 +216,7 @@ if (_sExtractPreset) _sExtractPreset.addEventListener('change', async (e) => {
   setVal('s-render', rd.render);
   setVal('s-stealth', rd.stealth);
   setVal('s-block-assets', rd.block_assets);
+  setVal('s-headless', rd.headless === undefined || rd.headless === null ? '' : String(rd.headless));
   setVal('s-proxy-type', rd.proxy_type);
   if (rd.proxy_geo) {
     setVal('s-geo-country', rd.proxy_geo.country_code);
@@ -999,6 +1000,14 @@ function buildScrapePayload() {
   // Browser engine — always included; chromium is the API default so sending
   // it explicitly is a no-op for existing behaviour.
   payload.browser_engine = document.getElementById('s-browser-engine')?.value || 'chromium';
+
+  // Launch mode: '' = Auto -> omit the field so the server default applies.
+  // Independent of warmup (which is session warm-up, not how the browser launches).
+  const headlessSel = document.getElementById('s-headless')?.value;
+  if (headlessSel === 'true' || headlessSel === 'false') {
+    payload.headless = headlessSel === 'true';
+  }
+
   Object.assign(payload, collectCamoufoxOpts('s'));
 
   // Viewport (and matching window.screen). Blank inputs => server default 1920x1080.

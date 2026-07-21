@@ -14,7 +14,7 @@
     "block_assets": true
   },
   "locales": {
-    "us": { "domain": "com",   "country": "US" },
+    "us": { "domain": "com",   "country": "US", "proxy_country": "GB" },
     "uk": { "domain": "co.uk", "country": "GB" },
     "de": { "domain": "de",    "country": "DE" }
   },
@@ -84,6 +84,6 @@
     "urls": "product or merchant link"
   },
   "llm_extract_prompt": null,
-  "version": 1,
-  "updated_at": 1747267200.0
+  "version": 2,
+  "updated_at": 1783814400.0
 }

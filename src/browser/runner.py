@@ -5,6 +5,7 @@ import base64
 import contextlib
 import logging
 import math
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -540,6 +541,14 @@ class PlaywrightRunner:
         async with self._lock:
             if self._browser is not None:
                 return
+            # Headful needs an X display. The container entrypoint starts Xvfb
+            # and exports DISPLAY; fail fast with a readable message instead of
+            # Playwright's opaque launch crash when it is missing.
+            if not self.headless and not os.environ.get("DISPLAY"):
+                raise RuntimeError(
+                    "headful launch requires an X display but DISPLAY is unset "
+                    "(is Xvfb running? see scripts/docker-entrypoint.sh)"
+                )
             self._playwright = await async_playwright().start()
             # Optional WebRTC leak protection. When Chromium initialises
             # WebRTC it issues STUN requests over UDP directly to the remote
@@ -589,7 +598,14 @@ class PlaywrightRunner:
             # (wedged Chromium, broken WS pipe) the next start() will rebuild
             # the runner from scratch instead of reusing a dead Browser.
             if browser:
-                await browser.close()
+                # Best-effort: a wedged / OOM-killed browser raises here, and
+                # letting that propagate would skip playwright.stop() below and
+                # leak the node driver process. The browser is already being
+                # discarded, so a failed close has nothing left to salvage.
+                try:
+                    await browser.close()
+                except Exception:  # pylint: disable=broad-except
+                    log.warning("browser close failed, stopping driver anyway", exc_info=True)
             if playwright:
                 await playwright.stop()
 

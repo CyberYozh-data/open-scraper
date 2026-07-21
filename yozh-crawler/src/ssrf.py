@@ -20,6 +20,13 @@ from urllib.parse import urljoin, urlparse
 
 log = logging.getLogger(__name__)
 
+# Carrier-grade NAT (shared-ISP address space). Python's ipaddress never
+# classifies 100.64.0.0/10 as private (verified through 3.14), so a target
+# resolving into CGNAT/Tailscale space reachable from this host would otherwise
+# pass as "public". Mirrors the scraper's preset sample-fetch guard
+# (src/presets/service.py).
+_CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
+
 
 class SSRFError(Exception):
     """Raised when a target resolves to a non-public address."""
@@ -36,6 +43,10 @@ def _ip_is_public(ip_str: str) -> bool:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
         return False
+    # Unwrap IPv4-mapped IPv6 (::ffff:a.b.c.d) so a mapped private/link-local
+    # address is classified by its IPv4 value regardless of Python version.
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
     return not (
         ip.is_private
         or ip.is_loopback
@@ -43,6 +54,7 @@ def _ip_is_public(ip_str: str) -> bool:
         or ip.is_reserved
         or ip.is_multicast
         or ip.is_unspecified
+        or (ip.version == 4 and ip in _CGNAT_NET)
     )
 
 
