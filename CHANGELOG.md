@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.3] - 2026-07-21
+
+Security-hardening release plus a per-request launch mode and extraction/preset
+reliability fixes.
+
+### Added
+
+- Per-request launch mode: choose headless or headful per request (`headless`),
+  headless by default. Non-default modes run in a throwaway browser that is
+  never pooled.
+- Extraction emits a `row_alignment_mismatch` warning when parallel arrays
+  (titles/prices/urls) have mismatched lengths.
+
+### Changed
+
+- `SERVICE_TOKEN` now gates `/proxies/resolve` (CRIT-01) and the entire
+  `/sessions` surface (CRIT-02): unauthenticated callers get 401, and the
+  endpoints fail closed (503) when the token is unconfigured. New required env
+  var — see `.env.example`.
+- Proxy resolution fails closed: a request that explicitly asks for a proxy
+  which cannot be resolved now errors instead of silently falling back to a
+  direct connection that would leak the real server IP (HIGH-11).
+- Search market is decoupled from the proxy exit country: the Google `us`
+  market can be served through a GB exit, keeping the browser fingerprint
+  aligned with the exit.
+
+### Fixed
+
+- The `/map` SSRF guard now blocks CGNAT (`100.64.0.0/10`) and IPv4-mapped IPv6
+  private addresses in addition to the standard private/reserved ranges
+  (CRIT-03 A).
+- The crawler treats blocked / CAPTCHA / failed scraper pages as failures
+  rather than successful visits, so they are retried and no longer pollute
+  crawl results or dedup (HIGH-23).
+- `amazon_search` / `google_search` presets repaired so extracted rows stay
+  co-indexed per result.
+- Yandex: wait for the real SERP past the browser-check interstitial instead of
+  capturing the interstitial page.
+
 ## [0.1.2] - 2026-07-16
 
 Anti-bot and preset maintenance release: a hardened browser fingerprint, an
