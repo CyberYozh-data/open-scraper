@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.4] - 2026-07-22
+
+Patch release fixing headful (Xvfb) startup after a container restart.
+
+### Fixed
+
+- Headful scrapes could fail silently after a `docker restart`: a stale
+  `/tmp/.X99-lock` (whose recorded PID a restart made live again) made X refuse
+  the display and Xvfb exit, while the old readiness check — which only tested
+  that the display socket existed — still reported success. Xvfb now starts with
+  `-nolock`, readiness is a real liveness signal (`-displayfd`), and startup
+  fails closed with a loud warning (leaving `DISPLAY` unset) instead of silently
+  handing requests a dead display. Only affects headful (`HEADLESS=false`)
+  deployments.
+
 ## [0.1.3] - 2026-07-21
 
 Security-hardening release plus a per-request launch mode and extraction/preset
