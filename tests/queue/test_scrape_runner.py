@@ -23,6 +23,64 @@ def test_proxy_failure_heuristics():
     assert looks_like_proxy_failure(None, None) is False
 
 
+def test_navigation_deadline_is_not_a_proxy_failure():
+    """A page that loaded too slowly is not evidence the proxy is bad.
+
+    Playwright raises this when the navigation budget expires, which means the
+    proxy already carried the connection — rotating it and starting over cannot
+    recover the page, it just spends the budget again. Observed live: three
+    attempts per URL, all timing out identically, 90s burned on a page the
+    caller had already given up waiting for.
+    """
+    # Both engines' real wrappers: PlaywrightRunner prefixes a literal
+    # "PlaywrightError: ", while camoufox_runner uses type(exc).__name__ — and
+    # Playwright's timeout class is itself named TimeoutError, which puts the
+    # needle "timeout" in the prefix.
+    for wrapper in ("PlaywrightError: ", "TimeoutError: ", ""):
+        message = (
+            f"{wrapper}Page.goto: Timeout 30000ms exceeded.\n"
+            "Call log:\n"
+            '  - navigating to "https://habr.com/ru/hubs/webdev/", waiting until "load"'
+        )
+        assert looks_like_proxy_failure(None, message) is False, wrapper
+
+
+def test_navigation_deadline_verdict_ignores_the_scraped_url():
+    """The call log names the target, and needles like "dns" are three letters.
+
+    Matching them against the whole message reads the *path being crawled* as a
+    transport fault, so the verdict would depend on which page happened to be
+    slow. These are real paths from the crawl that motivated this fix.
+    """
+    for url in (
+        "https://habr.com/ru/companies/dns/",
+        "https://example.com/blog/proxy-guide",
+        "https://shop.example.com/tls-certificates",
+        "https://example.com/about/tunnel",
+    ):
+        message = (
+            "PlaywrightError: Page.goto: Timeout 30000ms exceeded.\n"
+            f'Call log:\n  - navigating to "{url}", waiting until "load"'
+        )
+        assert looks_like_proxy_failure(None, message) is False, url
+
+
+def test_transport_faults_remain_proxy_failures():
+    """Only the navigation deadline is exempt; a bad exit still rotates."""
+    assert looks_like_proxy_failure(None, "proxy connect timed out") is True
+    assert looks_like_proxy_failure(None, "net::ERR_TIMED_OUT") is True
+    # How a refused exit actually surfaces — the deadline never fires.
+    assert (
+        looks_like_proxy_failure(
+            None, "PlaywrightError: Page.goto: net::ERR_PROXY_CONNECTION_FAILED at https://x/"
+        )
+        is True
+    )
+    # The wrapper is stripped, not the whole head: a real fault behind the
+    # TimeoutError class name still rotates.
+    assert looks_like_proxy_failure(None, "TimeoutError: proxy connect timed out") is True
+
+
 def test_default_country_pins_rotating_residential_without_country():
     d = settings.default_proxy_country
     assert apply_default_proxy_country("prem_res_rotating", None) == {"country_code": d}
@@ -278,6 +336,112 @@ async def test_run_scrape_captcha_rotation_is_bounded(monkeypatch):
     assert runner.fetch.await_count == 2  # capped at max_attempts, not unbounded
     assert out["result"]["meta"]["fetch_ok"] is False
     assert out["result"]["meta"]["retries"] == 2
+
+
+_DEADLINE_ERROR = (
+    "PlaywrightError: Page.goto: Timeout 30000ms exceeded.\n"
+    'Call log:\n  - navigating to "https://habr.com/ru/hubs/webdev/", '
+    'waiting until "load"'
+)
+
+
+def _deadline_result():
+    return MagicMock(
+        ok=False, blocked=False, html="", final_url=None, status_code=None,
+        error=_DEADLINE_ERROR, screenshot_b64=None, applied_user_agent=None,
+        applied_locale=None, applied_timezone=None, applied_accept_language=None,
+        element_status=None, storage_state=None, applied_warmup=None,
+    )
+
+
+def _deadline_session(monkeypatch, attempts=3):
+    session = MagicMock()
+    session.max_attempts.return_value = attempts
+    session.current_proxy.return_value = None
+    session.on_failure = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "src.queue.scrape_runner.proxy_resolver.open_session",
+        AsyncMock(return_value=session),
+    )
+    return session
+
+
+async def test_run_scrape_grants_exactly_one_rotation_on_a_navigation_deadline(monkeypatch):
+    """Two attempts, not three: one retry keeps an expired exit recoverable.
+
+    A hung exit, or one answering 407 because the subscription lapsed, is
+    indistinguishable from a slow page — so a single rotation still gets
+    `recover()` a chance to mint fresh credentials. What it must not do is burn
+    the full budget three times over, which is what put the caller's 90s poll
+    out of reach.
+
+    Asserted at this level rather than on the helper alone, because the helper
+    could stop being consulted and the helper-level tests would still pass.
+    """
+    runner = MagicMock()
+    runner.fetch = AsyncMock(return_value=_deadline_result())
+    session = _deadline_session(monkeypatch)
+
+    out = await run_scrape(
+        runner, "req_slow_page",
+        {"url": "https://habr.com/ru/hubs/webdev/", "device": "desktop",
+         "proxy_type": "prem_res_rotating"},
+        storage_state=None,
+    )
+
+    assert runner.fetch.await_count == 2
+    assert session.on_failure.await_count == 1
+    assert out["result"]["meta"]["retries"] == 1
+    assert out["result"]["meta"]["fetch_ok"] is False
+
+
+async def test_run_scrape_logs_the_exit_when_it_gives_up_on_a_deadline(monkeypatch, caplog):
+    """The log is the whole mitigation for the case we decline to retry further.
+
+    Without the exit in it, "suspect the exit" is not actionable — and a lapsed
+    subscription would read as a slow website.
+    """
+    runner = MagicMock()
+    runner.fetch = AsyncMock(return_value=_deadline_result())
+    _deadline_session(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="src.queue.scrape_runner"):
+        await run_scrape(
+            runner, "req_slow_page",
+            {"url": "https://habr.com/ru/hubs/webdev/", "device": "desktop",
+             "proxy_type": "prem_res_rotating"},
+            storage_state=None,
+        )
+
+    giving_up = [r for r in caplog.records if "navigation deadline" in r.getMessage()]
+    assert len(giving_up) == 1, [r.getMessage() for r in caplog.records]
+    message = giving_up[0].getMessage()
+    assert "exit=" in message
+    assert "https://habr.com/ru/hubs/webdev/" in message
+    assert "timeout_ms=30000" in message
+
+
+async def test_run_scrape_still_rotates_fully_on_a_selector_deadline(monkeypatch):
+    """The exemption is anchored to page.goto on purpose.
+
+    wait_for_selector timing out is a different signal — on a SERP preset a
+    missing selector usually means a block — so it keeps the full retry budget.
+    """
+    runner = MagicMock()
+    result = _deadline_result()
+    result.error = "PlaywrightError: Page.wait_for_selector: Timeout 30000ms exceeded."
+    runner.fetch = AsyncMock(return_value=result)
+    session = _deadline_session(monkeypatch)
+
+    await run_scrape(
+        runner, "req_missing_selector",
+        {"url": "https://www.google.com/search", "device": "desktop",
+         "proxy_type": "prem_res_rotating"},
+        storage_state=None,
+    )
+
+    assert runner.fetch.await_count == 3
+    assert session.on_failure.await_count == 3
 
 
 async def test_run_scrape_error_envelope(monkeypatch):
