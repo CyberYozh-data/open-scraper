@@ -2,6 +2,8 @@ httpx>=0.26.0
 python-dotenv>=1.0.0
 rich>=13.0.0
 pillow>=10.0.0
-langchain-anthropic==1.4.0
+# Pin >=1.4.6: earlier releases carry CVE-2026-55443 (path traversal in the
+# file-search middleware). This example never loads it, but examples get copied.
+langchain-anthropic==1.4.6
 langchain-mcp-adapters==0.2.2
 langgraph==1.1.4

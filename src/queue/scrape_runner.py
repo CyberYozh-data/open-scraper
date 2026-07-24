@@ -8,6 +8,7 @@ on the multiprocessing result queue, minus the "job_id" key.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import traceback
 from typing import Any
@@ -57,12 +58,51 @@ def apply_default_proxy_country(
     return {**(proxy_geo or {}), "country_code": country}
 
 
+# Playwright appends a call log naming the URL it was navigating to. The
+# needles below are as short as three letters, so matching them against the
+# whole message reads the *path being crawled* — /companies/dns/, /proxy-guide —
+# as a transport fault.
+_CALL_LOG_MARKER = "call log:"
+# The exception class name each runner prefixes: PlaywrightRunner writes a
+# literal "PlaywrightError: ", camoufox_runner uses type(exc).__name__. Playwright
+# names its timeout class TimeoutError, which puts a needle in the prefix itself.
+# Matched by name rather than \w*error so a class that *is* the evidence
+# (ProxyError, DNSError) keeps classifying as a proxy failure.
+_ERROR_CLASS_PREFIX_RE = re.compile(r"^(?:playwrighterror|timeouterror|unexpectederror): ")
+# Playwright's navigation-budget expiry. Deliberately anchored to page.goto:
+# Page.wait_for_selector's deadline is a different signal (for SERP presets a
+# missing selector usually means a block) and must keep rotating.
+_NAVIGATION_DEADLINE_RE = re.compile(r"page\.goto: timeout \d+ms exceeded\.?")
+
+# These shapes are pinned to playwright==1.57 wording; re-verify on a bump.
+
+
+def is_navigation_deadline(error: str | None) -> bool:
+    """The page did not finish loading inside its budget.
+
+    Says nothing about the exit's health: a proxy that accepts the connection
+    and then hangs — or answers 407 to an HTTPS CONNECT, which is how expired
+    or exhausted credentials surface — produces a byte-identical message.
+    """
+    if not error:
+        return False
+    return bool(_NAVIGATION_DEADLINE_RE.search(error.lower()))
+
+
 def looks_like_proxy_failure(status_code: int | None, error: str | None) -> bool:
     if status_code is not None and status_code in _RETRYABLE_HTTP_STATUSES:
         return True
     if not error:
         return False
-    error = error.lower()
+    error = error.lower().split(_CALL_LOG_MARKER, 1)[0]
+    error = _ERROR_CLASS_PREFIX_RE.sub("", error)
+    # Drop a bare navigation deadline: on its own it means the page was slow,
+    # and rotating on every attempt spends the whole budget three times over.
+    # It is not proof the exit is healthy (see is_navigation_deadline), so the
+    # caller grants one rotation for the recoverable cases; this only stops the
+    # deadline from being retried to exhaustion. Removing the phrase rather
+    # than returning early keeps a transport fault named alongside it retryable.
+    error = _NAVIGATION_DEADLINE_RE.sub("", error)
     needles = (
         "proxy",
         "tunnel",
@@ -208,13 +248,40 @@ async def run_scrape(
             # block means this IP is burned, so a fresh proxy is the fix (bounded
             # by max_attempts). Anything else is a genuine target response — don't
             # waste proxies retrying it.
-            if not (fetch_result.blocked or looks_like_proxy_failure(
+            should_rotate = fetch_result.blocked or looks_like_proxy_failure(
                 fetch_result.status_code, fetch_result.error
-            )):
-                log.info(
-                    "error is neither proxy failure nor block, stopping retries for request_id=%s",
-                    request_id
-                )
+            )
+            # A navigation deadline is not evidence of a bad exit, but it is not
+            # evidence of a good one either — a hung exit, or one answering 407
+            # because the credentials expired, looks exactly like a slow page.
+            # Grant exactly one rotation: `recover()` mints fresh credentials, so
+            # this keeps the recoverable cases recoverable, while still ending the
+            # runaway where all three attempts burned the full budget in a row.
+            deadline_retry = (
+                not should_rotate
+                and attempt == 1
+                and attempts > 1
+                and is_navigation_deadline(fetch_result.error)
+            )
+            if not (should_rotate or deadline_retry):
+                if is_navigation_deadline(fetch_result.error):
+                    log.warning(
+                        "navigation deadline after %d attempt(s), giving up: "
+                        "request_id=%s url=%s timeout_ms=%d exit=%s — the page "
+                        "did not load in time; if this repeats across targets, "
+                        "suspect the exit",
+                        attempt,
+                        request_id,
+                        request.get("url"),
+                        timeout_ms,
+                        proxy_cfg.server if proxy_cfg else "none",
+                    )
+                else:
+                    log.info(
+                        "error is neither proxy failure nor block, "
+                        "stopping retries for request_id=%s",
+                        request_id
+                    )
                 break
 
             # Increment retry counter
