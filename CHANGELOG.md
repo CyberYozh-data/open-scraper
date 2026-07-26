@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.5] - 2026-07-24
+
+Patch release: a queue retry fix plus dependency security updates.
+
+### Fixed
+
+- The queue no longer retries a slow page as if the proxy were bad. A
+  navigation (`goto`) timeout now gets at most one proxy rotation and otherwise
+  returns a timeout to the caller instead of burning the retry budget. Genuine
+  proxy failures (connection reset, tunnel/auth errors, `net::ERR_*`) still
+  rotate and retry as before.
+
+### Security
+
+- Dependency bumps clearing the outstanding advisories in auxiliary tooling:
+  `examples/` (`langchain-anthropic`) and the local `scraper-tester` dev harness
+  (`express`, `qs`, `http-proxy-middleware`, `follow-redirects`). No shipped
+  scraper runtime or API change.
+
 ## [0.1.4] - 2026-07-22
 
 Patch release fixing headful (Xvfb) startup after a container restart.
