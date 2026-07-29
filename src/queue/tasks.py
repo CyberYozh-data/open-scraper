@@ -186,8 +186,13 @@ async def _scrape_with_session(runner, request_id: str, page: dict[str, Any]) ->
         envelope = await scrape_runner.run_scrape(runner, request_id, page, record.storage_state)
         if envelope.get("ok"):
             new_state = envelope.get("storage_state")
-            status_code = envelope.get("result", {}).get("meta", {}).get("status_code")
-            if new_state is not None and _is_successful_status(status_code):
+            meta = envelope.get("result", {}).get("meta", {})
+            status_code = meta.get("status_code")
+            # A captcha interstitial is HTTP 200, so status alone is not
+            # consent to persist: cookies harvested from a challenge page
+            # would be inherited by every later scrape on this session.
+            fetch_ok = meta.get("fetch_ok", True)
+            if new_state is not None and fetch_ok and _is_successful_status(status_code):
                 await store.update_storage_state(session_id, new_state)
         return envelope
 

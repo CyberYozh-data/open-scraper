@@ -426,10 +426,15 @@ async def test_run_scrape_still_rotates_fully_on_a_selector_deadline(monkeypatch
 
     wait_for_selector timing out is a different signal — on a SERP preset a
     missing selector usually means a block — so it keeps the full retry budget.
+
+    The error string is the one the runners actually emit now. It used to be a
+    raw `PlaywrightError: ... Timeout ...`, which reached this decision only
+    because "timeout" happened to be in the proxy-failure needle list; rotating
+    on a missing selector is deliberate, so it is matched deliberately.
     """
     runner = MagicMock()
     result = _deadline_result()
-    result.error = "PlaywrightError: Page.wait_for_selector: Timeout 30000ms exceeded."
+    result.error = "selector_not_found: li.serp-item"
     runner.fetch = AsyncMock(return_value=result)
     session = _deadline_session(monkeypatch)
 

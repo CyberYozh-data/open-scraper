@@ -1,66 +1,199 @@
 {
   "name": "yandex_search",
   "source": "yandex",
-  "description": "Yandex web search (organic results) on yandex.ru. The result region is selected by Yandex's own `lr` region code (locale -> lr), not the proxy country: yandex.ru only serves un-blocked results to a Russian/CIS exit, so every locale routes through a Russian residential exit (country=RU) while `lr` localises the results (e.g. lr=84 -> US region). Yandex is aggressively anti-bot (SmartCaptcha) — a clean RU residential proxy is required. Camoufox engine; organic-result selectors are best-effort and may drift with Yandex's DOM.",
+  "description": "Yandex SERP results. Returns title/link/snippet/result_block arrays with one slot per result. Every field is anchored on the SAME organic block (li.serp-item .Organic) and digs its value out of that block's html, so a result missing its snippet yields null in its own slot instead of shifting every later row. The list item is NOT the row unit: a serp-item can carry no organic block (a widget such as 'Люди ищут') or two (a grouped result), measured live at 13 items/12 results (kz) and 13 items/14 results (am). ADS ARE INCLUDED: a paid block carries the same .Organic markup and is emitted as a row whose link is a yabs.yandex.ru/count/... tracker — filter on the link if you need organic-only. wait_until is 'load' because Yandex streams results in: at domcontentloaded one live run returned 2 of 18 results with no error. Links are unescaped after the html capture (lxml re-serialises '&' as '&amp;'); snippets read the whole OrganicText subtree, so a leading date span is concatenated onto the body rather than replacing it. Selectors verified against live ru/am/kz captures 2026-07-26: 18/18/18/18, 14/14/14/14, 12/12/12/12, zero nulls.",
   "kind": "builtin",
   "url_template": "https://yandex.ru/search/?text={query}&lr={lr}",
   "request_defaults": {
     "device": "desktop",
     "proxy_type": "prem_res_rotating",
-    "prem_proxy_options": { "ip_filter": "quality-security" },
-    "warmup": { "type": "homepage" },
+    "prem_proxy_options": {
+      "ip_filter": "quality-security"
+    },
+    "warmup": {
+      "type": "homepage"
+    },
     "browser_engine": "camoufox",
-    "wait_until": "domcontentloaded",
+    "wait_until": "load",
     "wait_for_selector": "li.serp-item",
     "timeout_ms": 45000,
     "block_assets": false
   },
   "locales": {
-    "ru": { "domain": "ru", "country": "RU", "lr": "225" },
-    "moscow": { "domain": "ru", "country": "RU", "lr": "213" },
-    "spb": { "domain": "ru", "country": "RU", "lr": "2" },
-    "by": { "domain": "ru", "country": "RU", "lr": "149" },
-    "kz": { "domain": "ru", "country": "RU", "lr": "159" },
-    "ua": { "domain": "ru", "country": "RU", "lr": "187" },
-    "uz": { "domain": "ru", "country": "RU", "lr": "171" },
-    "am": { "domain": "ru", "country": "RU", "lr": "168" },
-    "az": { "domain": "ru", "country": "RU", "lr": "167" },
-    "ge": { "domain": "ru", "country": "RU", "lr": "169" },
-    "kg": { "domain": "ru", "country": "RU", "lr": "207" },
-    "tj": { "domain": "ru", "country": "RU", "lr": "209" },
-    "tm": { "domain": "ru", "country": "RU", "lr": "170" },
-    "md": { "domain": "ru", "country": "RU", "lr": "208" },
-    "tr": { "domain": "ru", "country": "RU", "lr": "983" },
-    "us": { "domain": "ru", "country": "RU", "lr": "84" },
-    "de": { "domain": "ru", "country": "RU", "lr": "96" },
-    "fr": { "domain": "ru", "country": "RU", "lr": "124" },
-    "gb": { "domain": "ru", "country": "RU", "lr": "102" },
-    "pl": { "domain": "ru", "country": "RU", "lr": "120" },
-    "ee": { "domain": "ru", "country": "RU", "lr": "179" },
-    "lv": { "domain": "ru", "country": "RU", "lr": "206" },
-    "lt": { "domain": "ru", "country": "RU", "lr": "117" }
+    "ru": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "225"
+    },
+    "moscow": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "213"
+    },
+    "spb": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "2"
+    },
+    "by": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "149"
+    },
+    "kz": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "159"
+    },
+    "ua": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "187"
+    },
+    "uz": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "171"
+    },
+    "am": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "168"
+    },
+    "az": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "167"
+    },
+    "ge": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "169"
+    },
+    "kg": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "207"
+    },
+    "tj": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "209"
+    },
+    "tm": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "170"
+    },
+    "md": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "208"
+    },
+    "tr": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "983"
+    },
+    "us": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "84"
+    },
+    "de": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "96"
+    },
+    "fr": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "124"
+    },
+    "gb": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "102"
+    },
+    "pl": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "120"
+    },
+    "ee": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "179"
+    },
+    "lv": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "206"
+    },
+    "lt": {
+      "domain": "ru",
+      "country": "RU",
+      "lr": "117"
+    }
   },
   "default_locale": "ru",
   "parsing_instructions": {
     "type": "css",
     "fields": {
       "titles": {
-        "selector": "li.serp-item .OrganicTitle-LinkText, li.serp-item h2",
+        "selector": "li.serp-item .Organic",
+        "attr": "html",
         "all": true,
-        "required": true
+        "required": true,
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "OrganicTitle-LinkText[^>]*>([\\s\\S]*?)</a>"
+            ]
+          },
+          {
+            "op": "strip_tags"
+          },
+          {
+            "op": "strip"
+          }
+        ]
       },
       "links": {
-        "selector": "li.serp-item a.OrganicTitle-Link[href^='http'], li.serp-item a[href^='http']",
-        "attr": "href",
-        "all": true
+        "selector": "li.serp-item .Organic",
+        "attr": "html",
+        "all": true,
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "<a[^>]*OrganicTitle-Link[^>]*href=\"(https?://[^\"]+)\""
+            ]
+          },
+          {
+            "op": "strip_tags"
+          }
+        ]
       },
       "snippets": {
-        "selector": "li.serp-item .OrganicText, li.serp-item .TextContainer",
+        "selector": "li.serp-item .Organic",
+        "attr": "html",
         "all": true,
-        "post_process": [{ "op": "strip" }]
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "OrganicText[^>]*>([\\s\\S]*)</div>"
+            ]
+          },
+          {
+            "op": "strip_tags"
+          }
+        ]
       },
       "result_blocks": {
-        "selector": "li.serp-item",
+        "selector": "li.serp-item .Organic",
         "attr": "html",
         "all": true
       }
@@ -69,14 +202,29 @@
   "output_schema": {
     "type": "object",
     "properties": {
-      "titles":    { "type": "array", "items": { "type": "string" } },
-      "links":     { "type": "array", "items": { "type": "string" } },
-      "snippets":  { "type": "array", "items": { "type": "string" } }
+      "titles": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "links": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "snippets": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
     }
   },
   "self_heal": true,
   "prompt_schema": null,
   "llm_extract_prompt": null,
-  "version": 2,
-  "updated_at": 1784160000.0
+  "version": 3,
+  "updated_at": 1785024000.0
 }

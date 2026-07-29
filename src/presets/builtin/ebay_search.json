@@ -1,41 +1,72 @@
 {
   "name": "ebay_search",
   "source": "ebay",
-  "description": "eBay search results (sorted newest), su-card layout. Returns title/price/url arrays for item listings in the results river. Titles and urls share the [href*='/itm/'] selector, so they stay structurally co-indexed and also exclude eBay's 'Shop on eBay' dummy and 'related searches' suggestion cards (which link to /sch/). Prices use a separate selector, so price-to-title alignment is best-effort: a listing with no price node (e.g. auction-only) shifts the price array. Per-listing condition/shipping aren't column-alignable here; use LLM extraction for reliable per-row data. Selectors verified against live markup 2026-07.",
+  "description": "eBay search results (sorted newest, _sop=12), s-card layout. Returns title/price/url arrays for item listings in the results river. Every field anchors to a per-card container eBay renders on each listing, so a card missing its price yields null in that slot instead of shifting the whole price column. Titles read the styled-text span as a direct child of .s-card__title (the container also holds a screen-reader-only 'Opens in a new window or tab'), and urls take the header anchor as a direct child so the card's image link is not collected. KNOWN CHANGE vs the su-card layout: the old [href*='/itm/'] filter is gone because applying it to one field alone re-introduces row shrinkage, so a non-item card in the river (eBay's 'Shop on eBay' dummy or a /sch/ related-search suggestion) is now emitted as a row — filter on the url if that matters. Neither shape occurred in 120 live cards (2026-07-26). Per-listing condition/shipping aren't column-alignable here; use LLM extraction for reliable per-row data.",
   "kind": "builtin",
   "url_template": "https://www.ebay.{domain}/sch/i.html?_nkw={query}&_sop=12",
   "request_defaults": {
     "device": "desktop",
     "proxy_type": "prem_res_rotating",
-    "prem_proxy_options": { "ip_filter": "quality-security" },
-    "warmup": { "type": "homepage" },
+    "prem_proxy_options": {
+      "ip_filter": "quality-security"
+    },
+    "warmup": {
+      "type": "homepage"
+    },
     "stealth": true,
     "wait_until": "domcontentloaded",
     "timeout_ms": 60000,
     "block_assets": false
   },
   "locales": {
-    "us": { "domain": "com",   "country": "US" },
-    "uk": { "domain": "co.uk", "country": "GB" },
-    "de": { "domain": "de",    "country": "DE" }
+    "us": {
+      "domain": "com",
+      "country": "US"
+    },
+    "uk": {
+      "domain": "co.uk",
+      "country": "GB"
+    },
+    "de": {
+      "domain": "de",
+      "country": "DE"
+    }
   },
   "default_locale": "us",
   "parsing_instructions": {
     "type": "css",
     "fields": {
       "titles": {
-        "selector": ".srp-river-results .su-item-card__title[href*='/itm/']",
+        "selector": ".srp-river-results li.s-card--horizontal .su-card-container__header .s-card__title > span.su-styled-text",
         "all": true,
         "required": true,
-        "post_process": [{ "op": "strip" }]
+        "post_process": [
+          {
+            "op": "strip"
+          }
+        ]
       },
       "prices": {
-        "selector": ".srp-river-results .su-item-card__price",
+        "selector": ".srp-river-results li.s-card--horizontal .su-card-container__attributes__primary",
+        "attr": "html",
         "all": true,
-        "post_process": [{ "op": "strip" }]
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "class=\"[^\"]*s-card__price[\\s\"][^>]*>(?:\\s|<[a-zA-Z][^>]*>)*([^<]+)"
+            ]
+          },
+          {
+            "op": "strip_tags"
+          },
+          {
+            "op": "strip"
+          }
+        ]
       },
       "urls": {
-        "selector": ".srp-river-results .su-item-card__title[href*='/itm/']",
+        "selector": ".srp-river-results li.s-card--horizontal .su-card-container__header > a.s-card__link",
         "attr": "href",
         "all": true
       }
@@ -44,14 +75,29 @@
   "output_schema": {
     "type": "object",
     "properties": {
-      "titles": { "type": "array", "items": { "type": "string" } },
-      "prices": { "type": "array", "items": { "type": "string" } },
-      "urls":   { "type": "array", "items": { "type": "string" } }
+      "titles": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "prices": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "urls": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
     }
   },
   "self_heal": true,
   "prompt_schema": null,
   "llm_extract_prompt": null,
-  "version": 2,
-  "updated_at": 1783814400.0
+  "version": 3,
+  "updated_at": 1785024000.0
 }

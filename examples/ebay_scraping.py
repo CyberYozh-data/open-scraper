@@ -5,14 +5,14 @@ Example: Stealth Scraping — eBay Search Results
 eBay detects headless browsers and datacenter IPs. Bypass strategy:
 - stealth=True       removes headless browser fingerprints
 - res_rotating       residential rotating proxy for a clean IP each request
-- domcontentloaded   eBay server-renders the su-card listing grid
+- domcontentloaded   eBay server-renders the s-card listing grid
 
-Extraction (eBay 2026 "su-card" layout):
-  Listings live under .srp-river-results; each card's title anchor is
-  .su-item-card__title. The [href*='/itm/'] filter keeps real item listings
-  and drops eBay's "Shop on eBay" dummy plus the injected "related searches"
-  suggestion cards (which link to /sch/ and carry no price), so titles,
-  prices and urls stay row-aligned.
+Extraction (eBay "s-card" layout, verified 2026-07-26):
+  Listings live under .srp-river-results as li.s-card--horizontal. Every field
+  anchors to a per-card container so the columns stay row-aligned even when a
+  card has no price. Note this collects any card in the river, including eBay's
+  "Shop on eBay" dummy and /sch/ related-search suggestions — filter on the
+  link if you only want item listings.
 
 Requirements:
   - CYBERYOZH_API_KEY in .env file
@@ -27,8 +27,12 @@ from client_helpers import scrape_page, save_screenshot, console
 
 load_dotenv()
 
-# Real item listings only: title anchor whose href is an /itm/ page.
-_ITEM_TITLE = ".srp-river-results .su-item-card__title[href*='/itm/']"
+_CARD = ".srp-river-results li.s-card--horizontal"
+# The title container also holds a screen-reader-only "Opens in a new window
+# or tab", so read the styled-text span rather than the container.
+_TITLE = f"{_CARD} .su-card-container__header .s-card__title > span.su-styled-text"
+# Direct child: each card also carries an a.s-card__link around its image.
+_LINK = f"{_CARD} .su-card-container__header > a.s-card__link"
 
 
 def scrape_ebay_search(query: str, max_items: int = 10) -> list:
@@ -56,17 +60,17 @@ def scrape_ebay_search(query: str, max_items: int = 10) -> list:
             "type": "css",
             "fields": {
                 "titles": {
-                    "selector": _ITEM_TITLE,
+                    "selector": _TITLE,
                     "attr": "text",
                     "all": True,
                 },
                 "prices": {
-                    "selector": ".srp-river-results .su-item-card__price",
+                    "selector": f"{_CARD} .s-card__price",
                     "attr": "text",
                     "all": True,
                 },
                 "links": {
-                    "selector": _ITEM_TITLE,
+                    "selector": _LINK,
                     "attr": "href",
                     "all": True,
                 },
@@ -87,8 +91,12 @@ def scrape_ebay_search(query: str, max_items: int = 10) -> list:
     links = data.get("links") or []
 
     if not titles:
-        console.print("\n  [yellow]⚠ No listings found — page may have shown a CAPTCHA[/yellow]")
-        console.print("  [dim]Rotating proxy assigns a new IP on next request — try again[/dim]")
+        console.print("\n  [yellow]⚠ No listings found[/yellow]")
+        console.print(
+            "  [dim]Either the page was challenged, or eBay changed its card "
+            "markup and the selectors above need re-checking against a live "
+            "capture before you spend more proxy quota retrying[/dim]"
+        )
         return []
 
     items = []

@@ -12,9 +12,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Literal
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Error as PWError
+from playwright.async_api import (
+    async_playwright,
+    Browser,
+    BrowserContext,
+    Error as PWError,
+    TimeoutError as PWTimeoutError,
+)
 from playwright_stealth import Stealth
 
+from src.browser.page_io import read_content_settling_navigation
 from src.proxy.models import ProxyConfig
 from src.proxy.socks_bridge import open_socks_to_http_bridge
 from src.browser.geo_profile import resolve_profile
@@ -204,6 +211,16 @@ HTTP_BAN_STATUSES = frozenset({401, 403, 407, 429})
 HTTP_TRANSIENT_STATUSES = frozenset(
     {500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 413}
 )
+
+
+SELECTOR_MISS_PREFIX = "selector_not_found: "
+"""Error prefix for "the page loaded but never grew the requested selector".
+
+Shared with the queue, which rotates the exit on it: a missing SERP selector
+usually means an interstitial replaced the results.
+"""
+
+
 
 
 def classify_fetch(
@@ -885,33 +902,31 @@ class PlaywrightRunner:
                 default_dwell_ms=settings.warmup_dwell_ms,
             )
             resp = await page.goto(url, wait_until=wait_until, timeout=effective_timeout_ms)
+            selector_missing = False
             if wait_for_selector:
-                await page.wait_for_selector(wait_for_selector, timeout=effective_timeout_ms)
-
-            # Some sites (LinkedIn, SPA auth gates) keep navigating after
-            # domcontentloaded, so page.content() can race with a redirect.
-            # Retry a few times, optionally waiting for the DOM to settle.
-            html = ""
-            last_error: PWError | None = None
-            for _ in range(4):
                 try:
-                    html = await page.content()
-                    last_error = None
-                    break
-                except PWError as exc:
-                    last_error = exc
-                    msg = str(exc).lower()
-                    if "navigating" in msg or "changing the content" in msg:
-                        try:
-                            await page.wait_for_load_state(
-                                "domcontentloaded", timeout=3000,
-                            )
-                        except PWError:
-                            pass
-                        continue
-                    raise
-            if last_error is not None:
-                raise last_error
+                    await page.wait_for_selector(
+                        wait_for_selector, timeout=effective_timeout_ms
+                    )
+                except PWTimeoutError as exc:
+                    # Don't abandon the page. The selector is most often absent
+                    # because the target served an interstitial instead of the
+                    # content — a case the block heuristic below already
+                    # recognises — and jumping to the except handler discards
+                    # the html/url it needs, turning a captcha into a bare
+                    # timeout the queue can't act on.
+                    #
+                    # Only the deadline is recovered: a malformed selector
+                    # raises a plain PWError here, and reporting that as
+                    # "not found" would both misdiagnose it and spend the whole
+                    # rotation budget on a request that can never succeed.
+                    selector_missing = True
+                    log.warning(
+                        "selector %r did not appear before the deadline for %s: %s",
+                        wait_for_selector, url, exc,
+                    )
+
+            html = await read_content_settling_navigation(page)
             final_url = page.url
             status_code = resp.status if resp is not None else None
             captcha_detected = self._looks_like_captcha_or_block(
@@ -920,6 +935,13 @@ class PlaywrightRunner:
             fetch_ok, fetch_blocked, fetch_error = classify_fetch(
                 status_code, captcha_detected=captcha_detected
             )
+            if selector_missing:
+                # A page that never grew the requested selector is incomplete,
+                # so it never counts as ok. Keep whatever reason the classifier
+                # already found — it explains why the selector never appeared —
+                # and only name the selector when nothing else did.
+                fetch_ok = False
+                fetch_error = fetch_error or f"{SELECTOR_MISS_PREFIX}{wait_for_selector}"
 
             screenshot_b64 = None
             png, element_status = await _capture_screenshot(

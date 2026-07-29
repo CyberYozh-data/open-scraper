@@ -98,12 +98,33 @@ def _parse_price(value: Any, locale: str = "us") -> float | None:
     """
     if value is None:
         return None
-    match = re.search(r"-?[\d., ]+", str(value))
+    text = str(value)
+    # The class keeps the space because it is a thousands separator in several
+    # locales ("1 234,56"). Requiring the match to START with a digit is what
+    # separates that from a space merely sitting in front of the number: with a
+    # leading `[\d., ]`, "Now $199.00" matched the single space at index 3,
+    # which `replace(" ", "")` then reduced to "" and the guard below rejected.
+    # Every labelled price ("From $12.50", "Sale price $9.99") parsed as None.
+    # A separator may open the number ("$.99" is ordinary sub-dollar retail
+    # typography) but only when a digit follows it, which is what keeps the
+    # bare-space match out.
+    match = re.search(r"(?:\d|[.,]\d)[\d., ]*", text)
     if match is None:
         return None
     raw = match.group(0).replace(" ", "")
-    sign = -1.0 if raw.startswith("-") else 1.0
-    raw = raw.lstrip("-")
+    # The sign no longer rides along in the match, so read it from whatever sits
+    # between the minus and the digits — a currency symbol, typically.
+    # The sign must be ADJACENT: only currency symbols may sit between the minus
+    # and the number, and the minus itself must open the string or follow
+    # whitespace. Anything looser reads a separator dash ("Sale - $19.99") or a
+    # hyphenated name ("XL-$19.99") as a negative price — silently, which is
+    # worse than the null this function used to return.
+    prefix = text[: match.start()].rstrip("$€£¥₽")
+    sign = 1.0
+    if prefix.endswith("-"):
+        head = prefix[:-1]
+        if not head or head[-1].isspace():
+            sign = -1.0
     if not raw:
         return None
 
