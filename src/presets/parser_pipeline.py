@@ -37,13 +37,28 @@ class ParserResult:
     healed_instructions: ParsingInstructions | None = None
 
 
+def _extracted_nothing(value: Any) -> bool:
+    """Whether a field came back with no usable value.
+
+    A list of nothing but nulls is empty in every sense that matters, but it is
+    truthy — so a container-anchored field (the row-alignment pattern: anchor on
+    an element that is present even when the value is not, then dig the value
+    out of it) satisfied `required` no matter how badly the inner selectors had
+    drifted. That silently disabled self-heal for exactly the presets built to
+    survive drift.
+    """
+    if isinstance(value, list):
+        return not any(item not in (None, "") for item in value)
+    return not value
+
+
 def _missing_required(
     instructions: ParsingInstructions, data: dict[str, Any]
 ) -> list[str]:
     return [
         name
         for name, rule in instructions.fields.items()
-        if rule.required and not data.get(name)
+        if rule.required and _extracted_nothing(data.get(name))
     ]
 
 

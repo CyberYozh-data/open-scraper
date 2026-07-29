@@ -13,15 +13,18 @@ import logging
 from typing import Any, Literal, Optional
 
 from camoufox.async_api import AsyncCamoufox
+from playwright.async_api import TimeoutError as PWTimeoutError
 
 from src.browser.runner import (
     DEFAULT_DESKTOP_VIEWPORT,
     FetchResult,
+    SELECTOR_MISS_PREFIX,
     _capture_screenshot,
     classify_fetch,
     looks_like_captcha_or_block,
     run_warmup,
 )
+from src.browser.page_io import read_content_settling_navigation
 from src.proxy.models import ProxyConfig
 from src.settings import settings
 
@@ -205,17 +208,33 @@ class CamoufoxRunner:
                 resp = await page.goto(
                     url, wait_until=wait_until, timeout=effective_timeout_ms
                 )
+                selector_missing = False
                 if wait_for_selector:
-                    await page.wait_for_selector(
-                        wait_for_selector, timeout=effective_timeout_ms
-                    )
-                html = await page.content()
+                    try:
+                        await page.wait_for_selector(
+                            wait_for_selector, timeout=effective_timeout_ms
+                        )
+                    except PWTimeoutError as exc:
+                        # See PlaywrightRunner.fetch: the selector is usually
+                        # missing because an interstitial replaced the content,
+                        # so keep the page and let the classifier name it.
+                        # Only the deadline — a malformed selector raises a
+                        # plain PWError and must stay a hard error.
+                        selector_missing = True
+                        log.warning(
+                            "selector %r did not appear before the deadline "
+                            "for %s: %s", wait_for_selector, url, exc,
+                        )
+                html = await read_content_settling_navigation(page)
                 final_url = page.url
                 status_code = resp.status if resp is not None else None
                 captcha_detected = looks_like_captcha_or_block(html, final_url=final_url)
                 fetch_ok, fetch_blocked, fetch_error = classify_fetch(
                     status_code, captcha_detected=captcha_detected
                 )
+                if selector_missing:
+                    fetch_ok = False
+                    fetch_error = fetch_error or f"{SELECTOR_MISS_PREFIX}{wait_for_selector}"
 
                 # Screenshot: a Camoufox page is a Playwright (Firefox) page, so
                 # reuse the runner's capture helper. It never raises; the extra

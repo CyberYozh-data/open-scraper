@@ -16,6 +16,7 @@ from typing import Any
 from src.browser.runner import (
     HTTP_BAN_STATUSES,
     HTTP_TRANSIENT_STATUSES,
+    SELECTOR_MISS_PREFIX,
     FetchResult,
     PlaywrightRunner,
 )
@@ -87,6 +88,17 @@ def is_navigation_deadline(error: str | None) -> bool:
     if not error:
         return False
     return bool(_NAVIGATION_DEADLINE_RE.search(error.lower()))
+
+
+def is_selector_miss(error: str | None) -> bool:
+    """The page loaded but never grew the selector the request asked for.
+
+    On a SERP preset that usually means an interstitial replaced the results,
+    so the exit is worth rotating. Matched explicitly rather than by the word
+    "timeout" leaking into the proxy-failure needles, which is how the runners'
+    old raw `PlaywrightError` text reached the same decision by accident.
+    """
+    return bool(error) and error.startswith(SELECTOR_MISS_PREFIX)
 
 
 def looks_like_proxy_failure(status_code: int | None, error: str | None) -> bool:
@@ -248,8 +260,12 @@ async def run_scrape(
             # block means this IP is burned, so a fresh proxy is the fix (bounded
             # by max_attempts). Anything else is a genuine target response — don't
             # waste proxies retrying it.
-            should_rotate = fetch_result.blocked or looks_like_proxy_failure(
-                fetch_result.status_code, fetch_result.error
+            should_rotate = (
+                fetch_result.blocked
+                or is_selector_miss(fetch_result.error)
+                or looks_like_proxy_failure(
+                    fetch_result.status_code, fetch_result.error
+                )
             )
             # A navigation deadline is not evidence of a bad exit, but it is not
             # evidence of a good one either — a hung exit, or one answering 407
@@ -333,7 +349,15 @@ async def run_scrape(
         # Parse data: preset pipeline (self-heal / AI) when a
         # parser_plan is present, else the plain deterministic
         # extract for raw /scrape callers.
-        if (request.get("extract") or request.get("parser_plan")) and fetch_result.html:
+        # `blocked` gates this, not html emptiness: an interstitial has a
+        # perfectly good DOM, and self-heal would regenerate selectors from
+        # it — an LLM call per blocked request, and for a user preset those
+        # regenerated selectors are persisted over the working ones.
+        if (
+            (request.get("extract") or request.get("parser_plan"))
+            and fetch_result.html
+            and not fetch_result.blocked
+        ):
             parsed_data, parse_warnings = await apply_parser(
                 fetch_result.html,
                 request.get("extract"),

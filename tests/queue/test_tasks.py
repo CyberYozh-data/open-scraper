@@ -365,3 +365,70 @@ async def test_scrape_with_session_injects_pinned_viewport(monkeypatch):
     await tasks._scrape_with_session(MagicMock(), "req1", page)
 
     assert captured["page"]["viewport"] == {"width": 1366, "height": 768}
+
+
+async def _session_store(monkeypatch, storage_state=None):
+    """Shared setup for the storage_state relay tests."""
+    from src.sessions.models import SessionRecord
+
+    record = SessionRecord(
+        session_id="s1", status="ready", created_at=0, expires_at=1, last_used_at=0,
+        device="desktop", proxy_type="none", viewport=None, storage_state=storage_state,
+    )
+
+    class _Lock:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+    store = MagicMock()
+    store.lock = MagicMock(return_value=_Lock())
+    store.get = AsyncMock(return_value=record)
+    store.update_storage_state = AsyncMock()
+    monkeypatch.setattr(tasks, "get_session_store", lambda: store)
+    return store
+
+
+def _envelope(*, fetch_ok: bool, status_code: int = 200):
+    """The shape run_scrape actually returns: meta is nested under `result`.
+
+    Reading it from the top level instead silently yields the default, which is
+    how the blocked-page guard below came to be a no-op — `envelope.get("meta")`
+    is always None, so `fetch_ok` defaulted to True on every request.
+    """
+    return {
+        "ok": True,
+        "storage_state": {"cookies": [{"name": "challenge", "value": "x"}]},
+        "result": {"meta": {"status_code": status_code, "fetch_ok": fetch_ok}},
+    }
+
+
+async def test_session_storage_state_is_persisted_on_a_good_fetch(monkeypatch):
+    store = await _session_store(monkeypatch)
+    monkeypatch.setattr(
+        tasks.scrape_runner, "run_scrape",
+        AsyncMock(return_value=_envelope(fetch_ok=True)),
+    )
+
+    await tasks._scrape_with_session(MagicMock(), "req1", {"session_id": "s1", "url": "https://x"})
+
+    store.update_storage_state.assert_awaited_once()
+
+
+async def test_blocked_fetch_does_not_persist_storage_state(monkeypatch):
+    """A captcha interstitial is HTTP 200, so the status is not consent.
+
+    Without this guard the cookies harvested from a challenge page are written
+    into the shared session record and inherited by every later scrape on it.
+    """
+    store = await _session_store(monkeypatch)
+    monkeypatch.setattr(
+        tasks.scrape_runner, "run_scrape",
+        AsyncMock(return_value=_envelope(fetch_ok=False)),
+    )
+
+    await tasks._scrape_with_session(MagicMock(), "req1", {"session_id": "s1", "url": "https://x"})
+
+    store.update_storage_state.assert_not_awaited()

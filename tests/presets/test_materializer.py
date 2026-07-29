@@ -653,4 +653,10 @@ def test_yandex_preset_uses_prem_and_warmup():
     # pydantic's default extra="ignore", so e.g. a misplaced key (outside
     # request_defaults) would vanish silently instead of raising — this
     # assertion is what stands between the fix and a silent regression.
+    #
+    # The streaming problem (one live capture carried 2 of 18 results) is
+    # handled by wait_until='load', not by a stricter selector: a `.Pager`
+    # anchor fails closed on a SERP that fits on one page and renders no pager,
+    # costing a rotation of three premium exits and the task ceiling.
     assert out.wait_for_selector == "li.serp-item"
+    assert out.wait_until == "load"
