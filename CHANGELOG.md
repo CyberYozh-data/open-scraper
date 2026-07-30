@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.6] - 2026-07-30
+
+Extraction and preset reliability release: repaired marketplace/SERP presets,
+more robust price parsing, and a browser fix that tells a blocked page apart
+from a slow one (with a session-persistence correctness fix). No API change.
+
+### Fixed
+
+- Preset extraction repaired for current site layouts: eBay search (new s-card
+  layout, hardened price regex), Walmart (recovered price/rating; dropped
+  google_shopping's dead `urls`), and Yandex search (one row per organic block,
+  so titles/links/snippets no longer drift out of alignment).
+- Price parsing no longer lets a label before the price swallow it: a leading
+  digit is required, so `From $19.99` / `Now 19.99` parse the number, not the
+  label. Currency symbols, thousands separators (US and EU), leading decimals
+  and negatives still parse as before.
+- Browser: a `wait_for_selector` timeout is now classified (interstitial/blocked
+  vs slow-but-fine) instead of treated uniformly.
+- Sessions: the storage-state persistence gate reads the fetch outcome from the
+  correct result path, so cookies from a captcha page (HTTP 200 but not genuine
+  content) are no longer written into a shared session and inherited later.
+
 ## [0.1.5] - 2026-07-24
 
 Patch release: a queue retry fix plus dependency security updates.
