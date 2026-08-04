@@ -12,6 +12,15 @@ lxml>=5.2
 cssselect>=1.2
 html2text>=2024.2.26
 fastapi-mcp>=0.4.0,<0.5.0
+# fastapi-mcp leaves its own `mcp` dependency unbounded, and mcp 2.0.0 made
+# Server.__init__ keyword-only. fastapi-mcp 0.4.x still calls it positionally,
+# so a fresh resolve raises TypeError from create_app() itself. Upstream's own
+# 2.0.0 notes prescribe this bound verbatim for projects not ready to migrate.
+# Floor >=1.28.1 is not cosmetic either: it is the fix version for
+# GHSA-vj7q-gjh5-988w (HIGH — WebSocket transport missing Host/Origin
+# validation). Drop the ceiling once fastapi-mcp ships a release built
+# against mcp 2.x; there is none today (latest is 0.4.0, 2025-07-28).
+mcp>=1.28.1,<2
 python-socks[asyncio]>=2.8
 # Floor >=1.83.7: excludes CVE-2026-42208 (SQLi, CVSS 9.3) and the
 # compromised 1.82.7/1.82.8 supply-chain releases (March 2026 incident).
