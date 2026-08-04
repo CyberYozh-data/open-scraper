@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.7] - 2026-08-04
+
+Build fix.
+
+### Fixed
+
+- Pinned `mcp>=1.28.1,<2` in both `requirements.txt` and
+  `yozh-crawler/requirements.txt`. `mcp` 2.0.0 made `Server.__init__`
+  keyword-only, which `fastapi-mcp` 0.4.x calls positionally, so a fresh
+  `docker build` shipped services that raised `TypeError` in `create_app()`
+  before serving anything. The floor keeps the GHSA-vj7q-gjh5-988w fix. Build
+  time only; no runtime or API change.
+
 ## [0.1.6] - 2026-07-30
 
 Extraction and preset reliability release: repaired marketplace/SERP presets,
