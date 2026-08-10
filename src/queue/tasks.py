@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 import traceback
 from typing import Any
 
@@ -21,7 +22,15 @@ from src.proxy.resolver import proxy_resolver
 from src.queue import scrape_runner
 from src.queue.broker import broker
 from src.queue.reaper import reclaim_once
-from src.queue.store import TERMINAL_STATUSES, JobNotInStore, get_job_store, pack_payload
+from src.queue.field_guards import DEVICES, PROXY_TYPES, literal_or, str_or_none
+from src.queue.envelope import ScrapeEnvelope, ScrapeErr, ScrapeOk
+from src.schemas import ScrapeMeta, ScrapeResponse
+from src.queue.store import (
+    TERMINAL_STATUSES,
+    JobNotInStore,
+    get_job_store,
+    pack_response,
+)
 from src.sessions.models import LoginScript
 from src.sessions.store import (
     SessionExpired,
@@ -34,6 +43,7 @@ from src.utils.ids import new_request_id
 
 log = logging.getLogger(__name__)
 
+
 LOGIN_PAYLOAD_KEY = "login:{}:payload"
 LOGIN_RESULT_KEY = "login:{}:result"
 LOGIN_KEY_TTL_S = 600
@@ -44,31 +54,37 @@ def _is_successful_status(status_code: int | None) -> bool:
     return status_code is not None and 200 <= int(status_code) < 400
 
 
-def make_error_payload(page: dict[str, Any], error: str) -> dict[str, Any]:
-    """ScrapeResponse-shaped error placeholder (moved from src/jobs.py
-    _create_error_response, dict-native)."""
-    return {
-        "request_id": new_request_id(),
-        "took_ms": 0,
-        "meta": {
-            "url": str(page.get("url")),
+def make_error_payload(page: dict[str, Any], error: str) -> ScrapeResponse:
+    """Error placeholder for a page slot (moved from src/jobs.py
+    _create_error_response). Built as the model rather than a look-alike dict,
+    so the shape is checked here instead of on read-back."""
+    return ScrapeResponse(
+        request_id=new_request_id(),
+        took_ms=0,
+        meta=ScrapeMeta(
+            url=str(page.get("url")),
             # Default the Literal-typed fields so an empty page dict (the
             # missing-payload branch) still validates as ScrapeMeta on read-back.
-            "device": page.get("device") or "desktop",
-            "proxy_type": page.get("proxy_type") or "none",
-            "proxy_pool_id": page.get("proxy_pool_id"),
-            "status_code": None,
-            "retries": 0,
+            # Fall back rather than raise on an unexpected Literal: a page
+            # dict written by an older API build (24h TTL, rolling deploy) must
+            # still produce a slot, not hang the job.
+            device=literal_or(page.get("device"), DEVICES, "desktop", field="device"),
+            proxy_type=literal_or(page.get("proxy_type"), PROXY_TYPES, "none", field="proxy_type"),
+            # Same reason as the Literals above: a non-str here would raise on
+            # the one line that guarantees a slot gets written.
+            proxy_pool_id=str_or_none(page.get("proxy_pool_id"), field="proxy_pool_id"),
+            status_code=None,
+            retries=0,
             # Hard worker failure (timeout / exception / missing payload): the
             # fetch did not succeed, so be honest rather than inheriting the
             # ScrapeMeta default of True.
-            "fetch_ok": False,
-        },
+            fetch_ok=False,
+        ),
         # First-class reason for clients; kept in warnings too so readers
         # that predate the `error` field still see it.
-        "error": error,
-        "warnings": [error],
-    }
+        error=error,
+        warnings=[error],
+    )
 
 
 # --- worker-state access seams (real values set by worker.py startup hook) ---
@@ -164,9 +180,15 @@ def _record_page(context: Context, engine: str = "chromium") -> None:
     state.last_activity[engine] = asyncio.get_running_loop().time()
 
 
-async def _scrape_with_session(runner, request_id: str, page: dict[str, Any]) -> dict[str, Any]:
+async def _scrape_with_session(
+    runner, request_id: str, page: dict[str, Any], *, deadline: float | None = None
+) -> ScrapeEnvelope:
     """Session-pinned page: storage_state relay via the session store under the
-    session lock. Mirrors old JobRunner._process_page session branch."""
+    session lock. Mirrors old JobRunner._process_page session branch.
+
+    `deadline` is relayed untouched: acquiring the session lock can take up to a
+    minute, and that minute comes out of the same task ceiling the scrape loop
+    has to fit inside."""
     session_id = page["session_id"]
     store = get_session_store()
     async with store.lock(session_id):
@@ -183,15 +205,17 @@ async def _scrape_with_session(runner, request_id: str, page: dict[str, Any]) ->
             **page,
             "viewport": record.viewport.model_dump() if record.viewport else None,
         }
-        envelope = await scrape_runner.run_scrape(runner, request_id, page, record.storage_state)
-        if envelope.get("ok"):
-            new_state = envelope.get("storage_state")
-            meta = envelope.get("result", {}).get("meta", {})
-            status_code = meta.get("status_code")
+        envelope = await scrape_runner.run_scrape(
+            runner, request_id, page, record.storage_state, deadline=deadline
+        )
+        if isinstance(envelope, ScrapeOk):
+            new_state = envelope.storage_state
+            meta = envelope.result.meta
+            status_code = meta.status_code
             # A captcha interstitial is HTTP 200, so status alone is not
             # consent to persist: cookies harvested from a challenge page
             # would be inherited by every later scrape on this session.
-            fetch_ok = meta.get("fetch_ok", True)
+            fetch_ok = meta.fetch_ok
             if new_state is not None and fetch_ok and _is_successful_status(status_code):
                 await store.update_storage_state(session_id, new_state)
         return envelope
@@ -231,7 +255,7 @@ async def scrape_page_task(
         log.error("scrape_page: job %s page %d payload missing", job_id, page_index)
         try:
             await store.write_slot(
-                job_id, page_index, pack_payload(make_error_payload({}, "page payload missing")),
+                job_id, page_index, pack_response(make_error_payload({}, "page payload missing")),
             )
         except JobNotInStore:
             return
@@ -240,7 +264,13 @@ async def scrape_page_task(
 
     request_id = new_request_id()
 
-    async def _scrape() -> dict[str, Any]:
+    # Stamped before the wait_for so the scrape loop sizes its attempts against
+    # the deadline actually being enforced. Everything between here and the first
+    # navigation — the browser guard, a cold browser launch, the session lock —
+    # spends this budget, and the loop has to see that.
+    deadline = time.perf_counter() + settings.page_task_timeout_s
+
+    async def _scrape() -> ScrapeEnvelope:
         async with _browser_guard(context):
             runner = await _get_runner(
                 context,
@@ -248,20 +278,22 @@ async def scrape_page_task(
                 page.get("headless"),
             )
             if page.get("session_id"):
-                return await _scrape_with_session(runner, request_id, page)
-            return await scrape_runner.run_scrape(runner, request_id, page, None)
+                return await _scrape_with_session(runner, request_id, page, deadline=deadline)
+            return await scrape_runner.run_scrape(
+                runner, request_id, page, None, deadline=deadline
+            )
 
     try:
         # asyncio.wait_for (not asyncio.timeout): repo floors python at 3.10.
         envelope = await asyncio.wait_for(_scrape(), timeout=settings.page_task_timeout_s)
     except (SessionNotFound, SessionExpired, SessionIncompatible) as exc:
-        envelope = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        envelope = ScrapeErr(error=f"{type(exc).__name__}: {exc}")
     except asyncio.TimeoutError:
-        envelope = {"ok": False, "error": f"page task exceeded {settings.page_task_timeout_s}s"}
+        envelope = ScrapeErr(error=f"page task exceeded {settings.page_task_timeout_s}s")
     except Exception as exc:  # noqa: BLE001 — the one-delivery-one-slot guard
         log.exception("scrape_page: unexpected failure job=%s page=%d request_id=%s",
                       job_id, page_index, request_id)
-        envelope = {"ok": False, "error": str(exc) or type(exc).__name__}
+        envelope = ScrapeErr(error=str(exc) or type(exc).__name__)
     finally:
         # Only a run that used the warm runner may advance its lifecycle
         # counters. An ephemeral (non-default launch mode) or camoufox run gets
@@ -271,11 +303,11 @@ async def scrape_page_task(
             _record_page(context, engine)
 
     payload = (
-        envelope["result"] if envelope.get("ok")
-        else make_error_payload(page, envelope.get("error", "worker_failed"))
+        envelope.result if isinstance(envelope, ScrapeOk)
+        else make_error_payload(page, envelope.error)
     )
     try:
-        await store.write_slot(job_id, page_index, pack_payload(payload))
+        await store.write_slot(job_id, page_index, pack_response(payload))
     except JobNotInStore:
         log.warning("scrape_page: job %s vanished before slot write", job_id)
         return

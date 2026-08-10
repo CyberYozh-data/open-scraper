@@ -660,3 +660,120 @@ def test_yandex_preset_uses_prem_and_warmup():
     # costing a rotation of three premium exits and the task ceiling.
     assert out.wait_for_selector == "li.serp-item"
     assert out.wait_until == "load"
+
+
+class TestFingerprintProfile:
+    """A preset carries the profile through `request_defaults`, no code needed.
+
+    `request_defaults` is a free dict validated against ScrapeRequest's field
+    names, so the only thing that can go wrong is the name — and that fails as
+    a MaterializeError naming the key rather than as a silently ignored option.
+    """
+
+    def test_a_preset_can_pin_the_fingerprint_profile(self):
+        preset = _amazon_preset(
+            request_defaults={
+                "browser_engine": "camoufox",
+                "fingerprint_profile": "windows_on_host",
+            }
+        )
+
+        req = materialize(preset, PresetScrapeRequest(source="amazon_product",
+                                                      preset_params={"asin": "B0"}))
+
+        assert req.fingerprint_profile == "windows_on_host"
+
+    def test_a_caller_can_override_the_presets_profile(self):
+        preset = _amazon_preset(
+            request_defaults={
+                "browser_engine": "camoufox",
+                "fingerprint_profile": "windows_on_host",
+            }
+        )
+
+        req = materialize(
+            preset,
+            PresetScrapeRequest(
+                source="amazon_product", preset_params={"asin": "B0"},
+                request_override={"fingerprint_profile": "random"},
+            ),
+        )
+
+        assert req.fingerprint_profile == "random"
+
+    def test_a_misspelled_key_is_refused_rather_than_ignored(self):
+        preset = _amazon_preset(request_defaults={"fingerprint_profil": "host"})
+
+        with pytest.raises(MaterializeError, match="fingerprint_profil"):
+            materialize(preset, PresetScrapeRequest(source="amazon_product",
+                                                    preset_params={"asin": "B0"}))
+
+    def test_a_caller_spoof_os_supersedes_the_presets_profile(self):
+        """The regression this class exists for.
+
+        Both Camoufox builtins state `fingerprint_profile`, and the merge put it
+        in the same ScrapeRequest as a caller's `spoof_os`. The conflict
+        validator then compared the two literals, so `spoof_os='windows'` beside
+        `fingerprint_profile='windows_on_host'` — the same OS — became a 400 on
+        /search and /scrape/preset for requests that worked before this branch.
+
+        A caller naming one channel means to replace the other, not to argue
+        with it.
+        """
+        preset = _amazon_preset(
+            request_defaults={
+                "browser_engine": "camoufox",
+                "fingerprint_profile": "windows_on_host",
+            }
+        )
+
+        for os_name in ("windows", "macos", "linux"):
+            req = materialize(
+                preset,
+                PresetScrapeRequest(
+                    source="amazon_product", preset_params={"asin": "B0"},
+                    request_override={"spoof_os": os_name},
+                ),
+            )
+            assert req.spoof_os == os_name
+            assert req.fingerprint_profile is None, (
+                "the preset's profile must step aside, not collide"
+            )
+
+    def test_a_caller_profile_supersedes_the_presets_spoof_os(self):
+        """The same rule in the other direction, for presets written before
+        profiles existed."""
+        preset = _amazon_preset(
+            request_defaults={"browser_engine": "camoufox", "spoof_os": "macos"}
+        )
+
+        req = materialize(
+            preset,
+            PresetScrapeRequest(
+                source="amazon_product", preset_params={"asin": "B0"},
+                request_override={"fingerprint_profile": "windows_on_host"},
+            ),
+        )
+
+        assert req.fingerprint_profile == "windows_on_host"
+        assert req.spoof_os is None
+
+    def test_a_caller_stating_both_keeps_both(self):
+        """Superseding is for the channel the caller did NOT state."""
+        preset = _amazon_preset(
+            request_defaults={
+                "browser_engine": "camoufox",
+                "fingerprint_profile": "windows_on_host",
+            }
+        )
+
+        req = materialize(
+            preset,
+            PresetScrapeRequest(
+                source="amazon_product", preset_params={"asin": "B0"},
+                request_override={"spoof_os": "linux", "fingerprint_profile": "linux"},
+            ),
+        )
+
+        assert req.spoof_os == "linux"
+        assert req.fingerprint_profile == "linux"

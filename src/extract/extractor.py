@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 import re
+from html import unescape
 from typing import Any, Dict, Tuple
 
-from lxml import html as lxml_html
+from lxml import etree, html as lxml_html
 
 from src.extract.models import ExtractRule, PostProcess
+
+log = logging.getLogger(__name__)
 
 
 def _text(node) -> str:
@@ -74,14 +78,50 @@ def _strip_tags(value: Any) -> str | None:
     return " ".join((frag.text_content() or "").split())
 
 
+# One integer, and only one. The grouped spelling must consume the WHOLE digit
+# run — `(?!\d)` is what makes "exactly three digits" true rather than merely
+# intended; without it a longer run was partially eaten and glued, so
+# "+1 800 555 0199" came back as 1800555019, a plausible number with a digit
+# silently missing.
+#
+# The backreference is what tells a grouped number from two numbers that merely
+# look like one. A genuinely grouped number uses ONE separator throughout, and
+# whatever follows it must not reuse that separator: a decimal tail always
+# switches ("12 345,67"), a phone number's next group does not. `(?!\1\d)` is
+# therefore the whole locale question answered without knowing the locale.
+#
+# The space stays in the class in both spellings. Localised pages emit U+00A0,
+# but `_text` collapses it to an ASCII space before this function ever sees it,
+# so refusing the ASCII one would break every grouped Russian and French count on
+# the ordinary attr="text" path.
+_INT_RE = re.compile(r"\d{1,3}(?:([.,  ])\d{3})(?:\1\d{3})*(?!\d)(?!\1\d)|\d+")
+_INT_GROUPING = str.maketrans("", "", ".,  ")
+
+
 def _parse_int(value: Any) -> int | None:
+    """First integer in the text, not every digit in it concatenated.
+
+    Stripping all non-digits reads a rating beside a count, a date, or a price
+    as part of the number: "4.5 out of 5" became 455. That is worse than the
+    None it returns for text with no digits — a null gets noticed, a plausible
+    integer does not.
+    """
     if value is None:
         return None
-    digits = re.sub(r"[^\d-]", "", str(value))
-    if not digits or digits in ("-",):
+    text = str(value)
+    match = _INT_RE.search(text)
+    if match is None:
         return None
+    # The sign must be ATTACHED to the number and must itself open the string or
+    # follow whitespace: a hyphen inside a token ("XL-5") is punctuation and a
+    # dash used as a separator ("Sale - 19") is not a sign. Same rule as
+    # `_parse_price`, which learned it the same way.
+    sign = 1
+    head = text[: match.start()]
+    if head.endswith("-") and (len(head) == 1 or head[-2].isspace()):
+        sign = -1
     try:
-        return int(digits)
+        return sign * int(match.group(0).translate(_INT_GROUPING))
     except ValueError:
         return None
 
@@ -230,6 +270,137 @@ def _apply_post_process(
     return current
 
 
+# How much of the dropped text to log. Sliced BEFORE normalising: whitespace-
+# collapsing a 10 MB `attr="html"` value first costs ~0.1s and ~200 MB of peak
+# RSS, twice per page on the presets that anchor two fields on the document.
+_DROPPED_SAMPLE_CHARS = 120
+
+
+# A leftover regex for the unparseable case only. `[^<>]` rather than `[^>]`:
+# letting the class match `<` makes an unclosed bracket scan to end-of-string and
+# backtrack once per following `<`, which is quadratic on input the page controls.
+_TAG_RE = re.compile(r"""<(?:[^<>"']|"[^"]*"|'[^']*')*>""")
+
+
+def _has_content(raw: Any) -> bool:
+    """True when the raw value carries text a pipeline could have used.
+
+    `attr="html"` is the pattern this repo mandates for row-aligned fields, and
+    the markup of an EMPTY container is a non-empty string — so testing the raw
+    string makes this vacuous exactly where it matters most.
+
+    Parsed rather than regexed, because "strip the markup" is not a regular
+    language and two attempts at it were quadratic: a `<script>` with no closing
+    tag makes any `.*?</script>` formulation scan to end-of-string and retry at
+    every following `<script`, which cost 45 s on 600 KB — and the cost was paid
+    per NULL VALUE, so an ordinary snippet-less SERP result on a page that merely
+    mentions `<script` burned 21 s and reported nothing. An unrolled-loop regex
+    measured 3x worse; the matching problem itself is quadratic when the close
+    tag is absent, so no regex fixes it. lxml is linear, already relied on in
+    this module for the same job, and correct on the cases a regex only
+    approximated — script bodies, comments, entity-only text.
+    """
+    if raw is None:
+        return False
+    text = str(raw)
+    if "<" not in text:
+        return bool(unescape(text).strip() if "&" in text else text.strip())
+    try:
+        frag = lxml_html.fragment_fromstring(text, create_parent="div")
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Unparseable fragment: answer "there is something here" from the cheap
+        # pass rather than claiming empty. Claiming empty suppresses a real
+        # warning, which is the failure direction this whole change removes.
+        return bool(unescape(_TAG_RE.sub(" ", text)).strip())
+    # Markup, not the value a pipeline was reaching for. `with_tail=False` keeps
+    # the text that follows the element.
+    etree.strip_elements(frag, "script", "style", etree.Comment, with_tail=False)
+    return bool((frag.text_content() or "").strip())
+
+
+def _warn_on_silent_nulls(
+    field_name: str,
+    ops: list[PostProcess],
+    raw_values: list[Any],
+    processed: list[Any],
+    warnings: list[str],
+    seen_warnings: set[tuple[str, str, str]],
+    *,
+    is_column: bool,
+) -> None:
+    """Report values the pipeline consumed without any op complaining.
+
+    The three existing warnings all describe the *selector*: invalid, matched
+    nothing, or matched a different number of nodes than its neighbours. Nothing
+    covers "the selector matched, the node had text, and the pipeline returned
+    None" — which is not an exotic case but the ordinary shape of markup drift: a
+    regex anchored to a label that moved, a price format that gained a currency
+    word, a separator that changed. It is also invisible to every check a caller
+    can make, because the request succeeds and the field is simply null. That
+    silence is why walmart_product shipped `price: null` on every live run until
+    someone read the values instead of the counts.
+
+    Not exempted: a field whose selector is the whole document. That was tried and
+    reverted — it silenced `youtube_video.views`/`.likes`, whose preset documents
+    them as parsed from `ytInitialData`, so a renamed payload key produced exactly
+    the walmart shape with no warning at all. The discriminator would have to be
+    "is this field expected to be empty", which is preset knowledge the engine does
+    not have. `linkedin_profile` therefore warns on every logged-out run — and that
+    warning is TRUE: its own description says to expect self-heal to carry those
+    fields, i.e. the deterministic pipeline really did produce nothing.
+
+    Only a column nulled in FULL is reported. A single missing value is ordinary
+    — a SERP result without a snippet, an out-of-stock row without a price — and
+    warning on it would fire on every optional field and train the reader to
+    ignore the warning. Every value the selector matched being consumed is the
+    unambiguous shape, and the one walmart_product shipped: it is the same
+    reasoning `_missing_required` uses when it counts an all-null column as
+    missing.
+
+    Deliberately not raised: the pipeline may be right and the page may have
+    changed, so this is a signal to go and look, not an error. Suppressed when an
+    op already warned for this field, since that warning names the actual cause.
+    """
+    if any(key[0] == field_name for key in seen_warnings):
+        return
+    if is_column and len(raw_values) < 2:
+        # A one-row page cannot tell "this result has no snippet" from "the
+        # snippet pipeline is dead", and single-result SERPs are common enough
+        # that guessing would make the warning untrustworthy. A scalar field has
+        # no such ambiguity: its null IS the observation the caller wants
+        # explained, which is exactly what walmart_product's price was.
+        return
+    # The denominator is the values that HAD something. Counting against every
+    # node instead switched the detector off whenever one slot on the page
+    # happened to be blank — common on real pages, and the walmart column would
+    # have gone unreported again.
+    dropped = [
+        raw for raw, out in zip(raw_values, processed)
+        if out is None and _has_content(raw)
+    ]
+    if not dropped:
+        return
+    had_content = [raw for raw in raw_values if _has_content(raw)]
+    if len(dropped) != len(had_content):
+        return
+    pipeline = " -> ".join(step.op for step in ops)
+    warnings.append(
+        f"field '{field_name}': post_process ({pipeline}) returned null for "
+        f"every non-empty value ({len(dropped)} of {len(raw_values)} matched)"
+    )
+    # The dropped text goes to the log, never into `warnings`. Warnings are
+    # returned to API callers and scanned by substring downstream — yozh-law-
+    # checker publishes a scan as blocked when it sees "captcha" in one — so a
+    # sample of arbitrary page content there could publish a false verdict on a
+    # page that merely mentions the word. `!r` because the sample is untrusted:
+    # it escapes newlines and control characters out of the log line.
+    log.warning(
+        "post_process nulled every value of field=%r pipeline=%r sample=%r",
+        field_name, pipeline,
+        " ".join(str(dropped[0])[: _DROPPED_SAMPLE_CHARS * 2].split())[:_DROPPED_SAMPLE_CHARS],
+    )
+
+
 def extract_fields(page_html: str, rule: ExtractRule) -> Tuple[Dict[str, Any], list[str]]:
     doc = lxml_html.fromstring(page_html)
     data: Dict[str, Any] = {}
@@ -264,6 +435,11 @@ def extract_fields(page_html: str, rule: ExtractRule) -> Tuple[Dict[str, Any], l
                 )
                 for value in raw_values
             ]
+            _warn_on_silent_nulls(
+                name, field_rule.post_process,
+                raw_values, processed, warnings, seen_warnings,
+                is_column=bool(field_rule.all),
+            )
         else:
             processed = raw_values
 

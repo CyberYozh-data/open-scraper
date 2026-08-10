@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.proxy.base import ProxyConfigError
+from src.queue.envelope import ScrapeErr, ScrapeOk
 from src.queue.scrape_runner import (
     apply_default_proxy_country,
     looks_like_proxy_failure,
@@ -114,7 +115,8 @@ async def test_run_scrape_success_envelope(monkeypatch):
         ok=True, html="<html>hi</html>", final_url="https://e.com/", status_code=200,
         screenshot_b64=None, applied_user_agent="ua", applied_locale=None,
         applied_timezone=None, applied_accept_language=None, element_status=None,
-        storage_state={"cookies": []}, error=None,
+        storage_state={"cookies": []}, error=None, applied_warmup=None,
+        applied_fingerprint=None,
     )
     runner = MagicMock()
     runner.fetch = AsyncMock(return_value=fetch_result)
@@ -132,10 +134,10 @@ async def test_run_scrape_success_envelope(monkeypatch):
         {"url": "https://e.com", "device": "desktop", "proxy_type": "none"},
         storage_state=None,
     )
-    assert out["ok"] is True
-    assert out["result"]["request_id"] == "req_t1"
-    assert out["result"]["meta"]["status_code"] == 200
-    assert out["storage_state"] == {"cookies": []}
+    assert isinstance(out, ScrapeOk)
+    assert out.result.request_id == "req_t1"
+    assert out.result.meta.status_code == 200
+    assert out.storage_state == {"cookies": []}
 
 
 async def test_run_scrape_surfaces_fetch_failure_in_meta(monkeypatch):
@@ -151,7 +153,8 @@ async def test_run_scrape_surfaces_fetch_failure_in_meta(monkeypatch):
         status_code=200, screenshot_b64=None, applied_user_agent=None,
         applied_locale=None, applied_timezone=None, applied_accept_language=None,
         element_status=None, storage_state=None,
-        error="content extraction failed",
+        error="content extraction failed", applied_warmup=None,
+        applied_fingerprint=None,
     )
     runner = MagicMock()
     runner.fetch = AsyncMock(return_value=fetch_result)
@@ -169,8 +172,8 @@ async def test_run_scrape_surfaces_fetch_failure_in_meta(monkeypatch):
         {"url": "https://e.com", "device": "desktop", "proxy_type": "none"},
         storage_state=None,
     )
-    assert out["ok"] is True  # envelope still carries a structured result
-    assert out["result"]["meta"]["fetch_ok"] is False
+    assert isinstance(out, ScrapeOk)  # envelope still carries a structured result
+    assert out.result.meta.fetch_ok is False
 
 
 async def test_run_scrape_classifies_proxy_config_error(monkeypatch, caplog):
@@ -187,8 +190,8 @@ async def test_run_scrape_classifies_proxy_config_error(monkeypatch, caplog):
             {"url": "https://e.com", "device": "desktop", "proxy_type": "prem_res_rotating"},
             storage_state=None,
         )
-    assert out["ok"] is False
-    assert out["error"].startswith("ProxyConfigError:") and "Dagestan" in out["error"]
+    assert isinstance(out, ScrapeErr)
+    assert out.error.startswith("ProxyConfigError:") and "Dagestan" in out.error
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
@@ -200,7 +203,8 @@ async def test_run_scrape_rotates_proxy_on_captcha(monkeypatch):
         base = dict(
             status_code=200, screenshot_b64=None, applied_user_agent=None,
             applied_locale=None, applied_timezone=None, applied_accept_language=None,
-            element_status=None, storage_state=None,
+            element_status=None, storage_state=None, applied_warmup=None,
+            applied_fingerprint=None,
         )
         base.update(kw)
         return MagicMock(**base)
@@ -229,14 +233,15 @@ async def test_run_scrape_rotates_proxy_on_captcha(monkeypatch):
     )
     assert runner.fetch.await_count == 2       # retried after the block
     session.on_failure.assert_awaited()        # rotated to a fresh proxy
-    assert out["result"]["meta"]["fetch_ok"] is True  # second attempt succeeded
+    assert out.result.meta.fetch_ok is True  # second attempt succeeded
 
 
 def _fr(**kw):
     base = dict(
         status_code=200, screenshot_b64=None, applied_user_agent=None,
         applied_locale=None, applied_timezone=None, applied_accept_language=None,
-        element_status=None, storage_state=None,
+        element_status=None, storage_state=None, applied_warmup=None,
+        applied_fingerprint=None,
     )
     base.update(kw)
     return MagicMock(**base)
@@ -272,7 +277,7 @@ async def test_run_scrape_rotates_proxy_on_ban_status(monkeypatch):
     )
     assert runner.fetch.await_count == 2          # rotated past the 403
     session.on_failure.assert_awaited()
-    assert out["result"]["meta"]["fetch_ok"] is True
+    assert out.result.meta.fetch_ok is True
 
 
 async def test_run_scrape_rotates_on_transient_status_not_flagged_blocked(monkeypatch):
@@ -302,7 +307,7 @@ async def test_run_scrape_rotates_on_transient_status_not_flagged_blocked(monkey
     )
     assert runner.fetch.await_count == 2          # rotated despite blocked=False
     session.on_failure.assert_awaited()
-    assert out["result"]["meta"]["fetch_ok"] is True
+    assert out.result.meta.fetch_ok is True
 
 
 async def test_run_scrape_captcha_rotation_is_bounded(monkeypatch):
@@ -315,6 +320,7 @@ async def test_run_scrape_captcha_rotation_is_bounded(monkeypatch):
             error="Captcha/block detected by heuristic", screenshot_b64=None,
             applied_user_agent=None, applied_locale=None, applied_timezone=None,
             applied_accept_language=None, element_status=None, storage_state=None,
+            applied_warmup=None, applied_fingerprint=None,
         )
     runner = MagicMock()
     runner.fetch = AsyncMock(side_effect=[_blocked(), _blocked(), _blocked()])
@@ -334,8 +340,8 @@ async def test_run_scrape_captcha_rotation_is_bounded(monkeypatch):
         storage_state=None,
     )
     assert runner.fetch.await_count == 2  # capped at max_attempts, not unbounded
-    assert out["result"]["meta"]["fetch_ok"] is False
-    assert out["result"]["meta"]["retries"] == 2
+    assert out.result.meta.fetch_ok is False
+    assert out.result.meta.retries == 2
 
 
 _DEADLINE_ERROR = (
@@ -351,6 +357,7 @@ def _deadline_result():
         error=_DEADLINE_ERROR, screenshot_b64=None, applied_user_agent=None,
         applied_locale=None, applied_timezone=None, applied_accept_language=None,
         element_status=None, storage_state=None, applied_warmup=None,
+        applied_fingerprint=None,
     )
 
 
@@ -391,8 +398,8 @@ async def test_run_scrape_grants_exactly_one_rotation_on_a_navigation_deadline(m
 
     assert runner.fetch.await_count == 2
     assert session.on_failure.await_count == 1
-    assert out["result"]["meta"]["retries"] == 1
-    assert out["result"]["meta"]["fetch_ok"] is False
+    assert out.result.meta.retries == 1
+    assert out.result.meta.fetch_ok is False
 
 
 async def test_run_scrape_logs_the_exit_when_it_gives_up_on_a_deadline(monkeypatch, caplog):
@@ -446,7 +453,10 @@ async def test_run_scrape_still_rotates_fully_on_a_selector_deadline(monkeypatch
     )
 
     assert runner.fetch.await_count == 3
-    assert session.on_failure.await_count == 3
+    # Rotations happen *between* attempts, so three attempts need two of them.
+    # This used to read 3: the loop asked for a fresh exit after the last attempt
+    # too, spending a premium proxy no attempt could ever use.
+    assert session.on_failure.await_count == 2
 
 
 async def test_run_scrape_error_envelope(monkeypatch):
@@ -456,7 +466,7 @@ async def test_run_scrape_error_envelope(monkeypatch):
     )
     out = await run_scrape(MagicMock(), "req_t2",
                            {"url": "https://e.com", "proxy_type": "res_static"}, None)
-    assert out["ok"] is False and "no_more_proxies" in out["error"]
+    assert isinstance(out, ScrapeErr) and "no_more_proxies" in out.error
 
 
 async def test_run_scrape_echoes_prem_targeting_and_warmup(monkeypatch):
@@ -469,6 +479,7 @@ async def test_run_scrape_echoes_prem_targeting_and_warmup(monkeypatch):
         screenshot_b64=None, applied_user_agent="ua", applied_locale=None,
         applied_timezone=None, applied_accept_language=None, element_status=None,
         storage_state=None, error=None, applied_warmup=applied_warmup,
+        applied_fingerprint=None,
     )
     runner = MagicMock()
     runner.fetch = AsyncMock(return_value=fetch_result)
@@ -488,6 +499,155 @@ async def test_run_scrape_echoes_prem_targeting_and_warmup(monkeypatch):
          "warmup": {"type": "homepage", "dwell_ms": 1500}},
         storage_state=None,
     )
-    meta = out["result"]["meta"]
-    assert meta["applied_prem_targeting"] == "c-us-filter-iqs"
-    assert meta["applied_warmup"] == applied_warmup
+    meta = out.result.meta
+    assert meta.applied_prem_targeting == "c-us-filter-iqs"
+    # ScrapeMeta parses it into AppliedWarmup; compare on the dumped shape
+    # so the assertion pins the values rather than the container type.
+    assert meta.applied_warmup is not None
+    assert meta.applied_warmup.model_dump() == applied_warmup
+
+
+async def test_proxy_config_error_yields_a_traceback_free_envelope(monkeypatch):
+    """User input, not a crash — so no traceback rides along."""
+    runner = MagicMock()
+    monkeypatch.setattr(
+        "src.queue.scrape_runner.proxy_resolver.open_session",
+        AsyncMock(side_effect=ProxyConfigError("bad country")),
+    )
+    out = await run_scrape(runner, "req_cfg2", {"url": "https://e.com", "device": "desktop"}, None)
+    assert isinstance(out, ScrapeErr)
+    assert out.traceback is None
+    assert "ProxyConfigError" in out.error
+
+
+async def test_unexpected_failure_carries_a_traceback(monkeypatch):
+    """The discriminator between a user error and a bug: only the bug gets the
+    stack, and the message never comes back empty."""
+    runner = MagicMock()
+    monkeypatch.setattr(
+        "src.queue.scrape_runner.proxy_resolver.open_session",
+        AsyncMock(side_effect=RuntimeError()),
+    )
+    out = await run_scrape(runner, "req_boom", {"url": "https://e.com", "device": "desktop"}, None)
+    assert isinstance(out, ScrapeErr)
+    assert out.traceback and "RuntimeError" in out.traceback
+    assert out.error == "RuntimeError"
+
+
+async def test_unvalidatable_metadata_degrades_the_field_not_the_page(
+    monkeypatch, caplog
+):
+    """The invariant: a page is never discarded over a diagnostic echo.
+
+    `applied_warmup` arrives as a plain dict; an incomplete one used to make
+    ScrapeMeta reject a page that had fetched fine, destroying its html. Now
+    the field degrades to None with a warning and the page survives. Moving
+    validation from read to write must not cost data the caller came for.
+    """
+    fetch_result = MagicMock(
+        ok=True, blocked=False, html="<html>hi</html>", final_url="https://e.com/",
+        status_code=200, screenshot_b64=None, applied_user_agent=None,
+        applied_locale=None, applied_timezone=None, applied_accept_language=None,
+        element_status=None, storage_state=None, error=None,
+        applied_warmup={"type": "homepage"},  # missing url/dwell_ms
+        applied_fingerprint=None,
+    )
+    runner = MagicMock()
+    runner.fetch = AsyncMock(return_value=fetch_result)
+    session = MagicMock()
+    session.max_attempts.return_value = 1
+    session.current_proxy.return_value = None
+    session.acquire = AsyncMock(return_value=None)
+    session.on_success = AsyncMock()
+    session.on_failure = AsyncMock()
+    session.close = AsyncMock()
+    monkeypatch.setattr(
+        "src.queue.scrape_runner.proxy_resolver.open_session",
+        AsyncMock(return_value=session),
+    )
+
+    with caplog.at_level("WARNING"):
+        out = await run_scrape(
+            runner, "req_badmeta",
+            {"url": "https://e.com", "device": "desktop", "proxy_type": "none",
+             "raw_html": True},
+            storage_state=None,
+        )
+
+    assert isinstance(out, ScrapeOk)
+    # The page is intact — this is the whole point, so assert on the page and not
+    # on `request_id`, which is truthy whatever happened.
+    assert out.result.raw_html == "<html>hi</html>"
+    assert out.result.meta.status_code == 200
+    assert out.result.meta.applied_warmup is None
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "field_degraded" in logged and "applied_warmup" in logged
+
+
+async def test_a_guarded_field_survives_when_it_is_valid(monkeypatch):
+    """The guards' accept path is on every successful scrape and had no test.
+
+    Only the `tasks` copy of DEVICES/PROXY_TYPES was pinned, so swapping the
+    `scrape_runner` pair left the suite green while reporting `desktop`/`none`
+    for every mobile or proxied request — a silent lie in `meta`, with nothing
+    but a server-side WARNING to show for it.
+    """
+    runner = MagicMock()
+    runner.fetch = AsyncMock(return_value=_fr(
+        ok=True, blocked=False, html="<html>ok</html>", final_url="https://e.com/",
+        error=None,
+    ))
+    session = MagicMock()
+    session.max_attempts.return_value = 1
+    session.current_proxy.return_value = None
+    monkeypatch.setattr(
+        "src.queue.scrape_runner.proxy_resolver.open_session",
+        AsyncMock(return_value=session),
+    )
+
+    out = await run_scrape(
+        runner, "req_guarded",
+        {"url": "https://e.com", "device": "mobile", "proxy_type": "prem_res_rotating",
+         "proxy_pool_id": "pool-7"},
+        storage_state=None,
+    )
+
+    assert isinstance(out, ScrapeOk)
+    assert out.result.meta.device == "mobile"
+    assert out.result.meta.proxy_type == "prem_res_rotating"
+    assert out.result.meta.proxy_pool_id == "pool-7"
+
+
+async def test_a_page_whose_schema_really_rejects_becomes_an_error_not_a_crash(monkeypatch):
+    """The one page-destroying path this refactor adds, driven for real.
+
+    The existing coverage monkeypatches `run_scrape` to return a `ScrapeErr`
+    someone typed by hand and then asserts on that same string — the decoration
+    pattern #78 was supposed to teach us out of. Here an unknown
+    `element_status` (a Literal produced in `runner.py`, the file mypy does not
+    check) makes pydantic reject the real response.
+    """
+    runner = MagicMock()
+    runner.fetch = AsyncMock(return_value=_fr(
+        ok=True, blocked=False, html="<html>ok</html>", final_url="https://e.com/",
+        error=None, element_status="fallback_invented_by_a_future_runner",
+    ))
+    session = MagicMock()
+    session.max_attempts.return_value = 1
+    session.current_proxy.return_value = None
+    monkeypatch.setattr(
+        "src.queue.scrape_runner.proxy_resolver.open_session",
+        AsyncMock(return_value=session),
+    )
+
+    out = await run_scrape(
+        runner, "req_badschema",
+        {"url": "https://e.com", "device": "desktop", "proxy_type": "none"},
+        storage_state=None,
+    )
+
+    assert isinstance(out, ScrapeErr)
+    assert out.error.startswith("result_schema_rejected:")
+    # Summarised, not the raw pydantic paragraph: this reaches the caller.
+    assert "errors.pydantic.dev" not in out.error
+    assert "element_screenshot_status" in out.error

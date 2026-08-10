@@ -34,3 +34,9 @@ test-e2e:
 
 test-cov:
 	pytest -m "not e2e" --cov=src --cov-report=html --cov-report=term-missing -v
+
+# Mounts THIS tree, so it checks the branch you have out rather than whatever
+# the bind-mounted checkout happens to be on. Needs mypy in the image:
+# `docker compose build web-scraper` after requirements-dev.txt changed.
+typecheck:
+	docker compose run --rm --no-deps -v "$(CURDIR)":/w -w /w web-scraper python -m mypy

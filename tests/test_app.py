@@ -33,7 +33,11 @@ class TestAppCreation:
         app = create_app()
 
         # Check, that there are routes
-        routes = [route.path for route in app.routes]
+        # Not app.routes: include_router wraps sub-routers in FastAPI's own
+        # _IncludedRouter, which exposes neither .path nor .routes, and its
+        # original_router holds unprefixed fragments. openapi() is the public
+        # accessor and yields the prefixed paths.
+        routes = list(app.openapi()["paths"])
 
         assert "/api/v1/health" in routes
         assert any("/api/v1/scrape" in route for route in routes)

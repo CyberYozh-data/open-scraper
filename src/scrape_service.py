@@ -4,7 +4,7 @@ import asyncio
 import logging
 
 from src.queue.broker import QUEUE_NAME, is_inmemory_broker
-from src.queue.store import TERMINAL_STATUSES, JobMeta, JobSnapshot, get_job_store, pack_payload
+from src.queue.store import TERMINAL_STATUSES, JobMeta, JobSnapshot, get_job_store, pack_response
 from src.queue.tasks import make_error_payload, scrape_page_task
 from src.schemas import BatchScrapeRequest, ScrapeRequest, ScrapeResponse
 from src.settings import settings
@@ -138,7 +138,7 @@ class ScrapeService:
         """Error-stub payloads for every slot still unfilled — used to converge
         a job (cancel, or enqueue-failure) without leaving null slots open."""
         return {
-            i: pack_payload(make_error_payload(p.model_dump(mode="json"), reason))
+            i: pack_response(make_error_payload(p.model_dump(mode="json"), reason))
             for i, (p, r) in enumerate(zip(snap.pages, snap.results))
             if r is None
         }

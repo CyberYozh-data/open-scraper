@@ -7,7 +7,13 @@ pytest-asyncio>=0.23
 pytest-mock>=3.11.0
 pytest-cov>=4.1.0
 faker>=19.0.0
-pylint>=3.0
+# Pinned, not floored: the CI gate is a SCORE threshold, so any pylint
+# release that adds or widens a checker moves the score and reds an
+# unrelated PR (the ruff 0.16 defaults-widening lesson, one file over).
+pylint==4.0.6
 Pillow>=10.0
 pytest-httpserver>=1.0
 fakeredis[lua]>=2.23
+# Pinned exactly: a minor bump can widen the rule set under you (ruff 0.16
+# went 59 -> 413 rules and turned a green tree red).
+mypy==1.20.2

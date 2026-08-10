@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 from lxml import etree, html as lxml_html
+from pydantic import ValidationError
 
 from src.api.presets import get_preset_store
 from src.api.session_guard import validate_session_id
@@ -202,6 +203,8 @@ def _engine_override(req: SearchRequest) -> dict[str, Any]:
         override["humanize"] = req.humanize
     if req.spoof_os is not None:
         override["spoof_os"] = req.spoof_os
+    if req.fingerprint_profile is not None:
+        override["fingerprint_profile"] = req.fingerprint_profile
     if req.block_webgl:
         override["block_webgl"] = req.block_webgl
     if req.addons:
@@ -271,10 +274,22 @@ async def _scrape_result_pages(
     }
     # The panel's proxy and engine settings apply to the result scrapes too,
     # taking precedence over any proxy/engine passed inside scrape_options.
-    scrape_reqs = [
-        ScrapeRequest(**{**opts, **proxy_override, **engine_override, "url": r.url})
-        for r in results
-    ]
+    try:
+        scrape_reqs = [
+            ScrapeRequest(**{**opts, **proxy_override, **engine_override, "url": r.url})
+            for r in results
+        ]
+    except ValidationError as exc:
+        # `scrape_options` is caller-supplied and merged with the panel's engine
+        # here, so an unsupported combination (camoufox + session_id, say) first
+        # becomes visible at this construction — AFTER the SERP has been fetched
+        # and paid for. Uncaught it is a 500 for what is a bad request, and the
+        # engine override is ours, not the caller's, so the message has to name
+        # the pair rather than blame one side.
+        raise MaterializeError(
+            f"scrape_options are not valid for browser_engine="
+            f"{engine_override.get('browser_engine')!r}: {exc.errors()[0]['msg']}"
+        ) from exc
     # Session is validated here (after the SERP) because it is checked
     # against the materialized per-result request, which only exists now.
     for scrape_req in scrape_reqs:

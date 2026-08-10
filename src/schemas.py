@@ -14,6 +14,7 @@ from src.extract.models import (  # noqa: F401  re-exported for API consumers
     FieldRule,
     PostProcess,
 )
+from src.browser.fingerprint_profile import FingerprintProfile, claimed_os
 from src.presets.models import ParserPlan, PresetMeta
 
 # pylint: enable=unused-import
@@ -248,7 +249,17 @@ class ScrapeRequest(BaseModel):
     render: bool = True
     wait_until: WaitUntil = "domcontentloaded"
     wait_for_selector: str | None = None
-    timeout_ms: int | None = None
+    timeout_ms: int | None = Field(
+        default=None,
+        description=(
+            "Navigation budget in ms (default REQUEST_TIMEOUT_MS). Applied to each "
+            "phase separately — the warmup navigation, the page load and "
+            "wait_for_selector — so a request using all three can cost three times "
+            "this. It is a ceiling, not a promise: an attempt that would not finish "
+            "inside the server's per-task deadline is shortened, and `warnings` says "
+            "so."
+        ),
+    )
 
     device: Device = "desktop"
     viewport: Viewport | None = Field(
@@ -383,6 +394,21 @@ class ScrapeRequest(BaseModel):
         default=None,
         description="Camoufox only: spoof the OS fingerprint. No-op on other engines.",
     )
+    fingerprint_profile: FingerprintProfile | None = Field(
+        default=None,
+        description=(
+            "Camoufox only: how close the fingerprint sits to the machine this "
+            "server runs on. No-op on other engines. Unset means 'auto', which "
+            "follows CAMOUFOX_FINGERPRINT_PROFILE. A profile states the OS and "
+            "the WebGL vendor pair, and nothing else. 'windows_on_host' claims "
+            "Windows on the host's GPU vendor; 'host' claims the host OS "
+            "honestly, which measured WORSE here than claiming Windows; "
+            "'random' restores Camoufox's uniform windows/macos/linux draw with "
+            "nothing pinned; 'windows'/'macos'/'linux' state the OS and leave "
+            "the GPU to Camoufox, which is exactly what `spoof_os` does. Given "
+            "together with `spoof_os` the two must claim the same OS."
+        ),
+    )
     block_webgl: bool = Field(
         default=False,
         description="Camoufox only: disable WebGL. No-op on other engines.",
@@ -417,6 +443,61 @@ class ScrapeRequest(BaseModel):
             raise ValueError(
                 f"device='mobile' is not supported with browser_engine='{self.browser_engine}' "
                 "(Playwright Firefox has no mobile emulation); use chromium or webkit."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_camoufox_unsupported(self) -> "ScrapeRequest":
+        """Refuse what the Camoufox runner would accept and silently drop.
+
+        `cookies`, `storage_state` (via `session_id`) and `render` are documented
+        as accepted-and-ignored there. Silently ignored is worse than
+        unsupported: the request returns 200 with real HTML and nothing tells the
+        caller their session never reached the browser, so a pinned scrape comes
+        back logged OUT and reads as the site having changed. Same precedent as
+        device='mobile' above — reject until the runner can honour it.
+        """
+        if self.browser_engine != "camoufox":
+            return self
+        unsupported = [
+            name for name, used in (
+                ("session_id", self.session_id is not None),
+                ("cookies", bool(self.cookies)),
+                ("render=false", self.render is False),
+            ) if used
+        ]
+        if unsupported:
+            raise ValueError(
+                f"{', '.join(unsupported)} not supported with "
+                "browser_engine='camoufox' (the Camoufox runner accepts and "
+                "ignores them, which would silently return content you did not "
+                "ask for); use chromium, or drop the option."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_fingerprint_profile_conflict(self) -> "ScrapeRequest":
+        """Two channels naming DIFFERENT operating systems must not both be set.
+
+        Compared by the OS each one claims, not by the literal strings: a first
+        draft compared the strings and so rejected `spoof_os='windows'` beside
+        `fingerprint_profile='windows_on_host'`, which name the same OS and
+        differ only in what else they pin. That turned every `spoof_os` call on
+        the two Camoufox presets — which state a profile — into a 400.
+
+        A profile that claims no OS (`random`, and `auto` before the server
+        default is applied) is not a disagreement: `fingerprint_profile` still
+        wins at launch, and `meta.applied_fingerprint` reports what ran, so
+        nothing is dropped without the caller being able to see it.
+        """
+        if self.spoof_os is None or self.fingerprint_profile is None:
+            return self
+        profile_os = claimed_os(self.fingerprint_profile)
+        if profile_os is not None and profile_os != self.spoof_os:
+            raise ValueError(
+                f"spoof_os={self.spoof_os!r} conflicts with "
+                f"fingerprint_profile={self.fingerprint_profile!r}, which claims "
+                f"{profile_os!r}; set one of them, or name the same OS in both."
             )
         return self
 
@@ -456,6 +537,16 @@ class ScrapeMeta(BaseModel):
     applied_locale: str | None = None
     applied_timezone: str | None = None
     applied_accept_language: str | None = None
+    applied_fingerprint: Dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Camoufox only: the fingerprint profile that ran and what it "
+            "pinned — keys `profile`, `os`, `webgl_vendor`, `webgl_renderer`. "
+            "A profile that degraded — an unknown name, or a GPU vendor "
+            "Camoufox's table has no row for — reports what it fell back to. "
+            "Null on other engines and on responses that predate profiles."
+        ),
+    )
     applied_preset: PresetMeta | None = None
     applied_prem_targeting: str | None = Field(
         default=None,
@@ -463,7 +554,9 @@ class ScrapeMeta(BaseModel):
             "For proxy_type='prem_res_rotating': the resolved CyberYozh v2 username "
             "targeting suffix (country/region/city/zip/isp/session/ttl/filter tokens, "
             "e.g. 'c-us-filter-iqs-s-ab12cd34'). The account login is stripped, so no "
-            "credentials are exposed. Null for other proxy types."
+            "credentials are exposed. Null for other proxy types. On a request that "
+            "rotated and failed, this names the LAST exit tried, which is not "
+            "necessarily the one that fetched the page being reported."
         ),
     )
     applied_warmup: AppliedWarmup | None = Field(
@@ -628,6 +721,21 @@ class SearchRequest(BaseModel):
     spoof_os: SpoofOS | None = Field(
         default=None,
         description="Camoufox only: spoof the OS fingerprint. No-op on other engines.",
+    )
+    fingerprint_profile: FingerprintProfile | None = Field(
+        default=None,
+        description=(
+            "Camoufox only: how close the fingerprint sits to the machine this "
+            "server runs on. No-op on other engines. Unset means 'auto', which "
+            "follows CAMOUFOX_FINGERPRINT_PROFILE. A profile states the OS and "
+            "the WebGL vendor pair, and nothing else. 'windows_on_host' claims "
+            "Windows on the host's GPU vendor; 'host' claims the host OS "
+            "honestly, which measured WORSE here than claiming Windows; "
+            "'random' restores Camoufox's uniform windows/macos/linux draw with "
+            "nothing pinned; 'windows'/'macos'/'linux' state the OS and leave "
+            "the GPU to Camoufox, which is exactly what `spoof_os` does. Given "
+            "together with `spoof_os` the two must claim the same OS."
+        ),
     )
     block_webgl: bool = Field(
         default=False,

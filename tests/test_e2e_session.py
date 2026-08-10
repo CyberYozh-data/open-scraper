@@ -103,6 +103,13 @@ async def _setup_inmemory_broker_state() -> None:
     broker.state.last_activity = {"chromium": asyncio.get_running_loop().time()}
 
 
+# Marked e2e because it IS one: two live uvicorn servers on ephemeral ports and
+# a real Chromium driven through the login DSL, with a 60s startup deadline.
+# The skipif below never fires in CI — playwright is a hard dependency, so the
+# import always succeeds — which is how this stayed in the fast gate.
+pytestmark = pytest.mark.e2e
+
+
 @pytest.mark.skipif(
     not _playwright_available(),
     reason="Playwright not installed locally",

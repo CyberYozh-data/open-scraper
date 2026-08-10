@@ -25,6 +25,7 @@ from src.browser.page_io import read_content_settling_navigation
 from src.proxy.models import ProxyConfig
 from src.proxy.socks_bridge import open_socks_to_http_bridge
 from src.browser.geo_profile import resolve_profile
+from src.schemas import ElementScreenshotStatus
 from src.settings import settings
 
 
@@ -436,7 +437,7 @@ async def _capture_screenshot(
     screenshot: bool,
     element_selector: str | None,
     effective_block_assets: bool,
-) -> tuple[bytes | None, str]:
+) -> tuple[bytes | None, ElementScreenshotStatus]:
     """Return (png_bytes, status) for the requested screenshot mode.
 
     Never raises — every documented failure resolves into a returned status.
@@ -456,7 +457,7 @@ async def _capture_screenshot(
 
     # Element branch.
     _elem_start = time.monotonic_ns()
-    fallback_status: str
+    fallback_status: ElementScreenshotStatus
     try:
         element_locator = page.locator(element_selector)
         count = await element_locator.count()
@@ -536,8 +537,11 @@ class FetchResult:
     # What the pre-navigation warmup actually did ({type, url, dwell_ms}), or
     # None if no warmup ran. Distinct from the requested warmup config.
     applied_warmup: dict | None = None
+    # ResolvedFingerprint.as_meta() for this fetch; None on the Playwright path,
+    # which has no profiles.
+    applied_fingerprint: dict | None = None
     storage_state: dict | None = None
-    element_status: str | None = None
+    element_status: ElementScreenshotStatus | None = None
     # True when the page looked like a captcha / anti-bot block. Distinct from a
     # network/proxy error: the request succeeded but the IP is burned, so the
     # queue layer should rotate the proxy and retry.
@@ -787,6 +791,7 @@ class PlaywrightRunner:
         # scrape_runner.py is identical for both runners; ignored by Chromium/Firefox/WebKit.
         humanize: bool = False,
         spoof_os: str | None = None,
+        fingerprint_profile: str | None = None,
         block_webgl: bool = False,
         addons: list[str] | None = None,
         warmup: dict | None = None,

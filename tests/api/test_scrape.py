@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock
 
 from src.app import create_app
-from src.queue.store import get_job_store, pack_payload
+from src.queue.store import get_job_store, pack_response
 from src.queue.tasks import make_error_payload
 from src.schemas import ScrapeRequest, ScrapeResponse, ScrapeMeta
 
@@ -42,7 +42,7 @@ def _make_result_payload(url: str = "https://example.com", request_id: str = "re
             retries=0,
         ),
     )
-    return pack_payload(resp.model_dump(mode="json"))
+    return pack_response(resp)
 
 
 class TestScrapePageEndpoint:
@@ -277,7 +277,7 @@ class TestScrapeStatusEndpoint:
         # Write an error slot — the job will be done with a warning, not "failed" status
         store = get_job_store()
         page = {"url": "https://example.com"}
-        _run(store.write_slot(job_id, 0, pack_payload(make_error_payload(page, "Worker error"))))
+        _run(store.write_slot(job_id, 0, pack_response(make_error_payload(page, "Worker error"))))
 
         response = client.get(f"/api/v1/scrape/{job_id}")
 

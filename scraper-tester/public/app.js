@@ -960,8 +960,8 @@ function addExtractField(containerId = 'extract-fields') {
 
 // ─── Camoufox premium fields collector ───────────────────────────────────────
 // Returns flat camoufox fields for top-level spread into the request payload
-// (humanize, block_webgl, and optionally spoof_os/addons), or {} for non-camoufox.
-// Prefix must match the tab's element-id prefix (s, b, se).
+// (humanize, block_webgl, and optionally fingerprint_profile/addons), or {} for
+// non-camoufox. Prefix must match the tab's element-id prefix (s, b, se, pw).
 function collectCamoufoxOpts(prefix) {
   const $ = (id) => document.getElementById(id);
   const engine = $(`${prefix}-browser-engine`)?.value;
@@ -970,8 +970,11 @@ function collectCamoufoxOpts(prefix) {
     humanize: !!$(`${prefix}-cf-humanize`)?.checked,
     block_webgl: !!$(`${prefix}-cf-block-webgl`)?.checked,
   };
-  const spoofOs = $(`${prefix}-cf-spoof-os`)?.value;
-  if (spoofOs) opts.spoof_os = spoofOs;
+  // '' = Auto -> omit the field so the server's CAMOUFOX_FINGERPRINT_PROFILE
+  // applies. Sending 'auto' explicitly would mean the same thing, but omitting
+  // it keeps the payload readable and matches how the headless select works.
+  const fingerprint = $(`${prefix}-cf-fingerprint`)?.value;
+  if (fingerprint) opts.fingerprint_profile = fingerprint;
   const addonsRaw = $(`${prefix}-cf-addons`)?.value.trim();
   if (addonsRaw) {
     const addons = addonsRaw.split(',').map(s => s.trim()).filter(Boolean);
@@ -1160,6 +1163,10 @@ function initEngineControls(prefix) {
 initEngineControls('s');
 initEngineControls('b');
 initEngineControls('se');
+// The Preset Builder had no engine selector at all, so every preset the wizard
+// produced was Chromium — the two engines that need an anti-detect browser
+// could only be written by editing the JSON by hand.
+initEngineControls('pw');
 
 // ─── Search ───────────────────────────────────────────────────────────────────
 (() => {
@@ -1416,7 +1423,7 @@ document.getElementById('btnCopyFromSingle').addEventListener('click', () => {
     ['s-browser-engine', 'b-browser-engine'],
     ['s-cf-humanize', 'b-cf-humanize'],
     ['s-cf-block-webgl', 'b-cf-block-webgl'],
-    ['s-cf-spoof-os', 'b-cf-spoof-os'],
+    ['s-cf-fingerprint', 'b-cf-fingerprint'],
     ['s-cf-addons', 'b-cf-addons'],
   ];
   for (const [from, to] of pairs) {
@@ -3577,6 +3584,11 @@ document.getElementById('pw-fetch').addEventListener('click', async () => {
     block_assets: document.getElementById('pw-block-assets').checked,
     wait_until: document.getElementById('pw-wait-until').value,
     timeout_ms: Number(document.getElementById('pw-timeout').value) || 30000,
+    browser_engine: document.getElementById('pw-browser-engine')?.value || 'chromium',
+    // Camoufox fields (empty for other engines), so the sample fetch and the
+    // saved preset both run on the engine the builder was pointed at —
+    // scrapeDefaults is used for each.
+    ...collectCamoufoxOpts('pw'),
   };
   const waitSel = document.getElementById('pw-wait-selector').value.trim();
   if (waitSel) pwState.scrapeDefaults.wait_for_selector = waitSel;

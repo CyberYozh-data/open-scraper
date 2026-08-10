@@ -14,3 +14,39 @@ requires-python = ">=3.10,<3.14"
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
+
+
+[tool.mypy]
+python_version = "3.10"
+# Scoped to the envelope's surface and everything that writes or reads it.
+# These paths are green today; widening is a per-package follow-up rather than
+# a blanket `ignore_errors` that would blind the files while they are edited.
+files = [
+    "src/schemas.py",
+    "src/queue",
+    "src/scrape_service.py",
+    # Clean today, and it is where element_status is set — checking it turns
+    # that annotation from documentation into a guarantee. runner.py stays
+    # out: it carries ~17 pre-existing playwright-stub errors.
+    "src/browser/camoufox_runner.py",
+]
+plugins = ["pydantic.mypy"]
+check_untyped_defs = true
+strict_equality = true
+extra_checks = true
+warn_redundant_casts = true
+# Assumes `types-redis` is NOT installed: redis>=5 ships its own py.typed and
+# PyPI tells you to uninstall the stub at that version. With it present the
+# four `# type: ignore` comments in src/queue/store.py become unused and this
+# flag turns the tree red — a trap worth naming before CI lands.
+warn_unused_ignores = true
+no_implicit_reexport = true
+warn_unused_configs = true
+
+[tool.pydantic-mypy]
+# The plugin defaults to init_typed = false, which REPLACES pydantic's own
+# typed __init__ with an untyped one — i.e. enabling the plugin without this
+# silently stops model constructor calls from being checked at all. That is the
+# opposite of why it is here: ScrapeMeta(statuscode=...) must be an error.
+init_typed = true
+init_forbid_extra = true

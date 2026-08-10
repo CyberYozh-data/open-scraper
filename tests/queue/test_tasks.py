@@ -10,9 +10,10 @@ import pytest_asyncio
 import src.queue.store as store_mod
 from src.proxy.base import ProxyConfigError
 from src.queue import tasks
+from src.queue.envelope import ScrapeErr, ScrapeOk
 from src.queue.broker import broker
-from src.queue.store import RedisJobStore, pack_payload, unpack_payload
-from src.schemas import ScrapeRequest, ScrapeResponse
+from src.queue.store import RedisJobStore, pack_response, unpack_payload
+from src.schemas import ScrapeMeta, ScrapeRequest, ScrapeResponse
 
 pytestmark = pytest.mark.asyncio
 
@@ -40,12 +41,12 @@ async def store(monkeypatch):
 
 
 def _ok_envelope(req_id="req_x"):
-    return {"ok": True, "storage_state": None, "result": {
-        "request_id": req_id, "took_ms": 1,
-        "meta": {"url": "https://e.com", "device": "desktop", "proxy_type": "none",
-                 "status_code": 200, "retries": 0},
-        "warnings": [],
-    }}
+    return ScrapeOk(result=ScrapeResponse(
+        request_id=req_id, took_ms=1,
+        meta=ScrapeMeta(url="https://e.com", device="desktop", proxy_type="none",
+                        status_code=200, retries=0),
+        warnings=[],
+    ))
 
 
 @pytest.fixture
@@ -107,7 +108,7 @@ async def test_login_config_error_classified_without_traceback(monkeypatch):
 
 async def test_task_noops_on_cancelled_job(store, scrape_ok):
     job_id = await store.create([ScrapeRequest(url="https://e.com")])
-    await store.request_cancel(job_id, stub_payloads={0: pack_payload(
+    await store.request_cancel(job_id, stub_payloads={0: pack_response(
         tasks.make_error_payload({"url": "https://e.com"}, "cancelled"))})
     await tasks.scrape_page_task(job_id, 0)
     scrape_ok.assert_not_awaited()
@@ -116,7 +117,7 @@ async def test_task_noops_on_cancelled_job(store, scrape_ok):
 async def test_redelivery_fast_forwards_chain(store, scrape_ok, monkeypatch):
     pages = [ScrapeRequest(url="https://e.com/1"), ScrapeRequest(url="https://e.com/2")]
     job_id = await store.create(pages, chain_next={0: 1})
-    await store.write_slot(job_id, 0, pack_payload(_ok_envelope()["result"]))  # slot pre-filled
+    await store.write_slot(job_id, 0, pack_response(_ok_envelope().result))  # slot pre-filled
     mark_running = AsyncMock()
     monkeypatch.setattr(store, "mark_running", mark_running)
     kiq = AsyncMock()
@@ -355,16 +356,20 @@ async def test_scrape_with_session_injects_pinned_viewport(monkeypatch):
 
     captured = {}
 
-    async def fake_run_scrape(runner, request_id, page, storage_state):
+    async def fake_run_scrape(runner, request_id, page, storage_state, *, deadline=None):
         captured["page"] = page
-        return {"ok": False}
+        captured["deadline"] = deadline
+        return ScrapeErr(error="boom")
 
     monkeypatch.setattr(tasks.scrape_runner, "run_scrape", fake_run_scrape)
 
     page = {"session_id": "s1", "url": "https://x", "viewport": {"width": 9999, "height": 9999}}
-    await tasks._scrape_with_session(MagicMock(), "req1", page)
+    await tasks._scrape_with_session(MagicMock(), "req1", page, deadline=1234.5)
 
     assert captured["page"]["viewport"] == {"width": 1366, "height": 768}
+    # Relayed untouched: the session lock can hold for a minute, and that minute
+    # is spent out of the same ceiling the scrape loop has to fit inside.
+    assert captured["deadline"] == 1234.5
 
 
 async def _session_store(monkeypatch, storage_state=None):
@@ -398,11 +403,14 @@ def _envelope(*, fetch_ok: bool, status_code: int = 200):
     how the blocked-page guard below came to be a no-op — `envelope.get("meta")`
     is always None, so `fetch_ok` defaulted to True on every request.
     """
-    return {
-        "ok": True,
-        "storage_state": {"cookies": [{"name": "challenge", "value": "x"}]},
-        "result": {"meta": {"status_code": status_code, "fetch_ok": fetch_ok}},
-    }
+    return ScrapeOk(
+        storage_state={"cookies": [{"name": "challenge", "value": "x"}]},
+        result=ScrapeResponse(
+            request_id="req_s", took_ms=1,
+            meta=ScrapeMeta(url="https://x", device="desktop", proxy_type="none",
+                            status_code=status_code, fetch_ok=fetch_ok),
+        ),
+    )
 
 
 async def test_session_storage_state_is_persisted_on_a_good_fetch(monkeypatch):
@@ -432,3 +440,132 @@ async def test_blocked_fetch_does_not_persist_storage_state(monkeypatch):
     await tasks._scrape_with_session(MagicMock(), "req1", {"session_id": "s1", "url": "https://x"})
 
     store.update_storage_state.assert_not_awaited()
+
+
+async def test_non_2xx_fetch_does_not_persist_storage_state(monkeypatch):
+    """The other half of the guard: `fetch_ok` alone is not consent.
+
+    A 403 or 503 carries a body and can still report fetch_ok, so the status
+    has to gate the write too — this is the branch the no-op guard disabled.
+    """
+    store = await _session_store(monkeypatch)
+    monkeypatch.setattr(
+        tasks.scrape_runner, "run_scrape",
+        AsyncMock(return_value=_envelope(fetch_ok=True, status_code=403)),
+    )
+
+    await tasks._scrape_with_session(MagicMock(), "req1", {"session_id": "s1", "url": "https://x"})
+
+    store.update_storage_state.assert_not_awaited()
+
+
+def test_pack_response_round_trips_through_the_slot():
+    """pack_response is the single serialization point for a result slot, so
+    what it writes must come back as the same model the API validates."""
+    resp = ScrapeResponse(
+        request_id="req_rt", took_ms=7,
+        meta=ScrapeMeta(url="https://e.com", device="desktop", proxy_type="none",
+                        status_code=200, retries=0),
+        warnings=["w"],
+    )
+    restored = ScrapeResponse.model_validate(unpack_payload(pack_response(resp)))
+    assert restored.request_id == "req_rt"
+    assert restored.meta.status_code == 200
+    assert restored.warnings == ["w"]
+
+
+async def test_schema_rejection_becomes_a_page_error_not_a_hung_job(monkeypatch, store):
+    """The headline behaviour change: validation moved from read to write.
+
+    A completed page whose metadata will not validate is now discarded inside
+    the worker. That must still converge the job — a slot gets written and the
+    status leaves `running` — rather than raising past the one-delivery-one-
+    slot guard and hanging it forever.
+    """
+    job_id = await store.create([ScrapeRequest(url="https://e.com")])
+    monkeypatch.setattr(
+        tasks.scrape_runner, "run_scrape",
+        AsyncMock(return_value=ScrapeErr(error="result_schema_rejected: boom")),
+    )
+    monkeypatch.setattr(tasks, "_get_runner", AsyncMock(return_value=MagicMock()))
+
+    await tasks.scrape_page_task(job_id, 0)
+
+    snap = await store.get_full(job_id)
+    assert snap.results[0] is not None
+    assert "result_schema_rejected" in (snap.results[0].error or "")
+    # The point of the guard: the job converges instead of sitting in `running`.
+    assert snap.status != "running"
+
+
+def test_allowed_value_sets_track_the_schema():
+    """Hand-copied mirrors drift silently: a new proxy type would make every
+    error slot report `none`. Derive them instead."""
+    from typing import get_args
+
+    from src.schemas import Device, ScrapeProxyType
+
+    assert tasks.DEVICES == frozenset(get_args(Device))
+    assert tasks.PROXY_TYPES == frozenset(get_args(ScrapeProxyType))
+    # Non-emptiness matters on its own: if the Literals ever become an enum,
+    # get_args returns () and both sides agree on nothing while every error
+    # slot silently reports the fallback.
+    assert "desktop" in tasks.DEVICES
+    assert "prem_res_rotating" in tasks.PROXY_TYPES
+
+
+def test_make_error_payload_survives_an_unhashable_field():
+    """`value in frozenset` raises TypeError on a list/dict, which is the same
+    hang as an unknown Literal — just through a different door. The forward
+    rolling-deploy shape (a newer API restructures a field, an older worker
+    drains the queue) is exactly what produces one."""
+    payload = tasks.make_error_payload(
+        {"url": "https://e.com", "device": ["desktop"], "proxy_type": {"k": "v"}},
+        "worker failed",
+    )
+    assert payload.meta.device == "desktop"
+    assert payload.meta.proxy_type == "none"
+
+
+def test_make_error_payload_keeps_valid_values():
+    """The fallbacks must not swallow good input — a swapped allowed-set would
+    otherwise ship green, reporting `none` for every proxied page."""
+    payload = tasks.make_error_payload(
+        {"url": "https://e.com", "device": "mobile",
+         "proxy_type": "prem_res_rotating", "proxy_pool_id": "pool-7"},
+        "worker failed",
+    )
+    assert payload.meta.device == "mobile"
+    assert payload.meta.proxy_type == "prem_res_rotating"
+    assert payload.meta.proxy_pool_id == "pool-7"
+
+
+def test_make_error_payload_stays_total_on_a_non_string_pool_id():
+    """proxy_pool_id is `str | None` and pydantic will not coerce an int, so it
+    was the last field that could raise past the one-slot-write guard."""
+    payload = tasks.make_error_payload(
+        {"url": "https://e.com", "proxy_pool_id": 12345}, "worker failed"
+    )
+    assert payload.meta.proxy_pool_id is None
+
+
+def test_make_error_payload_stays_total_on_an_unknown_literal():
+    """It is called on the line that implements one-delivery-one-slot, outside
+    every try — a raise there leaves the job `running` with an empty slot."""
+    payload = tasks.make_error_payload(
+        {"url": "https://e.com", "device": "tablet", "proxy_type": "carrier"},
+        "worker failed",
+    )
+    assert payload.meta.device == "desktop"
+    assert payload.meta.proxy_type == "none"
+    assert payload.error == "worker failed"
+
+
+async def test_an_empty_error_still_names_a_failure():
+    """`ScrapeErr("")` would otherwise write a slot with `error=""` and
+    `warnings=[""]` — the read side's "worker_failed" default was removed by
+    design, so nothing downstream restores it. Substituting rather than raising:
+    a cosmetic slip must not become the lost page this envelope exists to stop.
+    """
+    assert ScrapeErr(error="").error == "worker_failed"
+    assert ScrapeErr(error="real reason").error == "real reason"
