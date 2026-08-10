@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A force-push to a PR should not leave the superseded run burning paid
+# minutes — this is a private repo.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v7
+        with:
+          # 3.10.12 is what the deployed playwright image runs, so this is the
+          # interpreter that matters — not just the requires-python floor.
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      # The tree scores 9.9664 over 15 messages, none of them errors. Be exact
+      # about what this buys: pylint's score is messages/statements, so at
+      # ~4460 statements the threshold absorbs up to TWO new warning/refactor/
+      # convention messages before it trips, and grows more tolerant as the
+      # codebase does. An ERROR fails immediately (weight 5), which is the
+      # guarantee worth relying on. Fixing the 15 and gating at 10 is the real
+      # answer; until then raise the floor as they go.
+      - run: python -m pylint --fail-under=9.96 src/
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      # Eight non-e2e tests launch a real browser, and all three engines are
+      # exercised. `pip install playwright` does not fetch the binaries, so
+      # without this they fail on a missing executable — not on a missing
+      # display, which is why HEADLESS alone would fix nothing.
+      - run: python -m playwright install --with-deps chromium firefox webkit
+      # `-m "not e2e"` is what `make test` already selects. Redis is not needed:
+      # tests/conftest.py swaps in fakeredis and forces the in-memory broker,
+      # and no test in this set needs network egress.
+      - run: pytest -m "not e2e" tests/

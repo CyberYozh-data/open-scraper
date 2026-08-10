@@ -241,6 +241,13 @@ class TestGenerateValidation:
         mocker.patch.object(
             service_mod, "generate_selectors", new=mocker.AsyncMock()
         )
+        # Patch the fetch as its sibling above does: unmocked, this test really
+        # reaches example.com, making a pure validation assertion depend on a
+        # third-party host. (It also documents that the fetch happens BEFORE
+        # the empty-schema check — worth its own fix in the service.)
+        fetch = mocker.patch.object(
+            service_mod, "_fetch_sample_html", new=mocker.AsyncMock(return_value="<html></html>")
+        )
         resp = client.post(
             "/api/v1/presets/generate",
             json={
@@ -252,6 +259,7 @@ class TestGenerateValidation:
             },
         )
         assert resp.status_code == 422
+        assert fetch.await_count <= 1
 
 
 class TestPresetTest:

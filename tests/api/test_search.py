@@ -571,3 +571,57 @@ class TestSearchWarmup:
         await build_search(SearchRequest(query="x"), store=store, run_job=runner)
         serp = runner.calls[0][0]
         assert serp.prem_proxy_options is None
+
+
+class TestUnsupportedEngineOptionsAfterTheSerp:
+    """The per-result ScrapeRequest is built AFTER the SERP has been paid for.
+
+    `scrape_options` is caller-supplied and is merged with the panel's engine
+    only at that point, so an unsupported pair (camoufox + session_id, say)
+    first raises there. Uncaught, a raw pydantic ValidationError escapes the
+    route — there is no exception handler for it in `src/`, so it is a 500 for
+    what is a bad request, with the SERP launch, proxy bandwidth and preset run
+    already spent.
+    """
+
+    @pytest.mark.parametrize("bad_options", [
+        {"render": False},
+        {"session_id": "sess_abc"},
+        {"cookies": [{"name": "a", "value": "b", "domain": "e.com", "path": "/"}]},
+    ])
+    @pytest.mark.asyncio
+    async def test_it_is_a_client_error_the_route_can_map(self, bad_options):
+        from src.api.search import _scrape_result_pages
+        from src.presets.materializer import MaterializeError
+        from src.schemas import SearchRequest, SearchResult
+
+        req = SearchRequest(query="q", engine="google", scrape=True,
+                            scrape_options=bad_options)
+        results = [SearchResult(url="https://e.com/1")]
+
+        async def never_called(_reqs):
+            raise AssertionError("the SERP scrape must not be attempted")
+
+        with pytest.raises(MaterializeError) as exc:
+            await _scrape_result_pages(
+                req, results, {}, {"browser_engine": "camoufox"},
+                never_called, [],
+            )
+
+        assert "camoufox" in str(exc.value)
+
+
+def test_engine_override_forwards_the_fingerprint_profile():
+    override = _engine_override(
+        SearchRequest(query="x", browser_engine="camoufox",
+                      fingerprint_profile="windows_on_host")
+    )
+
+    assert override["fingerprint_profile"] == "windows_on_host"
+
+
+def test_engine_override_omits_an_unset_fingerprint_profile():
+    """An unset field must not overwrite the SERP preset's own value."""
+    override = _engine_override(SearchRequest(query="x", browser_engine="camoufox"))
+
+    assert "fingerprint_profile" not in override

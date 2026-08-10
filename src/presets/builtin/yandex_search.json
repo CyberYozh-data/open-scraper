@@ -17,7 +17,8 @@
     "wait_until": "load",
     "wait_for_selector": "li.serp-item",
     "timeout_ms": 45000,
-    "block_assets": false
+    "block_assets": false,
+    "fingerprint_profile": "windows_on_host"
   },
   "locales": {
     "ru": {

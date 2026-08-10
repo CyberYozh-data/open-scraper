@@ -188,6 +188,17 @@ def materialize(preset: Preset, req: PresetScrapeRequest) -> ScrapeRequest:
 
     merged: dict[str, Any] = dict(preset.request_defaults)
     if req.request_override:
+        # `spoof_os` and `fingerprint_profile` are two ways to name the same
+        # thing, so a caller who states one of them means to REPLACE whichever
+        # the preset stated — not to be told the two disagree. Without this,
+        # `spoof_os` on a preset carrying `fingerprint_profile` (both Camoufox
+        # builtins do) is a 400 for what is plainly an override.
+        for stated, superseded in (
+            ("spoof_os", "fingerprint_profile"),
+            ("fingerprint_profile", "spoof_os"),
+        ):
+            if stated in req.request_override and superseded not in req.request_override:
+                merged.pop(superseded, None)
         merged.update(req.request_override)
 
     unknown = set(merged) - set(ScrapeRequest.model_fields)

@@ -143,9 +143,47 @@ proxies without a pinned country `DEFAULT_PROXY_COUNTRY` (default `US`) pins the
 exit so the exit country and the browser timezone/locale stay aligned. Pin a
 different country with `proxy_geo.country_code`.
 
-The [visual tester](#visual-tester) exposes engine, resolution, device, stealth
-and proxy country in the scrape form. See [`.env.example`](.env.example) for all
-env vars.
+**Camoufox fingerprint profile** — Camoufox regenerates its fingerprint on every
+launch and draws whatever nobody pinned from its own corpus: the OS uniformly
+from windows/macos/linux, the GPU and thread count from a weighted table. Each
+result is a machine that could exist, but none of them is *this* machine, and
+what Camoufox does not spoof still comes from the real one. Set
+`fingerprint_profile` per request (or in a preset's `request_defaults`) to
+choose how close to the host it sits:
+
+| `fingerprint_profile` | OS | GPU |
+|---|---|---|
+| unset / `auto`     | whatever `CAMOUFOX_FINGERPRINT_PROFILE` names (ships `windows_on_host`) | |
+| `windows_on_host`  | Windows | the host's vendor |
+| `host`             | the host's own OS | the host's vendor |
+| `random`           | Camoufox's uniform draw | Camoufox's |
+| `windows` / `macos` / `linux` | as named | Camoufox's |
+
+A profile pins the OS and the GPU pair, and nothing else. Measured on
+`yandex_search`, 20 runs per arm, counting retries (each retry is a blocked
+attempt that had to rotate the exit): a **Windows** claim cost 1 and 8 retries
+where a **Linux** one cost 15 and 23 — so claiming this Linux host honestly is
+the worst option, not the safest, because desktop Linux is rare enough to be a
+signal on its own. Pinning `navigator.hardwareConcurrency` to the host's real
+count was in the first draft and made things worse in both arms (1 → 8 on
+Windows); removing it brought the Windows arm level with an unpinned control,
+3 retries against 3. It hid nothing either — Camoufox already spoofs that
+value.
+
+The bare OS names are exactly what `spoof_os` does, and that field still works —
+given together the two must name the same OS or the request is rejected. On any
+engine other than `camoufox` the field is a no-op.
+
+Host detection reads `platform.system()` and the CPU vendor from
+`/proc/cpuinfo`, which is the GPU vendor on integrated graphics and wrong on a
+discrete card — override it with `HOST_GPU_VENDOR`
+(`amd`/`intel`/`nvidia`/`apple`). `meta.applied_fingerprint` reports what a
+scrape actually ran with, including when a profile degraded because Camoufox's
+GPU table had no row for the detected vendor.
+
+The [visual tester](#visual-tester) exposes engine, resolution, device, stealth,
+the Camoufox fingerprint profile and proxy country in the scrape form. See
+[`.env.example`](.env.example) for all env vars.
 
 ## Presets & sessions
 

@@ -39,6 +39,15 @@ def pack_payload(obj: Mapping[str, Any]) -> bytes:
     return gzip.compress(json.dumps(obj, separators=(",", ":")).encode("utf-8"))
 
 
+def pack_response(resp: ScrapeResponse) -> bytes:
+    """Single serialization point for a result slot.
+
+    `mode="json"` so nested models (PresetMeta, AppliedWarmup) encode the way
+    the API encodes them, rather than leaving python objects for the packer.
+    """
+    return pack_payload(resp.model_dump(mode="json"))
+
+
 def unpack_payload(blob: bytes) -> dict[str, Any]:
     return json.loads(gzip.decompress(blob).decode("utf-8"))
 
@@ -166,7 +175,7 @@ class RedisJobStore:
             meta["status"] = "done"
             meta["finished_at"] = time.time()
             async with self.client.pipeline(transaction=True) as pipe:
-                pipe.hset(meta_k, mapping=meta)
+                pipe.hset(meta_k, mapping=meta)  # type: ignore[arg-type]
                 if self._result_ttl_s > 0:
                     pipe.expire(meta_k, int(self._result_ttl_s))
                 else:
@@ -178,8 +187,8 @@ class RedisJobStore:
             for i, p in enumerate(pages)
         }
         async with self.client.pipeline(transaction=True) as pipe:
-            pipe.hset(meta_k, mapping=meta)
-            pipe.hset(pages_k, mapping=pages_map)
+            pipe.hset(meta_k, mapping=meta)  # type: ignore[arg-type]
+            pipe.hset(pages_k, mapping=pages_map)  # type: ignore[arg-type]
             pipe.expire(meta_k, SAFETY_TTL_S)
             pipe.expire(pages_k, SAFETY_TTL_S)
             await pipe.execute()
@@ -222,7 +231,7 @@ class RedisJobStore:
         raw = await self.client.hgetall(meta_k)
         if not raw:
             return None
-        d = {k.decode(): v.decode() for k, v in raw.items()}
+        d = {k.decode(): v.decode() for k, v in raw.items()}  # type: ignore[union-attr]
         return JobMeta(
             job_id=job_id,
             status=d.get("status", "queued"),  # type: ignore[arg-type]
@@ -263,7 +272,11 @@ class RedisJobStore:
             pages.append(ScrapeRequest.model_validate(json.loads(blob)))
         results: list[ScrapeResponse | None] = [None] * meta.total
         for k, blob in raw_results.items():
-            results[int(k.decode())] = ScrapeResponse.model_validate(unpack_payload(blob))
+            # redis-py types decoded values as `bytes | str`; runtime is bytes.
+            idx = int(k.decode())  # type: ignore[union-attr]
+            results[idx] = ScrapeResponse.model_validate(
+                unpack_payload(blob)  # type: ignore[arg-type]
+            )
         return JobSnapshot(**meta.__dict__, pages=pages, results=results)
 
     async def queue_depth(self, stream_key: str) -> int:

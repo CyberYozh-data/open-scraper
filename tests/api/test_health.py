@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+
+from src.settings import settings
 from fastapi.testclient import TestClient
 
 from src.app import create_app
@@ -40,4 +42,8 @@ class TestHealthEndpoint:
         for _ in range(5):
             response = client.get("/api/v1/health")
             assert response.status_code == 200
-            assert response.json() == {"status": "ok", "workers": 2}
+            # Read the setting rather than the literal: the endpoint echoes
+            # the configured worker count, so hardcoding 2 made the test pass
+            # or fail on whether a .env happened to override WORKERS — green
+            # in CI, red on a dev box, for no behaviour difference at all.
+            assert response.json() == {"status": "ok", "workers": settings.workers}

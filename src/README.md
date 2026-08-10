@@ -679,6 +679,19 @@ values (per-item when `all: true`): `regex` (args `[pattern, group?]`),
 disambiguation), `strip`, `strip_tags`, `lowercase`, `uppercase`, `replace`
 (args `[old, new]`). A field may also override the rule's `type` (css/xpath).
 
+`parse_int` takes the FIRST integer in the text, not every digit in it: a
+separator groups only as complete three-digit runs that all use the same
+separator, so `"4.5 out of 5"` is `4` (not `455`), `"1,234 reviews"` is `1234`,
+and `"+1 800 555 0199"` is `1` (the tail repeats the separator, so the run is
+not a grouped number). A minus counts only when it is attached to the digits and
+itself opens the string or follows whitespace.
+
+When a pipeline returns null for every matched value that had content, the
+response carries a `field '<name>': post_process (...) returned null for every non-empty
+value (N of M matched)` warning and the worker logs a sample of the dropped text.
+The selector matched and the pipeline consumed it — usually markup drift, and
+otherwise invisible, since the request still succeeds with the field simply null.
+
 `strip_tags` renders an HTML fragment down to its text (tags dropped,
 entities decoded, whitespace collapsed). Pair `attr: "html"` + `regex` +
 `strip_tags` to read a value out of a container that is always present even

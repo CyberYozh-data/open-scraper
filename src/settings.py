@@ -85,6 +85,51 @@ class Settings(BaseSettings):
             "connections never retry."
         ),
     )
+    camoufox_geoip: bool = Field(
+        default=True,
+        alias="CAMOUFOX_GEOIP",
+        description=(
+            "Let Camoufox resolve the exit IP and align locale/timezone to it. "
+            "On by default: the alignment is a fingerprint benefit and it is "
+            "cheaper than it first looks. camoufox caches the lookup per process "
+            "under the proxy URL, and the prem gateway issues a CONSTANT username "
+            "(targeting only, no per-lease session token), so it resolves once "
+            "per worker and once per distinct targeting — measured 238ms cold, "
+            "65ms warm, one cache entry. A proxy that cannot be reached is the "
+            "exception: that raises instead of caching, so a broken exit pays "
+            "~280ms on every request and then fails to launch. Turning this off "
+            "gives up more than the lookup — camoufox only spoofs webrtc:ipv4 "
+            "when geoip resolved an address, so it is a fingerprint defence too."
+        ),
+    )
+    camoufox_fingerprint_profile: str = Field(
+        default="windows_on_host",
+        alias="CAMOUFOX_FINGERPRINT_PROFILE",
+        description=(
+            "What `fingerprint_profile='auto'` resolves to — i.e. what a request "
+            "that says nothing gets. Camoufox otherwise picks its OS uniformly "
+            "from windows/macos/linux per launch and draws the GPU and thread "
+            "count from its own corpus, so two runs in three claim an OS this "
+            "machine is not, on hardware belonging to a third. Ships as "
+            "'windows_on_host': the most common desktop OS, wearing this host's "
+            "GPU vendor. Measured on yandex_search, 20 runs per arm: a Windows "
+            "claim took 1 and 8 retries where a Linux one took 15 and 23, so "
+            "'host' — claiming this Linux host honestly — is the worst option "
+            "rather than the safest. 'random' restores the old uniform draw. "
+            "Setting 'auto' here is circular and is treated as 'random'."
+        ),
+    )
+    host_gpu_vendor: str | None = Field(
+        default=None,
+        alias="HOST_GPU_VENDOR",
+        description=(
+            "Override the GPU vendor the host-aligned profiles claim: amd, "
+            "intel, nvidia or apple. Unset means infer it from the CPU vendor in "
+            "/proc/cpuinfo, which is right on integrated graphics and wrong on a "
+            "discrete card — that is what this is for. The container cannot see "
+            "the GPU itself."
+        ),
+    )
     webrtc_block: bool = Field(
         default=True,
         alias="WEBRTC_BLOCK",

@@ -176,12 +176,26 @@
           </div>
           <div class="field-row" style="margin-top:0.4rem">
             <div class="field">
-              <label>Spoof OS</label>
-              <select id="s-cf-spoof-os">
-                <option value="">— default —</option>
-                <option value="windows">Windows</option>
-                <option value="macos">macOS</option>
-                <option value="linux">Linux</option>
+              <label style="display:flex;align-items:center;gap:0.35rem">
+                Fingerprint
+                <span class="info-icon" tabindex="0">
+                  i
+                  <div class="info-tooltip">
+                    <div>Camoufox randomises its OS, GPU and thread count on <b>every launch</b>, so a run can claim a Mac on this Linux/AMD server — while the parts it does not spoof still come from the real machine.</div>
+                    <div>The <b>on this host</b> profiles pin the GPU vendor to the real hardware — and only that. <b>Random</b> is Camoufox's own uniform draw, nothing pinned. The bare OS names state only the OS, which is what the old <b>Spoof OS</b> did.</div>
+                    <div>Measured on <code>yandex_search</code>, 20 runs each: claiming <b>Windows</b> cost far fewer blocked attempts than claiming <b>Linux</b>, so <b>This host, honestly</b> is the worst option on this server rather than the safest.</div>
+                    <div>Blank = <b>Auto</b>, i.e. the server's <code>CAMOUFOX_FINGERPRINT_PROFILE</code>.</div>
+                  </div>
+                </span>
+              </label>
+              <select id="s-cf-fingerprint">
+                <option value="">Auto — server default</option>
+                <option value="windows_on_host">Windows on this host's hardware</option>
+                <option value="host">This host, honestly</option>
+                <option value="random">Random (Camoufox's own)</option>
+                <option value="windows">Windows, hardware random</option>
+                <option value="macos">macOS, hardware random</option>
+                <option value="linux">Linux, hardware random</option>
               </select>
             </div>
             <div class="field">
@@ -453,12 +467,26 @@
           </div>
           <div class="field-row" style="margin-top:0.4rem">
             <div class="field">
-              <label>Spoof OS</label>
-              <select id="b-cf-spoof-os">
-                <option value="">— default —</option>
-                <option value="windows">Windows</option>
-                <option value="macos">macOS</option>
-                <option value="linux">Linux</option>
+              <label style="display:flex;align-items:center;gap:0.35rem">
+                Fingerprint
+                <span class="info-icon" tabindex="0">
+                  i
+                  <div class="info-tooltip">
+                    <div>Camoufox randomises its OS, GPU and thread count on <b>every launch</b>, so a run can claim a Mac on this Linux/AMD server — while the parts it does not spoof still come from the real machine.</div>
+                    <div>The <b>on this host</b> profiles pin the GPU vendor to the real hardware — and only that. <b>Random</b> is Camoufox's own uniform draw, nothing pinned. The bare OS names state only the OS, which is what the old <b>Spoof OS</b> did.</div>
+                    <div>Measured on <code>yandex_search</code>, 20 runs each: claiming <b>Windows</b> cost far fewer blocked attempts than claiming <b>Linux</b>, so <b>This host, honestly</b> is the worst option on this server rather than the safest.</div>
+                    <div>Blank = <b>Auto</b>, i.e. the server's <code>CAMOUFOX_FINGERPRINT_PROFILE</code>.</div>
+                  </div>
+                </span>
+              </label>
+              <select id="b-cf-fingerprint">
+                <option value="">Auto — server default</option>
+                <option value="windows_on_host">Windows on this host's hardware</option>
+                <option value="host">This host, honestly</option>
+                <option value="random">Random (Camoufox's own)</option>
+                <option value="windows">Windows, hardware random</option>
+                <option value="macos">macOS, hardware random</option>
+                <option value="linux">Linux, hardware random</option>
               </select>
             </div>
             <div class="field">
@@ -1092,12 +1120,26 @@
           </div>
           <div class="field-row" style="margin-top:0.4rem">
             <div class="field">
-              <label>Spoof OS</label>
-              <select id="se-cf-spoof-os">
-                <option value="">— default —</option>
-                <option value="windows">Windows</option>
-                <option value="macos">macOS</option>
-                <option value="linux">Linux</option>
+              <label style="display:flex;align-items:center;gap:0.35rem">
+                Fingerprint
+                <span class="info-icon" tabindex="0">
+                  i
+                  <div class="info-tooltip">
+                    <div>Camoufox randomises its OS, GPU and thread count on <b>every launch</b>, so a run can claim a Mac on this Linux/AMD server — while the parts it does not spoof still come from the real machine.</div>
+                    <div>The <b>on this host</b> profiles pin the GPU vendor to the real hardware — and only that. <b>Random</b> is Camoufox's own uniform draw, nothing pinned. The bare OS names state only the OS, which is what the old <b>Spoof OS</b> did.</div>
+                    <div>Measured on <code>yandex_search</code>, 20 runs each: claiming <b>Windows</b> cost far fewer blocked attempts than claiming <b>Linux</b>, so <b>This host, honestly</b> is the worst option on this server rather than the safest.</div>
+                    <div>Blank = <b>Auto</b>, i.e. the server's <code>CAMOUFOX_FINGERPRINT_PROFILE</code>.</div>
+                  </div>
+                </span>
+              </label>
+              <select id="se-cf-fingerprint">
+                <option value="">Auto — server default</option>
+                <option value="windows_on_host">Windows on this host's hardware</option>
+                <option value="host">This host, honestly</option>
+                <option value="random">Random (Camoufox's own)</option>
+                <option value="windows">Windows, hardware random</option>
+                <option value="macos">macOS, hardware random</option>
+                <option value="linux">Linux, hardware random</option>
               </select>
             </div>
             <div class="field">
@@ -1245,6 +1287,52 @@
             <label><input id="pw-block-assets" type="checkbox" checked /> Block Assets</label>
             <label><input id="pw-stealth" type="checkbox" checked /> Stealth</label>
           </div>
+
+          <div class="field">
+            <label>Browser engine</label>
+            <select id="pw-browser-engine">
+              <option value="chromium">Chromium (default)</option>
+              <option value="firefox">Firefox</option>
+              <option value="webkit">WebKit</option>
+              <option value="camoufox">Camoufox (anti-detect)</option>
+            </select>
+          </div>
+
+        <div id="pw-camoufox-opts" style="display:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.6rem 0.75rem;margin-bottom:0.5rem;background:var(--bg-secondary)">
+          <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:0.4rem">Camoufox options</div>
+          <div class="field-row checkboxes">
+            <label><input id="pw-cf-humanize" type="checkbox" checked /> Humanize</label>
+            <label><input id="pw-cf-block-webgl" type="checkbox" /> Block WebGL</label>
+          </div>
+          <div class="field-row" style="margin-top:0.4rem">
+            <div class="field">
+              <label style="display:flex;align-items:center;gap:0.35rem">
+                Fingerprint
+                <span class="info-icon" tabindex="0">
+                  i
+                  <div class="info-tooltip">
+                    <div>Camoufox randomises its OS, GPU and thread count on <b>every launch</b>, so a run can claim a Mac on this Linux/AMD server — while the parts it does not spoof still come from the real machine.</div>
+                    <div>The <b>on this host</b> profiles pin the GPU vendor to the real hardware — and only that. <b>Random</b> is Camoufox's own uniform draw, nothing pinned.</div>
+                    <div>Saved into the preset's <code>request_defaults</code>, so every run of this preset gets it.</div>
+                  </div>
+                </span>
+              </label>
+              <select id="pw-cf-fingerprint">
+                <option value="">Auto — server default</option>
+                <option value="windows_on_host">Windows on this host's hardware</option>
+                <option value="host">This host, honestly</option>
+                <option value="random">Random (Camoufox's own)</option>
+                <option value="windows">Windows, hardware random</option>
+                <option value="macos">macOS, hardware random</option>
+                <option value="linux">Linux, hardware random</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Addons (comma-separated paths)</label>
+              <input id="pw-cf-addons" type="text" placeholder="optional" />
+            </div>
+          </div>
+        </div>
 
           <h3>Proxy</h3>
           <div id="pw-proxy-component"></div>

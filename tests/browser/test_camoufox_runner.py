@@ -12,7 +12,10 @@ def test_build_options_maps_normalized_fields():
     )
     assert opts["geoip"] is True
     assert opts["block_images"] is True
-    assert opts["block_webrtc"] is True
+    # WEBRTC_BLOCK no longer maps to Camoufox's block_webrtc — it deletes the
+    # constructor, which is its own tell. See
+    # test_webrtc_block_keeps_the_api_native_and_stops_the_transport.
+    assert opts["block_webrtc"] is False
     assert opts["humanize"] is True
     assert opts["os"] == "windows"
     assert opts["block_webgl"] is True
@@ -32,8 +35,7 @@ def test_build_options_defaults_are_sane():
 
 
 def test_build_options_viewport_maps_to_window_tuple():
-    """A viewport is forwarded as Camoufox's window=(w, h); Camoufox then
-    derives a consistent screen >= window, fixing the screen<window tell."""
+    """A viewport is forwarded as Camoufox's window=(w, h)."""
     opts = build_camoufox_options(
         proxy=None, block_assets=False, webrtc_block=False,
         viewport={"width": 1920, "height": 1080},
@@ -69,6 +71,9 @@ def _mock_page(monkeypatch):
     page.screenshot = AsyncMock(return_value=b"PNGBYTES")
     browser = AsyncMock()
     browser.new_page = AsyncMock(return_value=page)
+    # Reachable from the page so a test can assert on how the page was opened,
+    # not just on what happened to it afterwards.
+    page.owning_browser = browser
     monkeypatch.setattr("src.browser.camoufox_runner.AsyncCamoufox", lambda **kw: _ACM(browser))
     return page
 
@@ -216,3 +221,439 @@ async def test_fetch_screenshot_failure_does_not_break_fetch(monkeypatch):
     assert res.ok is True
     assert res.screenshot_b64 is None
     assert res.element_status == "no_screenshot"
+
+
+def test_a_forced_window_carries_the_screen_constraint_it_needs():
+    """Camoufox does NOT derive a screen >= window from `window` alone.
+
+    That was assumed rather than checked, and it is false: with `window` set to
+    1920x1080 and the screen left to Camoufox, measured screens came back
+    1680x1050 and even 960x540 — a window larger than the monitor it is
+    supposedly on, which is physically impossible and therefore a tell. The
+    constraint has to be stated, so a window is never emitted without a screen
+    floor that matches it.
+    """
+    opts = build_camoufox_options(
+        proxy=None, block_assets=False, webrtc_block=True,
+        viewport={"width": 1920, "height": 1080},
+    )
+
+    assert opts["window"] == (1920, 1080)
+    screen = opts["screen"]
+    assert screen.min_width == 1920 and screen.min_height == 1080, (
+        "the randomised screen must not be allowed below the forced window"
+    )
+
+
+def test_no_viewport_means_no_window_and_no_screen_floor():
+    """Camoufox generates its own coherent pair when we do not interfere."""
+    opts = build_camoufox_options(proxy=None, block_assets=False, webrtc_block=True)
+
+    assert "window" not in opts
+    assert "screen" not in opts
+
+
+def test_webrtc_block_keeps_the_api_native_and_stops_the_transport():
+    """Deleting RTCPeerConnection is itself the tell we are hiding from.
+
+    Camoufox's `block_webrtc` removes the constructor outright: measured in the
+    production option set, `typeof RTCPeerConnection === "undefined"`. Real
+    Firefox always has it, so on the one engine we reserve for the hardest
+    targets we were announcing that something had been done to the browser.
+
+    The Gecko pref restricts ICE to the proxy instead, which is the documented
+    contract for the same guarantee and leaves the API where a real browser has
+    it. (Neither configuration emitted a UDP packet in this container — the
+    change buys the missing tell, not a leak fix.)
+    """
+    opts = build_camoufox_options(proxy=None, block_assets=False, webrtc_block=True)
+
+    assert opts["block_webrtc"] is False, "the constructor must stay where a real Firefox has it"
+    # Nothing is added in its place: the shipped camoufox.cfg already sets
+    # ice.proxy_only_if_behind_proxy, and an extra ice.proxy_only would collapse
+    # the no-proxy candidate set to zero — a stronger tell than the one removed.
+    assert "firefox_user_prefs" not in opts
+
+
+def test_webrtc_off_leaves_both_alone():
+    opts = build_camoufox_options(proxy=None, block_assets=False, webrtc_block=False)
+
+    assert opts["block_webrtc"] is False
+    assert "firefox_user_prefs" not in opts
+
+
+def test_a_viewport_too_large_to_floor_forces_no_window_either():
+    """A window without a guaranteed screen floor is the original defect.
+
+    Camoufox cannot generate a screen floor above roughly 2560x1440 — it raises
+    outright at 2880x1800 and 3840x2160, and silently returns screens BELOW the
+    floor higher still. Forcing the window anyway would put us back to a window
+    larger than its own monitor, so above the cap the geometry is left to
+    Camoufox entirely.
+    """
+    for width, height in ((2880, 1800), (3840, 2160), (7680, 4320)):
+        opts = build_camoufox_options(
+            proxy=None, block_assets=False, webrtc_block=True,
+            viewport={"width": width, "height": height},
+        )
+        assert "window" not in opts, (width, height)
+        assert "screen" not in opts, (width, height)
+
+
+def test_the_floor_is_derived_from_the_request_not_a_constant():
+    """A second size, because the only one under test used to equal the default
+    desktop viewport — so a hardcoded 1920x1080 floor passed everything."""
+    opts = build_camoufox_options(
+        proxy=None, block_assets=False, webrtc_block=True,
+        viewport={"width": 1366, "height": 768},
+    )
+
+    assert opts["window"] == (1366, 768)
+    assert opts["screen"].min_width == 1366
+    assert opts["screen"].min_height == 768
+
+
+@pytest.mark.e2e
+def test_the_screen_floor_cap_is_still_what_camoufox_can_serve():
+    """Re-measure the corpus boundary the cap encodes.
+
+    `_MAX_SERVEABLE_SCREEN_FLOOR` is a constant because probing it costs a
+    fingerprint generation. This asserts the constant still matches reality, so
+    a camoufox or browserforge bump that moves the boundary fails here instead
+    of in production.
+    """
+    from browserforge.fingerprints import Screen
+    from camoufox.utils import launch_options
+
+    from src.browser.camoufox_runner import _MAX_SERVEABLE_SCREEN_FLOOR as cap
+
+    launch_options(headless=True, geoip=False, window=cap,
+                   screen=Screen(min_width=cap[0], min_height=cap[1]))
+
+    with pytest.raises(ValueError):
+        launch_options(headless=True, geoip=False, window=(2880, 1800),
+                       screen=Screen(min_width=2880, min_height=1800))
+
+
+def test_geoip_follows_the_setting(monkeypatch):
+    """`geoip=True` was hardcoded, with no way to turn it off.
+
+    It stays on by default: aligning locale and timezone to the exit is a
+    fingerprint benefit, and it also gates camoufox's WebRTC exit-IP spoof. The
+    cost is smaller than it first appears — camoufox caches the lookup per
+    process under the proxy URL, and the prem gateway hands out a constant
+    username, so it resolves once per worker (238ms cold, 65ms warm, one cache
+    entry) rather than once per request.
+
+    It is a setting because the exception is expensive: an unreachable proxy
+    raises instead of caching, so a broken exit pays the lookup every time and
+    then fails to launch.
+    """
+    from src.browser import camoufox_runner as mod
+
+    monkeypatch.setattr(mod.settings, "camoufox_geoip", False)
+    opts = build_camoufox_options(proxy=None, block_assets=False, webrtc_block=False)
+    assert opts["geoip"] is False
+
+    monkeypatch.setattr(mod.settings, "camoufox_geoip", True)
+    opts = build_camoufox_options(proxy=None, block_assets=False, webrtc_block=False)
+    assert opts["geoip"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_forced_window_renders_at_the_window_not_playwrights_default(monkeypatch):
+    """Playwright's default viewport silently overrode the window we forced.
+
+    `new_page()` applies a 1280x720 viewport of its own, so a request for
+    1920x1080 set the OS window to 1920x1080 and then rendered inside 1280x720.
+    That is 640px of HORIZONTAL browser chrome, which no browser has — Firefox's
+    chrome is vertical only — and it also means a caller asking for 1920x1080 was
+    served 1280x720 without being told.
+
+    Measured `no_viewport=True` five times: inner 1920x1029 under outer
+    1920x1080, i.e. 0 horizontal and 51 vertical, which is the real Firefox
+    shape. `new_page(viewport=...)` was measured too and is NOT the fix — it
+    inverted the geometry in 3 of 5 launches.
+    """
+    page = _mock_page(monkeypatch)
+
+    await CamoufoxRunner(timeout_ms=30000).fetch(
+        url="https://ya.ru/", device="desktop", proxy=None, headers=None,
+        wait_until="domcontentloaded", wait_for_selector=None, timeout_ms=None,
+        screenshot=False, viewport={"width": 1920, "height": 1080},
+    )
+
+    page.owning_browser.new_page.assert_awaited_once_with(no_viewport=True)
+
+
+@pytest.mark.asyncio
+async def test_no_viewport_holds_even_where_no_window_is_forced(monkeypatch):
+    """Outside the serveable range it is still the better of two bad options.
+
+    An earlier draft made this conditional on a window having been forced, on
+    the theory that rendering at Camoufox's own size was "the same silent
+    substitution". Measuring it disproved that: out of range the requested size
+    is ignored either way, but WITHOUT no_viewport the page also renders at
+    1280x720 inside whatever window Camoufox picked — 160-416px of horizontal
+    chrome in 5 of 5 launches. With it, 0 of 5.
+
+    What it does not fix out of range is Camoufox's own window-versus-screen
+    draw, which stayed broken in both arms. That is a separate lottery this
+    argument does not touch.
+    """
+    page = _mock_page(monkeypatch)
+
+    await CamoufoxRunner(timeout_ms=30000).fetch(
+        url="https://ya.ru/", device="desktop", proxy=None, headers=None,
+        wait_until="domcontentloaded", wait_for_selector=None, timeout_ms=None,
+        screenshot=False, viewport={"width": 3840, "height": 2160},
+    )
+
+    page.owning_browser.new_page.assert_awaited_once_with(no_viewport=True)
+
+
+@pytest.mark.asyncio
+async def test_the_default_request_gets_the_window_and_renders_in_it(monkeypatch):
+    """The commonest Camoufox request passes no viewport at all.
+
+    It is also the one whose rendered size this change moves — 1280x720 to the
+    default desktop 1920x1080 — so it should not be reachable only through the
+    tests that pass an explicit viewport.
+    """
+    page = _mock_page(monkeypatch)
+
+    await CamoufoxRunner(timeout_ms=30000).fetch(
+        url="https://ya.ru/", device="desktop", proxy=None, headers=None,
+        wait_until="domcontentloaded", wait_for_selector=None, timeout_ms=None,
+        screenshot=False,
+    )
+
+    page.owning_browser.new_page.assert_awaited_once_with(no_viewport=True)
+
+
+def test_a_window_too_narrow_for_firefox_is_not_forced_either():
+    """Firefox will not lay out content below 500px however small the window.
+
+    Measured with the window forced: at 320 and at 400, innerWidth came back 500
+    — an inner viewport wider than its own window, which is exactly the inverted
+    geometry `new_page(viewport=...)` was rejected for. `Viewport` allows width
+    >= 320, so a caller can ask for this.
+    """
+    for width, height in ((320, 240), (400, 300), (499, 400)):
+        opts = build_camoufox_options(
+            proxy=None, block_assets=False, webrtc_block=True,
+            viewport={"width": width, "height": height},
+        )
+        assert "window" not in opts, (width, height)
+        assert "screen" not in opts, (width, height)
+
+
+def test_the_serveable_range_is_inclusive_at_both_ends():
+    """Both bounds are measured values, so off-by-one costs a real request."""
+    for width, height in ((500, 400), (2560, 1440)):
+        opts = build_camoufox_options(
+            proxy=None, block_assets=False, webrtc_block=True,
+            viewport={"width": width, "height": height},
+        )
+        assert opts["window"] == (width, height)
+        assert opts["screen"].min_width == width
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_the_geometry_invariant_still_holds_in_a_real_browser():
+    """`inner <= outer <= screen` with equal widths is a property of the
+    camoufox+playwright pair, not of our code.
+
+    Every unit test here asserts which kwarg we pass; none of them can tell
+    whether the browser still honours it. A camoufox or playwright bump could
+    restore the 1280x720 override and leave the whole suite green, which is the
+    same gap `test_the_screen_floor_cap_is_still_what_camoufox_can_serve`
+    exists to close for the cap constant.
+    """
+    import os as _os
+
+    if not _os.environ.get("DISPLAY"):
+        pytest.skip("headful launch needs an X display (Xvfb); DISPLAY is unset")
+
+    from camoufox.async_api import AsyncCamoufox
+
+    opts = build_camoufox_options(
+        proxy=None, block_assets=False, webrtc_block=True, headless=False,
+        viewport={"width": 1920, "height": 1080},
+    )
+    async with AsyncCamoufox(**opts) as browser:
+        page = await browser.new_page(no_viewport=True)
+        await page.goto("https://example.com/", wait_until="domcontentloaded", timeout=60000)
+        seen = await page.evaluate(
+            "() => ({inner: [innerWidth, innerHeight],"
+            " outer: [outerWidth, outerHeight],"
+            " screen: [screen.width, screen.height]})"
+        )
+
+    inner, outer, screen = seen["inner"], seen["outer"], seen["screen"]
+    # No browser has horizontal chrome; the vertical difference is the toolbar.
+    assert inner[0] == outer[0], f"{inner[0] - outer[0]}px of horizontal chrome"
+    assert inner[1] <= outer[1]
+    assert outer[0] <= screen[0] and outer[1] <= screen[1], "window larger than its monitor"
+    assert outer == [1920, 1080], "the forced window did not survive"
+
+
+def test_a_profile_pins_the_os_and_the_gpu():
+    """The two knobs a profile states; Camoufox keeps the rest.
+
+    A third — navigator.hardwareConcurrency — was measured and removed: it made
+    yandex_search worse (1 retry to 8 on a Windows claim over 20 runs) and it
+    hid nothing, because Camoufox already spoofs that value.
+    """
+    from src.browser.fingerprint_profile import ResolvedFingerprint
+
+    opts = build_camoufox_options(
+        proxy=None, block_assets=False, webrtc_block=True,
+        fingerprint=ResolvedFingerprint(
+            profile="windows_on_host",
+            spoof_os="windows",
+            webgl_config=(
+                "Google Inc. (AMD)",
+                "ANGLE (AMD, Radeon R9 200 Series Direct3D11 vs_5_0 ps_5_0), or similar",
+            ),
+        ),
+    )
+
+    assert opts["os"] == "windows"
+    assert opts["webgl_config"] == (
+        "Google Inc. (AMD)",
+        "ANGLE (AMD, Radeon R9 200 Series Direct3D11 vs_5_0 ps_5_0), or similar",
+    )
+    assert "config" not in opts, "navigator properties are Camoufox's to generate"
+
+
+def test_a_profile_that_pins_nothing_adds_no_keys():
+    """`random` must leave the option dict exactly as it was before profiles.
+
+    Handing Camoufox an empty `config` or a `webgl_config` of None is not the
+    same as not passing them, and `random` is the benchmark's control arm — a
+    control that quietly passes extra kwargs measures something else.
+    """
+    from src.browser.fingerprint_profile import ResolvedFingerprint
+
+    opts = build_camoufox_options(
+        proxy=None, block_assets=False, webrtc_block=True,
+        fingerprint=ResolvedFingerprint(profile="random"),
+    )
+
+    assert "os" not in opts
+    assert "webgl_config" not in opts
+    assert "config" not in opts
+
+
+def test_a_profile_pinning_only_the_os_leaves_the_hardware_keys_out():
+    """A bare OS profile is `spoof_os`, so it must emit exactly what that did."""
+    from src.browser.fingerprint_profile import ResolvedFingerprint
+
+    opts = build_camoufox_options(
+        proxy=None, block_assets=False, webrtc_block=True,
+        fingerprint=ResolvedFingerprint(profile="macos", spoof_os="macos"),
+    )
+
+    assert opts["os"] == "macos"
+    assert "webgl_config" not in opts
+    assert "config" not in opts
+
+
+def test_an_explicit_spoof_os_still_works_without_a_profile():
+    """`spoof_os` is the field that shipped; it must not need the new one."""
+    opts = build_camoufox_options(
+        proxy=None, block_assets=False, webrtc_block=True, spoof_os="macos",
+    )
+
+    assert opts["os"] == "macos"
+    assert "webgl_config" not in opts
+
+
+@pytest.mark.asyncio
+async def test_the_fetch_resolves_the_profile_it_was_given(monkeypatch):
+    """Resolution lives in the runner so probes and tests default like the queue."""
+    seen: dict = {}
+    _mock_page(monkeypatch)
+    real = build_camoufox_options
+
+    def _spy(**kwargs):
+        seen.update(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr("src.browser.camoufox_runner.build_camoufox_options", _spy)
+
+    await CamoufoxRunner(timeout_ms=30000).fetch(
+        url="https://ya.ru/", device="desktop", proxy=None, headers=None,
+        wait_until="domcontentloaded", wait_for_selector=None, timeout_ms=None,
+        screenshot=False, fingerprint_profile="linux",
+    )
+
+    assert seen["fingerprint"].profile == "linux"
+    assert seen["fingerprint"].spoof_os == "linux"
+
+
+@pytest.mark.asyncio
+async def test_a_lone_spoof_os_routes_through_the_same_resolution(monkeypatch):
+    """One code path, so the old field cannot drift from the new one."""
+    seen: dict = {}
+    _mock_page(monkeypatch)
+    real = build_camoufox_options
+
+    def _spy(**kwargs):
+        seen.update(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr("src.browser.camoufox_runner.build_camoufox_options", _spy)
+
+    await CamoufoxRunner(timeout_ms=30000).fetch(
+        url="https://ya.ru/", device="desktop", proxy=None, headers=None,
+        wait_until="domcontentloaded", wait_for_selector=None, timeout_ms=None,
+        screenshot=False, spoof_os="windows",
+    )
+
+    assert seen["fingerprint"].profile == "windows"
+    assert seen["fingerprint"].webgl_config is None
+
+
+@pytest.mark.asyncio
+async def test_the_applied_fingerprint_comes_back_on_the_result(monkeypatch):
+    """Otherwise the only record of which profile ran is a worker log.
+
+    A profile that degraded — an unknown name, a GPU vendor the table has no row
+    for — is indistinguishable from one that applied, and by the time anyone
+    looks the response is somewhere else entirely.
+    """
+    _mock_page(monkeypatch)
+
+    res = await CamoufoxRunner(timeout_ms=30000).fetch(
+        url="https://ya.ru/", device="desktop", proxy=None, headers=None,
+        wait_until="domcontentloaded", wait_for_selector=None, timeout_ms=None,
+        screenshot=False, fingerprint_profile="windows",
+    )
+
+    assert res.applied_fingerprint == {
+        "profile": "windows",
+        "os": "windows",
+        "webgl_vendor": None,
+        "webgl_renderer": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_launch_failure_still_reports_the_profile_it_tried(monkeypatch):
+    """A refused launch is exactly when the profile is the prime suspect."""
+    def _boom(**_kwargs):
+        raise RuntimeError("launch refused")
+
+    monkeypatch.setattr("src.browser.camoufox_runner.AsyncCamoufox", _boom)
+
+    res = await CamoufoxRunner(timeout_ms=30000).fetch(
+        url="https://ya.ru/", device="desktop", proxy=None, headers=None,
+        wait_until="domcontentloaded", wait_for_selector=None, timeout_ms=None,
+        screenshot=False, fingerprint_profile="linux",
+    )
+
+    assert res.ok is False
+    assert res.applied_fingerprint["profile"] == "linux"
