@@ -4,6 +4,70 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.8] - 2026-08-10
+
+Anti-detection and reliability release: a new `fingerprint_profile` request
+field pins the Camoufox OS/GPU instead of a per-launch random draw, the retry
+loop now stays inside the task deadline, extraction reports a silently-nulled
+column, and the queue result is a typed envelope. Two Camoufox fingerprint
+tells are removed and three options are no longer silently ignored. Adds a
+GitHub Actions CI pipeline. No breaking API change.
+
+### Added
+
+- `fingerprint_profile` on `POST /scrape/page`, `POST /scrape/pages` and the
+  crawler/search `scrape_options`: pin the Camoufox fingerprint's OS and WebGL
+  vendor instead of Camoufox's per-launch random draw (which claimed an OS the
+  server is not two launches in three). Profiles: `auto` (default, resolves to
+  `CAMOUFOX_FINGERPRINT_PROFILE`, ships `windows_on_host`), `windows_on_host`,
+  `host`, `random`, and the bare names `windows` / `macos` / `linux`. The old
+  `spoof_os` keeps working and equals the three bare names; a caller stating
+  both must not name conflicting operating systems. `meta.applied_fingerprint`
+  reports what actually ran, including when a profile degraded. New env vars
+  `CAMOUFOX_FINGERPRINT_PROFILE` (default `windows_on_host`) and
+  `HOST_GPU_VENDOR`.
+- Extraction warns when a `post_process` pipeline nulls an entire column (every
+  row) — a fourth class of silent failure the invalid/empty/length-mismatch
+  selector checks did not cover. Reported only for a fully-nulled column with
+  more than one row, or a scalar field; an optional value missing on a single
+  row stays quiet.
+- GitHub Actions CI: `pylint` and `pytest -m "not e2e"` on every push and pull
+  request, the checks the repo already defined but never enforced.
+
+### Changed
+
+- `run_scrape` now returns a typed envelope (`ScrapeOk` / `ScrapeErr`) built as
+  the same pydantic models the API validates on the way out, with `mypy` over
+  the queue surface. An older worker meeting a metadata value a newer API
+  introduced degrades that field and keeps the fetched page, rather than
+  dropping it. Internal refactor; the public HTTP response is unchanged.
+- `session_id`, `cookies` and `render` are now rejected with 422 on the
+  Camoufox engine instead of being accepted and silently ignored (which
+  returned a logged-out or non-rendered page that read as the site having
+  changed). `/search` maps the rejection to a 400 rather than a 500.
+- `WEBRTC_BLOCK` no longer deletes `RTCPeerConnection` on Camoufox: deleting the
+  constructor was itself a fingerprint tell (real Firefox always has it). The
+  native constructor is kept and Camoufox's `webrtc:ipv4` spoof re-enabled.
+- Camoufox `geoip` is now toggleable via `CAMOUFOX_GEOIP` (default on), so the
+  per-request exit-IP lookup and its credentialed cache can be turned off where
+  the locale/timezone alignment is not worth the cost.
+
+### Fixed
+
+- The retry loop stays inside `PAGE_TASK_TIMEOUT_S`: an attempt that cannot fit
+  the remaining task budget is shortened (or not started) instead of cancelled
+  mid-fetch, so the block verdict, the html, the status and the retry count
+  reach the caller instead of a bare `page task exceeded` timeout. A transient
+  5xx is no longer promoted over a real captcha as the reported attempt.
+- `parse_int` no longer fabricates numbers by stripping every non-digit and
+  concatenating what is left (`4.5 out of 5` returned `455`); it takes the
+  first integer with locale-correct thousands grouping (`4.5 out of 5` -> `4`,
+  `12 345,67` -> `12345`).
+- Camoufox window/screen geometry is now physically coherent: the screen floor
+  is stated alongside the forced window, so a spoofed window is never larger
+  than its own monitor (a tell in 5 of 6 launches before), and an oversized
+  request no longer fails the whole scrape.
+
 ## [0.1.7] - 2026-08-04
 
 Build fix.
