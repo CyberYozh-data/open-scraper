@@ -16,6 +16,7 @@ PostProcessOp = Literal[
     "lowercase",
     "uppercase",
     "replace",
+    "base64_decode",
 ]
 
 
@@ -28,7 +29,11 @@ class PostProcess(BaseModel):
             "returns a capture group; 'parse_price' (args=['us'|'eu']?) and "
             "'parse_int'/'parse_float' coerce to numbers; 'strip' (args=[chars]?), "
             "'lowercase', 'uppercase', and 'replace' (args=[old, new]) are "
-            "string ops. 'strip_tags' renders an HTML fragment down to its "
+            "string ops. 'base64_decode' decodes url-safe base64 with optional "
+            "padding — pair it with 'regex' to read a destination out of a "
+            "click-tracking wrapper (Bing hides every organic URL behind "
+            "bing.com/ck/a?...&u=a1<base64url>). 'strip_tags' renders an HTML "
+            "fragment down to its "
             "text (tags dropped, entities decoded, whitespace collapsed) — "
             "pair it with attr='html' + 'regex' to read a value out of an "
             "always-present container without the container's markup."

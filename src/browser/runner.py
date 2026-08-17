@@ -10,6 +10,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any, Optional, Literal
 
 from playwright.async_api import (
@@ -244,6 +245,51 @@ def classify_fetch(
     return True, False, None
 
 
+def redirected_to_block(requested_url: str, current_url: str | None) -> bool:
+    """Did this navigation END somewhere only a block serves?
+
+    Answerable the instant `page.goto` returns, which is the point: measured on
+    yandex_search, five blocked attempts out of six already had
+    `page.url == https://yandex.ru/showcaptcha` at that moment, and then spent
+    the full 45s selector deadline discovering what the URL had already said.
+    The one good attempt spent 0.0s there.
+
+    Deliberately narrower than `looks_like_captcha_or_block`, in two ways:
+
+    - The URL alone. That function's other arm reads the body, which is not safe
+      here — right after `goto` the DOM is still settling, and the size ceiling
+      that keeps trigger phrases from firing on real content has not been
+      reached yet.
+    - Only when the URL CHANGED. `/sorry/` is an ordinary path (an apology page,
+      a returns policy); a caller who navigated there on purpose has not been
+      blocked, and cutting their selector wait short would hand back a page that
+      had not finished rendering.
+
+    This never changes a verdict — the full classification still runs on the
+    complete html afterwards. It only declines to wait for a selector that a
+    block page will never grow.
+    """
+    if not current_url or current_url == requested_url:
+        return False
+    path = urlsplit(current_url).path.lower().rstrip("/") or "/"
+    # Matched on the PARSED PATH, exactly — not as a substring of the whole URL
+    # the way `looks_like_captcha_or_block` does it. Two reasons, both real:
+    #
+    # `/showcaptchafast` CONTAINS `/showcaptcha` but is not a block. It is
+    # Yandex's transparent browser check, which self-resolves in a few seconds
+    # and redirects to the real SERP — see the fix that put
+    # `wait_for_selector: li.serp-item` on yandex_search precisely so the wait
+    # outlives it. Skipping that wait on a substring match turns an 18-result
+    # SERP into a hard `blocked` and burns three exits chasing it. Reproduced
+    # against a real browser before this was narrowed.
+    #
+    # And the query string is excluded entirely, because Google's own block URL
+    # embeds the page it blocked: /sorry/index?continue=<original>. A substring
+    # test over the full URL would fire on whatever that original happened to
+    # contain.
+    return path == "/showcaptcha" or path == "/sorry" or path.startswith("/sorry/")
+
+
 def looks_like_captcha_or_block(html: str, *, final_url: str | None = None) -> bool:
     """Heuristic for detecting captcha / block pages.
 
@@ -286,6 +332,16 @@ def looks_like_captcha_or_block(html: str, *, final_url: str | None = None) -> b
         "/sorry/",
         "cf-chl-",  # cloudflare challenge marker
         "data-sitekey",  # reCAPTCHA / Turnstile attribute
+        # Amazon's throttle page, whose entire visible text this is. It arrives
+        # with HTTP 503 sometimes and HTTP 200 sometimes, from the same URL —
+        # and the 200 variant was being accepted as a successful fetch, so the
+        # retry loop stopped rotating on exactly the response that needed a
+        # fresh exit. Measured at ~2.3 KB against 2-3.7 MB for a real page, so
+        # the size ceiling above already keeps it clear of genuine content.
+        # Matched as the whole phrase: "sorry" and "something went wrong" are
+        # ordinary words apart, and either alone would flag a small error page
+        # a caller deliberately scraped.
+        "sorry! something went wrong",
     )
     if any(signal in html_lower for signal in strong_signals):
         return True
@@ -305,38 +361,56 @@ def warmup_origin(target_url: str) -> str | None:
     return f"{p.scheme}://{p.hostname}/"
 
 
-async def run_warmup(page, target_url, warmup, *, timeout_ms, default_dwell_ms) -> dict | None:
-    """Optional pre-navigation warmup. Non-fatal: any failure is logged and
+@dataclass(frozen=True)
+class WarmupOutcome:
+    """What the warmup did, and why it did not.
+
+    `applied` is the descriptor of a warmup that ran; `error` names one that was
+    configured and failed. Both None means none was configured — a distinction
+    the old `dict | None` return could not make, so a warmup failing on every
+    single attempt was indistinguishable from one nobody asked for. That cost a
+    working day on the google presets, whose homepage warmup navigated into a
+    host the proxy gateway refused: the response carried no trace of it.
+    """
+
+    applied: dict | None = None
+    error: str | None = None
+
+
+async def run_warmup(page, target_url, warmup, *, timeout_ms, default_dwell_ms) -> WarmupOutcome:
+    """Optional pre-navigation warmup. Non-fatal: any failure is reported and
     swallowed so the real navigation still runs.
 
     type='homepage' visits the target's own origin; type='custom' visits
     warmup['url'] verbatim. Both then dwell before the caller's real navigation.
 
-    Returns a descriptor of what actually ran ({type, url, dwell_ms}, with `url`
-    being the URL actually visited), or None when warmup was not configured, had
-    no usable URL, or failed — so callers can report what was applied, not just
-    what was requested.
+    Returns a `WarmupOutcome`: `.applied` describes what actually ran ({type,
+    url, dwell_ms}, with `url` the URL actually visited), `.error` names a
+    configured warmup that failed. A warmup that was never configured — or has
+    no usable URL to visit — is neither, and must not read as a failure.
     """
     if not warmup:
-        return None
+        return WarmupOutcome()
     wtype = warmup.get("type", "homepage")
     if wtype == "homepage":
         warm_url = warmup_origin(target_url)
     elif wtype == "custom":
         warm_url = warmup.get("url") or None
     else:
-        return None
+        return WarmupOutcome()
     if not warm_url:
-        return None
+        return WarmupOutcome()
     dwell = warmup.get("dwell_ms")
     dwell = default_dwell_ms if dwell is None else dwell
     try:
         await page.goto(str(warm_url), wait_until="domcontentloaded", timeout=timeout_ms)
         await page.wait_for_timeout(dwell)
-        return {"type": wtype, "url": str(warm_url), "dwell_ms": dwell}
+        return WarmupOutcome(applied={"type": wtype, "url": str(warm_url), "dwell_ms": dwell})
     except Exception as exc:  # pylint: disable=broad-except
         log.warning("warmup failed (non-fatal) for %s: %s", warm_url, exc)
-        return None
+        # Named with the URL, because "warmup failed" without it does not say
+        # WHERE — and the google case was diagnosable only from the where.
+        return WarmupOutcome(error=f"{warm_url}: {type(exc).__name__}: {exc}")
 
 
 async def _fullpage_screenshot(page, *, effective_block_assets: bool) -> bytes:
@@ -537,6 +611,10 @@ class FetchResult:
     # What the pre-navigation warmup actually did ({type, url, dwell_ms}), or
     # None if no warmup ran. Distinct from the requested warmup config.
     applied_warmup: dict | None = None
+    # Set only when a warmup was CONFIGURED and failed. `applied_warmup=None`
+    # cannot say that on its own — it also means "none configured" — and the
+    # queue turns this into a caller-visible warning.
+    warmup_error: str | None = None
     # ResolvedFingerprint.as_meta() for this fetch; None on the Playwright path,
     # which has no profiles.
     applied_fingerprint: dict | None = None
@@ -890,6 +968,7 @@ class PlaywrightRunner:
         # Late-bound: set inside the try below, read by _with_applied when each
         # FetchResult is wrapped after the fetch completes.
         applied_warmup: dict | None = None
+        warmup_error: str | None = None
 
         def _with_applied(result: FetchResult) -> FetchResult:
             result.applied_user_agent = applied["user_agent"]
@@ -897,18 +976,24 @@ class PlaywrightRunner:
             result.applied_timezone = applied["timezone"]
             result.applied_accept_language = applied["accept_language"]
             result.applied_warmup = applied_warmup
+            result.warmup_error = warmup_error
             return result
 
         try:
             effective_timeout_ms = timeout_ms or self.timeout_ms
-            applied_warmup = await run_warmup(
+            warmup_outcome = await run_warmup(
                 page, url, warmup,
                 timeout_ms=effective_timeout_ms,
                 default_dwell_ms=settings.warmup_dwell_ms,
             )
+            applied_warmup = warmup_outcome.applied
+            warmup_error = warmup_outcome.error
             resp = await page.goto(url, wait_until=wait_until, timeout=effective_timeout_ms)
             selector_missing = False
-            if wait_for_selector:
+            # See redirected_to_block: once the navigation has landed on a block
+            # endpoint, the selector cannot appear, and waiting for it burns a
+            # full deadline per attempt for nothing.
+            if wait_for_selector and not redirected_to_block(url, page.url):
                 try:
                     await page.wait_for_selector(
                         wait_for_selector, timeout=effective_timeout_ms

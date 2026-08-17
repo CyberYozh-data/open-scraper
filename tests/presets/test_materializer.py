@@ -777,3 +777,35 @@ class TestFingerprintProfile:
 
         assert req.spoof_os == "linux"
         assert req.fingerprint_profile == "linux"
+
+
+class TestBingSearchUnwrapsItsLinks:
+    """`links` must not ship Bing's click-tracking wrapper.
+
+    Read straight from href, every organic link is
+    `https://www.bing.com/ck/a?...&u=a1<base64url>` — pointing at bing.com on
+    every row. The field is 100% populated and carries no destination, which no
+    fill-rate, row-count or status check can see. Verified live after the fix:
+    6/6 rows on us and 5/5 on de resolved to real hosts (pcmag, cnet, nytimes,
+    pcwelt, chip), 0 still on bing.com.
+    """
+
+    @staticmethod
+    def _links_field():
+        import json
+        import pathlib
+
+        raw = json.loads(pathlib.Path("src/presets/builtin/bing_search.json").read_text())
+        return Preset(**raw).parsing_instructions.fields["links"]
+
+    def test_the_wrapper_is_unwrapped(self):
+        ops = [(o.op, tuple(o.args)) for o in (self._links_field().post_process or [])]
+
+        assert ("base64_decode", ()) in ops, "the destination is base64; nothing else decodes it"
+        assert any(op == "regex" and "u=a1" in args[0] for op, args in ops), ops
+
+    def test_the_regex_runs_before_the_decode(self):
+        """Order is the whole trick: decode the capture, not the whole href."""
+        ops = [o.op for o in (self._links_field().post_process or [])]
+
+        assert ops.index("regex") < ops.index("base64_decode")

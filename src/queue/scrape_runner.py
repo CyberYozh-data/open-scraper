@@ -11,6 +11,7 @@ import logging
 import re
 import time
 import traceback
+from urllib.parse import urlsplit
 from typing import Any, Coroutine, TypeVar
 
 from pydantic import ValidationError
@@ -329,6 +330,54 @@ def better_failure_evidence(
     return candidate if _evidence_rank(candidate) >= _evidence_rank(incumbent) else incumbent
 
 
+def self_referential_link_warning(
+    data: Any, final_url: str | None
+) -> str | None:
+    """Report extracted URLs that all point back at the page they came from.
+
+    A SERP whose every result links to the search engine is not a SERP. Bing
+    wraps organic hrefs in `bing.com/ck/a` redirects, so a `links` field read
+    straight from href was 100% populated and 100% useless — a failure no
+    fill-rate, row-count or status check can see, because nothing is missing.
+
+    Keyed on the shape rather than on any engine: it needs no field named
+    `links`, so a selector that drifts onto internal navigation trips it too.
+    It is descriptive, never fatal — a category page legitimately links within
+    itself, and this cannot tell that apart from the failure. The point is to
+    put the fact in front of a human, not to decide.
+
+    Silent below three URLs: one or two self-links prove nothing, and engines
+    legitimately link to themselves for pagination and cached copies.
+    """
+    if not final_url or data is None:
+        return None
+    own_host = urlsplit(final_url).netloc.lower()
+    if not own_host:
+        return None
+
+    rows = data if isinstance(data, list) else [data]
+    urls: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for value in row.values():
+            for item in value if isinstance(value, list) else [value]:
+                if isinstance(item, str) and item.startswith(("http://", "https://")):
+                    urls.append(item)
+
+    if len(urls) < 3:
+        return None
+    on_own = sum(1 for u in urls if urlsplit(u).netloc.lower() == own_host)
+    if on_own != len(urls):
+        return None
+    return (
+        f"all_extracted_links_self_referential: every one of the {len(urls)} "
+        f"extracted URLs is on {own_host}, the page's own host. On a search "
+        "preset that means the results were never unwrapped — the field is "
+        "populated but carries no destination."
+    )
+
+
 async def run_scrape(
     runner: PlaywrightRunner,
     request_id: str,
@@ -624,6 +673,15 @@ async def run_scrape(
                 warnings.append(fetch_result.error)
             if fetch_result.status_code:
                 warnings.append(f"status_code={fetch_result.status_code}")
+        # A configured warmup that failed, on a fetch that SUCCEEDED as well as
+        # one that did not. `applied_warmup=None` cannot carry this — it also
+        # means "no warmup configured" — so without the warning the only trace
+        # is a line in a worker log nobody keeps. The google presets spent a
+        # working day looking like a network fault for exactly that reason:
+        # their homepage warmup navigated into a host the gateway refused, every
+        # attempt, and the response never said so.
+        if fetch_result.warmup_error:
+            warnings.append(f"warmup_failed: {fetch_result.warmup_error}")
         # The last attempt's error when it is not the one being reported: the
         # reported page explains the failure, but "attempts 2-3 both failed to
         # connect" is how a broken pool becomes visible, and dropping it makes
@@ -660,6 +718,11 @@ async def run_scrape(
             )
             data = parsed_data
             warnings.extend(parse_warnings)
+            self_link_note = self_referential_link_warning(
+                data, fetch_result.final_url
+            )
+            if self_link_note:
+                warnings.append(self_link_note)
 
         raw_html = fetch_result.html if want_raw_html else None
         screenshot_b64 = fetch_result.screenshot_b64 if want_screenshot else None

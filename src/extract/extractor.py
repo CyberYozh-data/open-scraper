@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import logging
 import re
 from html import unescape
@@ -209,6 +210,28 @@ def _parse_float(value: Any) -> float | None:
     return _parse_price(value)
 
 
+def _base64_decode(value: Any) -> str | None:
+    """Decode url-safe base64, padding it back on.
+
+    Bing strips the `=` padding and uses the url-safe alphabet (`-`/`_` for
+    `+`/`/`), which the standard decoder rejects outright — so both have to be
+    handled or every link comes back null.
+
+    `validate=True` is deliberate: without it the decoder silently DISCARDS
+    characters outside the alphabet, so an href that is not a wrapper at all
+    decodes to plausible-looking binary instead of failing, and the field ships
+    a wrong URL rather than an honest null.
+    """
+    raw = str(value)
+    padded = raw + "=" * (-len(raw) % 4)
+    # b64decode(validate=True) rather than urlsafe_b64decode: the latter has no
+    # validation and SILENTLY DISCARDS anything outside the alphabet, so an href
+    # that is not a wrapper decodes to plausible-looking bytes and the field
+    # ships a wrong URL instead of an honest null. altchars maps the url-safe
+    # pair back onto the standard one.
+    return base64.b64decode(padded.encode("ascii"), altchars=b"-_", validate=True).decode("utf-8")
+
+
 def _apply_post_process(
     value: Any,
     ops: list[PostProcess],
@@ -258,6 +281,8 @@ def _apply_post_process(
                 current = str(current).upper()
             elif op == "replace":
                 current = str(current).replace(str(args[0]), str(args[1]))
+            elif op == "base64_decode":
+                current = _base64_decode(current)
             else:  # pragma: no cover — guarded by Literal at validation
                 _warn(op, "unknown", f"field '{field_name}': unknown op '{op}'")
                 return None
