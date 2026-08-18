@@ -23,6 +23,7 @@ from src.browser.runner import (
     _capture_screenshot,
     classify_fetch,
     looks_like_captcha_or_block,
+    redirected_to_block,
     run_warmup,
 )
 from src.browser.fingerprint_profile import ResolvedFingerprint, resolve_fingerprint
@@ -311,6 +312,7 @@ class CamoufoxRunner:
         )
 
         applied_warmup: dict | None = None
+        warmup_error: str | None = None
         try:
             async with AsyncCamoufox(**opts) as browser:
                 # Unconditional: without it Playwright applies its own 1280x720
@@ -322,16 +324,23 @@ class CamoufoxRunner:
                 page = await browser.new_page(no_viewport=True)
                 if safe_headers:
                     await page.set_extra_http_headers(safe_headers)
-                applied_warmup = await run_warmup(
+                warmup_outcome = await run_warmup(
                     page, url, warmup,
                     timeout_ms=effective_timeout_ms,
                     default_dwell_ms=settings.warmup_dwell_ms,
                 )
+                applied_warmup = warmup_outcome.applied
+                warmup_error = warmup_outcome.error
                 resp = await page.goto(
                     url, wait_until=wait_until, timeout=effective_timeout_ms
                 )
                 selector_missing = False
-                if wait_for_selector:
+                # A selector a block page will never grow is not worth its
+                # deadline: measured on yandex_search, five blocked attempts of
+                # six already had page.url == /showcaptcha the moment goto
+                # returned, then spent the full 45s discovering it. This only
+                # declines to WAIT — the classifier below still decides.
+                if wait_for_selector and not redirected_to_block(url, page.url):
                     try:
                         await page.wait_for_selector(
                             wait_for_selector, timeout=effective_timeout_ms
@@ -408,6 +417,7 @@ class CamoufoxRunner:
                     applied_timezone=applied.get("tz"),
                     applied_accept_language=al_override or applied.get("al"),
                     applied_warmup=applied_warmup,
+                    warmup_error=warmup_error,
                     applied_fingerprint=fingerprint.as_meta(),
                 )
         except Exception as exc:  # pylint: disable=broad-except
@@ -422,6 +432,7 @@ class CamoufoxRunner:
                 error=f"{error_type}: {exc}",
                 element_status="no_screenshot",
                 applied_warmup=applied_warmup,
+                warmup_error=warmup_error,
                 # Reported on failure too: a refused launch is exactly when the
                 # profile is the prime suspect, and the error string names
                 # browserforge internals rather than the profile that chose them.

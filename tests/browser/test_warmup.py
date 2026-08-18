@@ -23,14 +23,20 @@ async def test_run_warmup_visits_origin_then_dwells():
     assert page.goto.call_args.args[0] == "https://yandex.ru/"
     page.wait_for_timeout.assert_awaited_once_with(2500)
     # Reports what actually ran: the resolved origin, not the requested config.
-    assert applied == {"type": "homepage", "url": "https://yandex.ru/", "dwell_ms": 2500}
+    assert applied.applied == {"type": "homepage", "url": "https://yandex.ru/", "dwell_ms": 2500}
+    assert applied.error is None
 
 
 @pytest.mark.asyncio
 async def test_run_warmup_noop_when_disabled_or_unknown_type():
     page = AsyncMock()
-    assert await run_warmup(page, "https://yandex.ru/s", None, timeout_ms=1, default_dwell_ms=1) is None
-    assert await run_warmup(page, "https://yandex.ru/s", {"type": "other"}, timeout_ms=1, default_dwell_ms=1) is None
+    for warmup in (None, {"type": "other"}):
+        outcome = await run_warmup(page, "https://yandex.ru/s", warmup,
+                                   timeout_ms=1, default_dwell_ms=1)
+        # Nothing applied AND no error: a warmup nobody asked for is not a
+        # failure, and conflating the two is what this contract exists to stop.
+        assert outcome.applied is None
+        assert outcome.error is None
     page.goto.assert_not_awaited()
 
 
@@ -38,9 +44,17 @@ async def test_run_warmup_noop_when_disabled_or_unknown_type():
 async def test_run_warmup_swallows_errors():
     page = AsyncMock()
     page.goto.side_effect = RuntimeError("boom")
-    # Must not raise, and reports None so callers don't claim a failed warmup ran.
-    assert await run_warmup(page, "https://yandex.ru/s", {"type": "homepage"},
-                            timeout_ms=1, default_dwell_ms=1) is None
+
+    outcome = await run_warmup(page, "https://yandex.ru/s", {"type": "homepage"},
+                               timeout_ms=1, default_dwell_ms=1)
+
+    # Must not raise, and must not claim a failed warmup ran...
+    assert outcome.applied is None
+    # ...but it must SAY it failed, naming where. That is the whole difference
+    # from the old `return None`, which made a warmup failing on every attempt
+    # indistinguishable from one that was never configured.
+    assert outcome.error is not None
+    assert "https://yandex.ru/" in outcome.error and "boom" in outcome.error
 
 
 @pytest.mark.asyncio
@@ -99,4 +113,5 @@ async def test_run_warmup_custom_visits_given_url():
     page.goto.assert_awaited_once()
     assert page.goto.call_args.args[0] == "https://warm.example/seed"
     page.wait_for_timeout.assert_awaited_once_with(2500)
-    assert applied == {"type": "custom", "url": "https://warm.example/seed", "dwell_ms": 2500}
+    assert applied.applied == {"type": "custom", "url": "https://warm.example/seed", "dwell_ms": 2500}
+    assert applied.error is None

@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.9] - 2026-08-17
+
+Anti-detection reliability release: a failed warmup is now visible, a blocked
+page no longer waits out its selector deadline, Bing's click-tracking links are
+unwrapped to their real destinations, and Amazon's throttle page is treated as
+the block it is. No API change.
+
+### Added
+
+- Bing organic results now unwrap Bing's click-tracking redirect links
+  (`bing.com/ck/a?...&u=a1<base64url>`) to the real destination URL. A field
+  that should have been unwrapped but yielded nothing raises a warning instead
+  of silently shipping the tracking link.
+
+### Changed
+
+- A failed warmup navigation is now reported (in `meta.applied_warmup`) instead
+  of being indistinguishable from a request that ran no warmup at all, so a
+  warmup that silently failed is visible rather than looking like a no-op.
+
+### Fixed
+
+- A page already classified as blocked/CAPTCHA no longer waits out the full
+  `wait_for_selector` timeout for an extraction anchor it will never grow: the
+  block is returned at once (roughly a 45s saving per blocked page) instead of
+  after the selector deadline.
+- Yandex's self-resolving browser-check interstitial is no longer mistaken for a
+  hard block, so it no longer burns a proxy rotation on a page that resolves
+  itself.
+- Amazon's "Sorry! Something went wrong!" throttle page is now classified as a
+  block, so it is rotated and retried instead of returned as a successful but
+  empty fetch that pollutes results. Guarded behind a page-size ceiling so a
+  normal product/search page cannot false-positive on the phrase.
+
 ## [0.1.8] - 2026-08-10
 
 Anti-detection and reliability release: a new `fingerprint_profile` request
