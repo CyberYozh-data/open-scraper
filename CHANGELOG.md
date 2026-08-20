@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.10] - 2026-08-20
+
+Chromium anti-detection release: the browser now exposes a working WebGL context
+that claims the host's actual GPU, closing a headless "no WebGL" tell and the
+SwiftShader-renderer tell behind it. Plus a README project-site link. No API
+change.
+
+### Added
+
+- Chromium WebGL now claims the host's actual GPU vendor/renderer, kept coherent
+  with the Windows fingerprint the browser already presents, reusing the
+  host-GPU detection from the Camoufox path (`HOST_GPU_VENDOR`). Without it the
+  restored context reported a generic SwiftShader/ANGLE software-renderer
+  string, itself an automation tell.
+
+### Fixed
+
+- Chromium returned a null WebGL context on GPU-less / headless hosts (Chrome
+  136+ dropped the automatic SwiftShader fallback), and "no WebGL context at
+  all" is a strong bot tell that real desktop Chrome never shows. A working
+  software WebGL context is restored via `--enable-unsafe-swiftshader`, gated by
+  the new `SOFTWARE_WEBGL` setting (default on, Chromium-only; revertible by env
+  without a code change).
+
+### Changed
+
+- README now links the project site (`data.cyberyozh.pro`) with per-service
+  pages for the scraper and crawler.
+
 ## [0.1.9] - 2026-08-17
 
 Anti-detection reliability release: a failed warmup is now visible, a blocked
