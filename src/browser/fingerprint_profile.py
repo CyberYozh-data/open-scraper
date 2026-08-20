@@ -97,6 +97,60 @@ _WEBGL_BY_OS_AND_VENDOR: dict[tuple[str, str], tuple[str, str]] = {
 }
 
 
+# (target OS, GPU vendor) -> (WebGL vendor, WebGL renderer), in CHROME's shape.
+#
+# Deliberately a second table rather than a reuse of the one above. Camoufox's
+# corpus is Firefox's: all 33 of its rows carry Gecko's ", or similar" suffix and
+# not one is in Chrome's `…, D3D11)` form, so borrowing a string across engines
+# would emit a Firefox-shaped renderer from a browser that has never produced
+# one — a new tell in place of the old. Its AMD ceiling is also a 2013 R9 200.
+#
+# Provenance matters more than plausibility here, because a renderer string that
+# no real machine emits is worse than an honest one. Both rows below are verbatim
+# from a real Chrome on Windows:
+#   amd   — a Chrome 128 / Windows 10 user's own paste in ruffle-rs/ruffle#18050.
+#           Same GPU model this host has (Radeon 780M); the device id differs
+#           (0x15BF Phoenix vs this box's 0x1900 Hawk Point) and that is on
+#           purpose: 0x15BF is attested in the wild, 0x1900 would be a string
+#           assembled here and attested nowhere.
+#   intel — this repo's own capture of a real Chrome. It lives in
+#           fingerprint-benchmarks/, which is excluded per-clone via
+#           .git/info/exclude and is therefore NOT in the tree: on a fresh clone
+#           that citation points at nothing, unlike the AMD one. Kept because the
+#           string predates this table and has served as the shipped claim, but
+#           it is the weaker provenance of the two.
+#
+# Captured on Chrome 128; the desktop UA here is rewritten to the running
+# engine's version (`_align_ua_to_engine`), currently 151. The ANGLE renderer
+# format has not changed across those, so the pair stays coherent — worth
+# re-checking if a future Chrome alters the string's shape.
+#
+# Only the rows a host here can actually resolve to are listed. An NVIDIA row
+# would need a string of the same provenance, and inventing one to fill the grid
+# is the exact failure this comment exists to prevent.
+# Named separately so it survives an edit to the table: it is both a row and the
+# fallback, and a subscript would turn deleting the row into an ImportError at
+# app boot instead of a red test.
+_ANGLE_WINDOWS_INTEL: tuple[str, str] = (
+    "Google Inc. (Intel)",
+    "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+)
+
+_ANGLE_BY_OS_AND_VENDOR: dict[tuple[str, str], tuple[str, str]] = {
+    ("windows", "amd"): (
+        "Google Inc. (AMD)",
+        "ANGLE (AMD, AMD Radeon(TM) 780M (0x000015BF) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    ),
+    ("windows", "intel"): _ANGLE_WINDOWS_INTEL,
+}
+
+# What to claim when the host's vendor has no row. Intel integrated graphics is
+# the most common desktop GPU class there is, so this blends rather than points —
+# but it is a crowd choice, not a statement about this machine, and that is the
+# whole difference from the rows above.
+_ANGLE_FALLBACK: tuple[str, str] = _ANGLE_WINDOWS_INTEL
+
+
 @dataclass(frozen=True)
 class ResolvedFingerprint:
     """What a profile name means, in Camoufox's own vocabulary.
@@ -156,6 +210,39 @@ def host_facts() -> tuple[str | None, str | None]:
             gpu_vendor = "apple"
 
     return os_family, gpu_vendor
+
+
+def chromium_webgl_identity() -> tuple[str, str]:
+    """`(vendor, renderer)` for Chromium's stealth WebGL override.
+
+    Chromium always claims Windows here — the desktop UA and the Client-Hints
+    override both say so — hence the fixed OS. The GPU follows the host, so a box
+    whose CPU is AMD stops claiming an Intel card while Camoufox on the same
+    machine claims AMD: one service reporting two different machines is a
+    cross-check nobody asked us to fail.
+
+    This says nothing about the CAPABILITIES behind the claim. Under SwiftShader
+    MAX_TEXTURE_SIZE is 8192 where every GPU named in the table reports 16384, so
+    the claim is a name over software rendering either way. Picking the name this
+    host could plausibly have is the part that is free; making the numbers agree
+    is a separate, much larger patch surface.
+    """
+    _, gpu_vendor = host_facts()
+    identity = _ANGLE_BY_OS_AND_VENDOR.get(("windows", gpu_vendor or ""))
+    if identity is None:
+        # Audible, because this is the reachable form of the divergence the
+        # function exists to close: with HOST_GPU_VENDOR=nvidia, Camoufox claims
+        # an NVIDIA card from its own table while Chromium falls back to Intel,
+        # and the two engines describe two machines again. Nothing here can fix
+        # that without a Chrome-shaped NVIDIA string of the same provenance as
+        # the rows above, so say it instead of hiding it.
+        log.warning(
+            "chromium WebGL: no Chrome-shaped string for vendor %r, claiming "
+            "Intel instead; Camoufox may claim a different GPU on this host",
+            gpu_vendor or "unknown",
+        )
+        return _ANGLE_FALLBACK
+    return identity
 
 
 def _host_aligned(profile: str, target_os: str | None) -> ResolvedFingerprint:

@@ -282,3 +282,104 @@ async def test_custom_viewport_overrides_preset_on_both_viewport_and_screen():
 
     assert captured["viewport"] == vp
     assert captured["screen"] == vp
+
+
+def _capture_launch_args(monkeypatch) -> dict[str, dict]:
+    """Fake out `async_playwright` and return the kwargs each engine launched with.
+
+    Keyed by engine name, so one helper serves both a single-engine and a
+    per-engine assertion. Written once because the two tests below drifted apart
+    when they each carried their own copy — different capture shapes for the
+    same job, and dead `__aenter__`/`__aexit__` that `start()` never calls.
+
+    Sets DISPLAY the way `test_headful_display_guard` does: these tests launch
+    headful because that is the deployed mode, no X server is ever contacted,
+    and without it they would pass only on a machine that has a display — CI
+    has none.
+    """
+    monkeypatch.setenv("DISPLAY", ":99")
+    captured: dict[str, dict] = {}
+
+    class _FakeBrowserType:
+        def __init__(self, name):
+            self.name = name
+
+        async def launch(self, **kwargs):
+            captured[self.name] = dict(kwargs)
+            return object()
+
+    class _FakePlaywright:
+        chromium = _FakeBrowserType("chromium")
+        firefox = _FakeBrowserType("firefox")
+        webkit = _FakeBrowserType("webkit")
+
+        async def stop(self):
+            pass
+
+    class _FakePlaywrightCM:
+        async def start(self):
+            return _FakePlaywright()
+
+    import src.browser.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "async_playwright", lambda: _FakePlaywrightCM())
+    return captured
+
+
+async def _start(engine: str) -> None:
+    runner = PlaywrightRunner(engine=engine, headless=False, block_assets=False, timeout_ms=30000)
+    runner._browser = None
+    await runner.start()
+
+
+@pytest.mark.asyncio
+async def test_chromium_enables_software_webgl(monkeypatch):
+    """Chromium must launch with --enable-unsafe-swiftshader; Firefox must not.
+
+    This container has no GPU (/dev/dri is absent) and the deployed config runs
+    real Google Chrome headful under Xvfb (CHROME_CHANNEL=chrome, HEADLESS=false).
+    Since Chrome M136 that combination no longer falls back to software WebGL on
+    its own, so `canvas.getContext('webgl')` returns null and every page sees a
+    browser with NO WebGL at all — a louder tell than software rendering, since
+    real desktop Chrome effectively always has a context. Measured on
+    bot.sannysoft.com before the flag: "Canvas has no webgl context", identical
+    with stealth on and off (playwright-stealth patches getParameter on the
+    prototype, so with no context its patch never runs).
+
+    Firefox/Gecko still falls back by itself and does not accept the flag.
+    """
+    captured = _capture_launch_args(monkeypatch)
+
+    for engine in ("chromium", "firefox", "webkit"):
+        await _start(engine)
+
+    assert "--enable-unsafe-swiftshader" in captured["chromium"].get("args", []), (
+        "Chromium has no GPU here and Chrome >= 136 will not fall back on its own"
+    )
+    for engine in ("firefox", "webkit"):
+        assert "--enable-unsafe-swiftshader" not in captured[engine].get("args", []), (
+            f"{engine} falls back to software WebGL by itself and takes no Chromium flags"
+        )
+
+
+@pytest.mark.asyncio
+async def test_software_webgl_setting_takes_the_flag_back(monkeypatch):
+    """SOFTWARE_WEBGL=false must drop the flag.
+
+    The flag JITs page-supplied shaders in a GPU process this service does not
+    sandbox. That trade is accepted by default because a NULL WebGL context is
+    an instant bot signal, but it has to be revertible by environment — a
+    fingerprint decision that can only be undone by editing code and
+    redeploying is not a decision anyone can make under pressure.
+    """
+    import src.browser.runner as runner_mod
+
+    captured = _capture_launch_args(monkeypatch)
+    monkeypatch.setattr(runner_mod.settings, "software_webgl", False)
+
+    await _start("chromium")
+
+    args = captured["chromium"].get("args", [])
+    assert "--enable-unsafe-swiftshader" not in args
+    # The other Chromium flags must survive the toggle: it governs WebGL only.
+    assert "--disable-blink-features=AutomationControlled" in args
