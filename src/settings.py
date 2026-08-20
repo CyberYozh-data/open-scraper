@@ -123,11 +123,15 @@ class Settings(BaseSettings):
         default=None,
         alias="HOST_GPU_VENDOR",
         description=(
-            "Override the GPU vendor the host-aligned profiles claim: amd, "
-            "intel, nvidia or apple. Unset means infer it from the CPU vendor in "
-            "/proc/cpuinfo, which is right on integrated graphics and wrong on a "
-            "discrete card — that is what this is for. The container cannot see "
-            "the GPU itself."
+            "Override the GPU vendor claimed by BOTH engines: Camoufox's "
+            "host-aligned profiles and Chromium's stealth WebGL override. "
+            "amd, intel, nvidia or apple. Unset means infer it from the CPU "
+            "vendor in /proc/cpuinfo, which is right on integrated graphics and "
+            "wrong on a discrete card — that is what this is for. The container "
+            "cannot see the GPU itself. Chromium only has Chrome-shaped strings "
+            "for amd and intel; nvidia and apple fall back to intel there (and "
+            "log a warning) while Camoufox still claims them, so on such a host "
+            "the two engines describe different GPUs."
         ),
     )
     webrtc_block: bool = Field(
@@ -138,6 +142,20 @@ class Settings(BaseSettings):
             "launching Chromium with --webrtc-ip-handling-policy=disable_"
             "non_proxied_udp. Set to false only if you need WebRTC features "
             "(video chat, RTCPeerConnection, etc.) inside scraped pages."
+        ),
+    )
+    software_webgl: bool = Field(
+        default=True,
+        alias="SOFTWARE_WEBGL",
+        description=(
+            "Launch Chromium with --enable-unsafe-swiftshader so pages get a "
+            "software WebGL context. On a GPU-less host a headful Chrome >= 136 "
+            "otherwise hands every page a NULL context, which anti-bots read as "
+            "a bot: real desktop Chrome effectively always has one. The cost is "
+            "that SwiftShader JITs page-supplied shaders inside a GPU process "
+            "this service does not sandbox, so set it to false to trade the "
+            "fingerprint back for that isolation. No effect on Camoufox, "
+            "Firefox or WebKit."
         ),
     )
 

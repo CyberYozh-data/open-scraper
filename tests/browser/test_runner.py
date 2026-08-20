@@ -128,7 +128,13 @@ class TestPlaywrightRunner:
                 call_kwargs = mock_playwright.chromium.launch.call_args[1]
                 assert call_kwargs["headless"] is True
                 # No WebRTC flags, but the anti-automation flag is always on.
-                assert call_kwargs["args"] == ["--disable-blink-features=AutomationControlled"]
+                # Asserted by membership rather than exact list equality: the
+                # WebRTC flags are what this test is about, and pinning the
+                # whole list makes every unrelated Chromium flag a failure here
+                # instead of in the test that owns it.
+                args = call_kwargs["args"]
+                assert "--disable-blink-features=AutomationControlled" in args
+                assert not any("webrtc" in a for a in args)
 
                 await runner.stop()
 

@@ -8,6 +8,7 @@ import math
 import os
 import re
 import time
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -26,6 +27,7 @@ from src.browser.page_io import read_content_settling_navigation
 from src.proxy.models import ProxyConfig
 from src.proxy.socks_bridge import open_socks_to_http_bridge
 from src.browser.geo_profile import resolve_profile
+from src.browser.fingerprint_profile import chromium_webgl_identity
 from src.schemas import ElementScreenshotStatus
 from src.settings import settings
 
@@ -36,30 +38,52 @@ log = logging.getLogger(__name__)
 # cross-check that advanced anti-bots (CreepJS/Cloudflare) flag. Override it with
 # a real Windows Chrome ANGLE/Direct3D renderer so the GPU identity matches the
 # rest of the fingerprint. Desktop preset is Windows; the value suits it.
-_stealth = Stealth(
-    webgl_vendor_override="Google Inc. (Intel)",
-    webgl_renderer_override=(
-        "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)"
-    ),
-    # These evasions patch navigator getters in JS, whose `.toString()` returns
-    # non-native source — an integrity tell that anti-bots (e.g. ServicePipe)
-    # probe directly. Disable them and supply the same values natively instead:
-    #   - user_agent / platform: set via CDP Emulation.setUserAgentOverride below,
-    #     which the engine applies at the protocol level (native getter preserved).
-    #   - vendor / plugins / mimeTypes: headless Chromium already reports the real
-    #     Chrome values ("Google Inc." + the PDF viewer plugins), so no spoof needed.
-    #   - languages: Playwright's context `locale` sets navigator.languages natively.
-    navigator_user_agent=False,
-    navigator_platform=False,
-    navigator_vendor=False,
-    navigator_plugins=False,
-    navigator_languages=False,
-    # Clear the matching *_override values too: with the evasions off they are
-    # unused, and leaving them set makes playwright_stealth warn on every start
-    # ("override provided but evasion disabled") — misleading log noise.
-    navigator_platform_override=None,
-    navigator_languages_override=None,
-)
+#
+# Which GPU it names follows the host rather than being fixed here, so this
+# machine's AMD silicon stops being reported as an Intel card while Camoufox on
+# the same box reports AMD.
+def _build_stealth(webgl_vendor: str, webgl_renderer: str) -> Stealth:
+    return Stealth(
+        webgl_vendor_override=webgl_vendor,
+        webgl_renderer_override=webgl_renderer,
+        # These evasions patch navigator getters in JS, whose `.toString()`
+        # returns non-native source — an integrity tell that anti-bots (e.g.
+        # ServicePipe) probe directly. Disable them and supply the same values
+        # natively instead:
+        #   - user_agent / platform: set via CDP Emulation.setUserAgentOverride
+        #     below, which the engine applies at the protocol level (native
+        #     getter preserved).
+        #   - vendor / plugins / mimeTypes: headless Chromium already reports the
+        #     real Chrome values ("Google Inc." + the PDF viewer plugins).
+        #   - languages: Playwright's context `locale` sets navigator.languages
+        #     natively.
+        navigator_user_agent=False,
+        navigator_platform=False,
+        navigator_vendor=False,
+        navigator_plugins=False,
+        navigator_languages=False,
+        # Clear the matching *_override values too: with the evasions off they
+        # are unused, and leaving them set makes playwright_stealth warn on every
+        # start ("override provided but evasion disabled") — misleading noise.
+        navigator_platform_override=None,
+        navigator_languages_override=None,
+    )
+
+
+@lru_cache(maxsize=1)
+def stealth_config() -> Stealth:
+    """The Stealth object every Chromium page is patched with.
+
+    Built on first use rather than at import so the GPU claim reaches the log:
+    `setup_logging` runs from inside `create_app` / the worker's startup, long
+    after this module is imported, so a line emitted at import time is dropped
+    on the floor. Cached because `host_facts()` cannot change under a running
+    process, and because rebuilding it per page would re-read /proc.
+    """
+    vendor, renderer = chromium_webgl_identity()
+    log.info("chromium webgl claim: vendor=%s renderer=%s", vendor, renderer)
+    return _build_stealth(vendor, renderer)
+
 
 # WebRTC leak-protection init script, kept as a standalone .js asset so it reads
 # and edits as JavaScript (syntax highlighting, no Python-string escaping of the
@@ -663,6 +687,37 @@ class PlaywrightRunner:
             launch_args: list[str] = []
             if self._engine == "chromium":
                 launch_args.append("--disable-blink-features=AutomationControlled")
+                # This container has no GPU (/dev/dri is absent), and since
+                # Chrome M136 a headful Chrome no longer falls back to software
+                # WebGL on its own. The deployed config is exactly that — real
+                # Google Chrome via CHROME_CHANNEL, headful under Xvfb — so
+                # every page was handed a NULL WebGL context. That is a louder
+                # tell than software rendering: real desktop Chrome effectively
+                # always has one. Measured on bot.sannysoft.com as "Canvas has
+                # no webgl context", identical with stealth on and off, because
+                # playwright-stealth patches getParameter on the prototype and
+                # with no context its patch never runs.
+                #
+                # On the headless paths Chrome still falls back on its own, but
+                # the flag is not inert there either: without it each context
+                # logs a deprecation warning, and Chromium calls the automatic
+                # fallback deprecated rather than permanent. One flag for every
+                # mode is therefore also the forward-compatible choice.
+                #
+                # WHAT IT COSTS. "unsafe" is not decoration: the flag re-enables
+                # SwiftShader's Subzero JIT, which compiles shaders from the
+                # scraped page to native code inside the GPU process — and this
+                # service renders caller-supplied URLs in a GPU process that runs
+                # --no-sandbox (Playwright's default; the container is root and
+                # cannot sandbox) with no egress guard on /scrape. Chromium
+                # removed the automatic fallback for exactly this reason.
+                # Accepted here because the alternative is a fingerprint every
+                # anti-bot reads instantly, and because the exposure is not new
+                # to this flag — the headless and bundled-Chromium paths already
+                # ran SwiftShader by automatic fallback. SOFTWARE_WEBGL=false
+                # takes it back without a code change if that trade goes bad.
+                if settings.software_webgl:
+                    launch_args.append("--enable-unsafe-swiftshader")
                 if settings.webrtc_block:
                     launch_args.extend([
                         "--webrtc-ip-handling-policy=disable_non_proxied_udp",
@@ -683,6 +738,17 @@ class PlaywrightRunner:
             # as a literal host and broke them (NS_ERROR_UNKNOWN_PROXY_HOST).
             if launch_args:
                 launch_kwargs["args"] = launch_args
+            # Logged BEFORE the launch, not after: a launch that raises (missing
+            # Chrome channel, dead Xvfb, OOM) is the other half of the silence
+            # this line exists for, and Playwright's exception names none of
+            # these values. The NULL-WebGL bug rendered every page wrong for an
+            # unknown number of days without a single line in the log, because a
+            # launch said nothing about itself. Safe to log in full: the proxy is
+            # per-context by design (see below), so no credential passes here.
+            log.info(
+                "launching browser: engine=%s channel=%s headless=%s args=%s",
+                self._engine, launch_kwargs.get("channel"), self.headless, launch_args,
+            )
             self._browser = await browser_type.launch(**launch_kwargs)
 
     async def stop(self) -> None:
@@ -928,7 +994,7 @@ class PlaywrightRunner:
 
             page = await context.new_page()
             if stealth and self._engine == "chromium":
-                await _stealth.apply_stealth_async(page)
+                await stealth_config().apply_stealth_async(page)
             elif stealth:
                 log.debug("stealth requested but skipped: not supported for engine=%r", self._engine)
 

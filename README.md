@@ -5,6 +5,11 @@
 A two-service scraping stack built on **Playwright**, with an optional Web
 tester and MCP exposure on both services.
 
+Project site: **[data.cyberyozh.pro](https://data.cyberyozh.pro)** — what each
+service does, in prose, plus the managed proxy pools this stack can use:
+[Yozh Scraper](https://data.cyberyozh.pro/software/yozh-scraper/) ·
+[Yozh Crawler](https://data.cyberyozh.pro/software/yozh-crawler/).
+
 | Service | Port | Docs | What it does |
 |---|---|---|---|
 | **Scraper** ([`src/`](src/README.md)) | `8000` | [src/README.md](src/README.md) | Async job API — renders a URL in a real browser, returns extracted fields / raw HTML / full-page screenshot. Built-in CyberYozh proxy integration. |
@@ -180,6 +185,15 @@ discrete card — override it with `HOST_GPU_VENDOR`
 (`amd`/`intel`/`nvidia`/`apple`). `meta.applied_fingerprint` reports what a
 scrape actually ran with, including when a profile degraded because Camoufox's
 GPU table had no row for the detected vendor.
+
+The same setting also picks the GPU **Chromium** claims through its stealth
+WebGL override, so one host does not describe itself as two different machines
+depending on which engine served the request. Chromium's table only holds
+Chrome-shaped strings for `amd` and `intel`; `nvidia` and `apple` fall back to
+the Intel claim there and log a warning, while Camoufox still claims them — on
+such a host the engines diverge again, and the log line is how you see it.
+Chromium's claim is not reported in `meta.applied_fingerprint` today; it is in
+the worker log as `chromium webgl claim: …`.
 
 The [visual tester](#visual-tester) exposes engine, resolution, device, stealth,
 the Camoufox fingerprint profile and proxy country in the scrape form. See
