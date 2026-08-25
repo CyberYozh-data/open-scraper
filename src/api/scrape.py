@@ -4,6 +4,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
+from src.queue.store import JobPagesUnreadable
 from src.scrape_service import (
     BatchSessionConflict,
     InternalFieldsNotAllowed,
@@ -96,10 +97,34 @@ async def scrape_results(job_id: str) -> JobResultsResponse:
         snap = await scrape_service.get_job_results_or_404(job_id)
     except JobNotFound as exc:
         raise HTTPException(status_code=404, detail="job_not_found") from exc
+    except JobPagesUnreadable as exc:
+        # Not 404: the job exists, and this response is required to carry its
+        # page specs, so there is nothing honest to render. Saying "not found"
+        # would send a caller looking for a job that is sitting right there.
+        # DELETE still cancels it.
+        #
+        # 500 rather than 4xx: the caller cannot resolve this and resubmitting
+        # never helps — Redis holds specs this build cannot parse, which is a
+        # server-side data-integrity fault. It is also the difference between
+        # paging someone and not: a 4xx reads as client fault and trips no
+        # server-error alert. The structured `detail` keeps it from looking like
+        # an unhandled crash.
+        #
+        # Logged here because the store raises without logging, and because one
+        # such job means every in-flight job across that deploy is affected.
+        log.warning(
+            "job %s: page %d unreadable; answering 500 job_spec_unreadable",
+            job_id, exc.index,
+        )
+        raise HTTPException(status_code=500, detail="job_spec_unreadable") from exc
     # Normalize: if no slots have been filled yet, render results as null to
     # preserve the old contract (in-progress jobs returned null, not [null, ...]).
+    # A degraded slot is filled — it just would not decode — so a job whose only
+    # slot is unreadable must NOT normalize to null: that is a finished job
+    # rendered as one still running, and a poller would never stop.
     raw = snap.results
-    results = raw if raw and any(r is not None for r in raw) else None
+    filled = bool(raw) and (any(r is not None for r in raw) or bool(snap.unreadable_slots))
+    results = raw if filled else None
     return JobResultsResponse(
         job_id=snap.job_id,
         status=snap.status,
@@ -108,6 +133,7 @@ async def scrape_results(job_id: str) -> JobResultsResponse:
         done=snap.done,
         error=snap.error,
         results=results,
+        unreadable_slots=snap.unreadable_slots or None,
     )
 
 

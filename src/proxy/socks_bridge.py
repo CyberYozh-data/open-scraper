@@ -30,6 +30,8 @@ from typing import AsyncIterator
 
 from python_socks.async_.asyncio import Proxy
 
+from src.utils.redaction import redact_url
+
 log = logging.getLogger(__name__)
 
 
@@ -128,14 +130,17 @@ async def open_socks_to_http_bridge(socks_url: str) -> AsyncIterator[str]:
     Yields ``http://127.0.0.1:PORT`` and tears the bridge down on exit.
     """
     if not socks_url.lower().startswith("socks5://"):
-        raise ValueError(f"bridge expects a socks5:// URL, got {socks_url!r}")
+        raise ValueError(f"bridge expects a socks5:// URL, got {redact_url(socks_url)!r}")
 
     port = _pick_free_port()
     server = await asyncio.start_server(
         _make_handler(socks_url), host="127.0.0.1", port=port,
     )
     local_url = f"http://127.0.0.1:{port}"
-    log.debug("socks bridge up: local=%s -> upstream=%s", local_url, socks_url)
+    # Never the raw URL: it carries `user:pass@`, and "it is only DEBUG" is one
+    # env var away from being INFO. Which upstream a bridge points at is the
+    # reason this line exists; the credentials are not.
+    log.debug("socks bridge up: local=%s -> upstream=%s", local_url, redact_url(socks_url))
 
     try:
         yield local_url

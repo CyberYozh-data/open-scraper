@@ -4,7 +4,14 @@ import asyncio
 import logging
 
 from src.queue.broker import QUEUE_NAME, is_inmemory_broker
-from src.queue.store import TERMINAL_STATUSES, JobMeta, JobSnapshot, get_job_store, pack_response
+from src.queue.store import (
+    TERMINAL_STATUSES,
+    JobMeta,
+    JobPagesUnreadable,
+    JobSnapshot,
+    get_job_store,
+    pack_response,
+)
 from src.queue.tasks import make_error_payload, scrape_page_task
 from src.schemas import BatchScrapeRequest, ScrapeRequest, ScrapeResponse
 from src.settings import settings
@@ -75,7 +82,19 @@ class ScrapeService:
 
     async def _cancel_unfilled(self, job_id: str) -> None:
         store = get_job_store()
-        snap = await store.get_full(job_id)
+        try:
+            snap = await store.get_full(job_id)
+        except JobPagesUnreadable:
+            # This runs inside the enqueue-failure handler, whose whole point is
+            # to surface the ORIGINAL failure. Raising here would replace it and
+            # leave the partial job non-terminal — losing both the reason and
+            # the convergence. Cancel without stubs and keep going.
+            log.warning(
+                "job %s: page specs unreadable while converging a failed enqueue; "
+                "cancelling without stubs", job_id,
+            )
+            await store.request_cancel(job_id, stub_payloads={})
+            return
         if snap is not None:
             await store.request_cancel(job_id, stub_payloads=self._stubs_for_unfilled(snap, "enqueue failed"))
 
@@ -128,6 +147,9 @@ class ScrapeService:
         return meta
 
     async def get_job_results_or_404(self, job_id: str) -> JobSnapshot:
+        # JobPagesUnreadable deliberately propagates: this response carries
+        # `pages`, so there is nothing honest to render, and the API answers
+        # with its own status rather than pretending the job never existed.
         snap = await get_job_store().get_full(job_id)
         if snap is None:
             raise JobNotFound(job_id)
@@ -145,7 +167,19 @@ class ScrapeService:
 
     async def request_cancel(self, job_id: str) -> bool:
         store = get_job_store()
-        snap = await store.get_full(job_id)
+        try:
+            snap = await store.get_full(job_id)
+        except JobPagesUnreadable:
+            # Cancel needs the page specs only to write error stubs into the
+            # unfilled slots. Without them the job still cancels — it just
+            # leaves those slots null, which is strictly better than the old
+            # answer, where an unreadable spec made the job permanently
+            # uncancellable and it sat until the TTL expired.
+            log.warning(
+                "job %s: cancelling without stubs, the page specs are unreadable",
+                job_id,
+            )
+            return await store.request_cancel(job_id, stub_payloads={})
         if snap is None:
             raise JobNotFound(job_id)
         return await store.request_cancel(job_id, stub_payloads=self._stubs_for_unfilled(snap, "cancelled"))
@@ -168,7 +202,20 @@ class ScrapeService:
             if meta is not None and meta.status in TERMINAL_STATUSES:
                 break
             await asyncio.sleep(0.15)
-        snap = await store.get_full(job_id)
+        try:
+            snap = await store.get_full(job_id)
+        except JobPagesUnreadable:
+            # `/search` reaches this path, and it polls for
+            # page_task_timeout_s + 60 — so it straddles a deploy by
+            # construction, and the blob it reads back here is a ScrapeRequest.
+            # A deploy that moves the REQUEST model does to this endpoint what a
+            # moved ScrapeResponse did to /results. An empty result set is the
+            # same answer a missing snapshot already gives; a 500 out of here
+            # would be the crash this commit exists to remove, one axis over.
+            log.warning(
+                "job %s: page specs unreadable; returning no results", job_id,
+            )
+            return []
         return snap.results if snap else []
 
 

@@ -34,10 +34,60 @@ jobs:
       # about what this buys: pylint's score is messages/statements, so at
       # ~4460 statements the threshold absorbs up to TWO new warning/refactor/
       # convention messages before it trips, and grows more tolerant as the
-      # codebase does. An ERROR fails immediately (weight 5), which is the
-      # guarantee worth relying on. Fixing the 15 and gating at 10 is the real
-      # answer; until then raise the floor as they go.
-      - run: python -m pylint --fail-under=9.96 src/
+      # codebase does. Fixing the 15 and gating at 10 is the real answer; until
+      # then raise the floor as they go.
+      #
+      # --fail-on=E is what makes "an error fails immediately" TRUE rather than
+      # arithmetically lucky. Measured on the crawler's tree: one E0602 moved
+      # the score 9.90 -> 9.86 and its floor still passed. This floor happens to
+      # sit close enough to trip today, but the comment above invites raising it
+      # later, and the first hundredth in the wrong direction opens the hole.
+      - run: python -m pylint --fail-under=9.96 --fail-on=E src/
+      # Scoped by [tool.mypy] in pyproject.toml to the typed envelope's surface
+      # and what reads or writes it. Configured in #86 with the note that it was
+      # "recorded before CI makes it a concern" — this is that concern arriving.
+      # It bites: the tree was RED when this step was written (playwright's stub
+      # for camoufox's `Browser | BrowserContext` union hid a real narrowing).
+      - run: python -m mypy
+
+  crawler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v7
+        with:
+          # 3.12, because yozh-crawler/Dockerfile is python:3.12-slim-bookworm.
+          # The other jobs pin 3.10 to match the playwright image the SCRAPER
+          # ships; that rationale does not transfer to this service.
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            yozh-crawler/requirements.txt
+            yozh-crawler/requirements-dev.txt
+      - run: pip install -r yozh-crawler/requirements-dev.txt
+      # open-crawler is the second production service — its own SSRF guard, its
+      # own result-contract validation — and until now not one of its 212 tests
+      # had ever run in CI, so the pipeline could be green while it was broken.
+      # Selects on the marker pytest.ini registers: registering it does not
+      # exclude anything, the job has to ask — same as the scraper's gate.
+      - run: pytest -m "not e2e"
+        working-directory: yozh-crawler
+      # --rcfile is not optional: pylint discovers a config by walking up from
+      # the working directory only through packages, and yozh-crawler has no
+      # __init__.py, so from here the repo's .pylintrc is invisible. Judged by
+      # pylint's defaults this tree scores 9.01 and reports an E1101 on a
+      # pydantic Field access; judged by the rules the rest of the repo uses,
+      # 9.90 and no errors. Same code, different yardstick.
+      #
+      # 9.85 leaves room for roughly five convention messages over 1327
+      # statements. It does NOT trip on a single error: measured, an injected
+      # E0602 scores 9.86 and the floor passes — one error costs ~0.038 while
+      # the headroom is ~0.052. --fail-on=E is what catches the class the score
+      # cannot, and the two compose: the floor holds the line on style drift,
+      # the flag on code that cannot run.
+      - run: python -m pylint --rcfile=../.pylintrc --fail-under=9.85 --fail-on=E src/
+        working-directory: yozh-crawler
 
   test:
     runs-on: ubuntu-latest

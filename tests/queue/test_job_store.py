@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 
 import fakeredis.aioredis
 import pytest
@@ -9,6 +10,7 @@ import pytest_asyncio
 from src.queue.store import (
     SAFETY_TTL_S,
     JobNotInStore,
+    JobPagesUnreadable,
     RedisJobStore,
     pack_payload,
     unpack_payload,
@@ -273,3 +275,134 @@ async def test_queue_depth_none_lag_counts_only_pending(store, mocker):
         new=AsyncMock(return_value=[{"name": _GROUP, "lag": None, "pending": 2}]),
     )
     assert await store.queue_depth(_STREAM) == 2
+
+
+class TestOneBadSlotDoesNotSinkTheJob:
+    """A single unreadable result blob must cost that slot, not the whole job.
+
+    `get_full` backs three things: the results endpoint, DELETE (cancel) and the
+    synchronous run_and_wait. Validating every blob in one unguarded loop meant
+    one bad blob took all three down until the TTL expired — so the caller could
+    neither read the nine good pages nor cancel what was left. The repo's stated
+    invariant is the opposite: degrade the field, keep the page.
+
+    Reachable without malice: a rolling deploy changes ScrapeResponse while jobs
+    written by the previous build are still in Redis, and this host deploys by
+    swapping the checkout under a running worker.
+    """
+
+    async def test_a_corrupt_blob_costs_only_its_own_slot(self, store):
+        job_id = await store.create([_page(), _page(), _page()])
+        await store.write_slot(job_id, 0, pack_payload(_result_dict(0)))
+        await store.write_slot(job_id, 2, pack_payload(_result_dict(2)))
+        await store.client.hset(f"job:{job_id}:results", "1", b"not gzip, not json, not anything")
+
+        snap = await store.get_full(job_id)
+
+        assert snap is not None, "one bad blob must not read as a missing job"
+        assert snap.results[0] is not None and snap.results[0].request_id == "req_0"
+        assert snap.results[2] is not None and snap.results[2].request_id == "req_2"
+        assert snap.results[1] is None, "the unreadable slot degrades to empty"
+
+    async def test_a_schema_skewed_blob_degrades_too(self, store):
+        """The likelier shape: readable payload, model has moved on."""
+        job_id = await store.create([_page(), _page()])
+        await store.write_slot(job_id, 0, pack_payload(_result_dict(0)))
+        await store.write_slot(job_id, 1, pack_payload({"totally": "different"}))
+
+        snap = await store.get_full(job_id)
+
+        assert snap is not None
+        assert snap.results[0] is not None
+        assert snap.results[1] is None
+
+    @pytest.mark.parametrize("label,blob", [
+        # Every shape a stored blob can actually take on the way back, because
+        # the first two versions of this guard each missed one: BadGzipFile is
+        # an OSError rather than a ValueError, and zlib.error / EOFError inherit
+        # from neither. Truncation is the likeliest physical corruption of a
+        # Redis value, so it is the one that must not be theoretical.
+        ("not gzip at all", b"garbage, plain and simple"),
+        ("gzip header, corrupt deflate body", gzip.compress(b'{"a": 1}')[:10] + b"\xff" * 40),
+        ("gzip truncated mid-stream", gzip.compress(b'{"a": 1}' * 50)[:12]),
+        ("gzip of non-JSON", gzip.compress(b"this is not json")),
+        ("gzip of JSON that is not an object", gzip.compress(b"null")),
+    ])
+    async def test_every_undecodable_shape_costs_only_its_slot(self, store, label, blob):
+        job_id = await store.create([_page(), _page()])
+        await store.write_slot(job_id, 0, pack_payload(_result_dict(0)))
+        await store.client.hset(f"job:{job_id}:results", "1", blob)
+
+        snap = await store.get_full(job_id)
+
+        assert snap is not None, label
+        assert snap.results[0] is not None, label
+        assert snap.results[1] is None, label
+        assert snap.unreadable_slots == [1], label
+
+    @pytest.mark.parametrize("field", ["bogus", "", "7", "-1", "1.5"])
+    async def test_a_field_name_that_is_not_a_slot_is_skipped(self, store, field):
+        """The field NAME comes out of the same corrupt hash as the value.
+
+        Parsed outside the guard, a non-numeric name raised ValueError — the
+        original bug verbatim — an out-of-range one raised IndexError, and a
+        NEGATIVE one silently landed a plausible result in the last slot, which
+        is the misalignment the page branch refuses to allow.
+        """
+        job_id = await store.create([_page(), _page()])
+        await store.write_slot(job_id, 0, pack_payload(_result_dict(0)))
+        await store.client.hset(f"job:{job_id}:results", field, pack_payload(_result_dict(99)))
+
+        snap = await store.get_full(job_id)
+
+        assert snap is not None
+        assert snap.results[0] is not None and snap.results[0].request_id == "req_0"
+        assert snap.results[1] is None, f"{field!r} must not be placed anywhere"
+        assert snap.unreadable_slots == []
+
+    async def test_the_warning_names_the_job_and_slots_but_never_the_payload(
+        self, store, caplog,
+    ):
+        """One line per read, and no page content in it.
+
+        Per-slot logging amplified a schema-skew deploy by the caller's polling
+        rate, and payload text in an operator- or caller-visible field is how a
+        scan gets published with a false verdict.
+        """
+        job_id = await store.create([_page(), _page(), _page()])
+        secret = "SENSITIVE-PAGE-TEXT"
+        # Schema-skewed, NOT merely undecodable: a blob that dies at json.loads
+        # never reaches pydantic, and pydantic is where the danger is —
+        # str(ValidationError) embeds the offending input verbatim, so a future
+        # `log.warning(..., exc)` here would put page content in operator logs.
+        # This shape makes that regression fail the test instead of passing it.
+        for i in (0, 1):
+            await store.write_slot(
+                job_id, i, pack_payload(_result_dict(i, took_ms=secret)),
+            )
+
+        with caplog.at_level("WARNING"):
+            await store.get_full(job_id)
+            await store.get_full(job_id)
+
+        lines = [r.getMessage() for r in caplog.records if job_id in r.getMessage()]
+        assert len(lines) == 2, f"one line per read, got {len(lines)}: {lines}"
+        assert "[0, 1]" in lines[0]
+        assert secret not in caplog.text
+
+    async def test_a_corrupt_page_is_reported_as_itself_not_as_absence(self, store):
+        """Pages cannot degrade to None: `results` is index-aligned with them.
+
+        Dropping one would shift every later slot, which is the silent
+        misalignment this codebase has been bitten by before. But the job DOES
+        exist, and answering "absent" is what left it uncancellable — so the
+        store says which page, and the callers decide what that means.
+        """
+        job_id = await store.create([_page(), _page()])
+        await store.client.hset(f"job:{job_id}:pages", "1", b"{not valid json")
+
+        with pytest.raises(JobPagesUnreadable) as caught:
+            await store.get_full(job_id)
+
+        assert caught.value.index == 1
+        assert caught.value.job_id == job_id

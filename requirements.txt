@@ -24,7 +24,14 @@ mcp>=1.28.1,<2
 python-socks[asyncio]>=2.8
 # Floor >=1.83.7: excludes CVE-2026-42208 (SQLi, CVSS 9.3) and the
 # compromised 1.82.7/1.82.8 supply-chain releases (March 2026 incident).
-litellm>=1.83.7
+# Upper bound, not a floor alone: 1.98.0 imports `NotRequired` from `typing`
+# unguarded (llms/anthropic/.../context_management/editors/compact.py), which
+# only exists from 3.11 — so `import litellm` raises on the 3.10 this project
+# pins, and CI went red on main the first time a fresh resolve picked it up.
+# 1.97.0 is the last release that imports on 3.10; verified by installing each.
+# Same shape as the mcp<2 bound below and for the same reason: a floor alone
+# lets a breaking major in on the next clean install or image build.
+litellm>=1.83.7,<1.98
 taskiq>=0.11
 taskiq-redis>=1.0
 redis>=5.0

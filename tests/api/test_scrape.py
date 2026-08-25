@@ -521,3 +521,122 @@ class TestScrapeCancelEndpoint:
         response = client.delete("/api/v1/scrape/job_missing")
         assert response.status_code == 404
         assert response.json()["detail"] == "job_not_found"
+
+
+class TestDegradedSlotsReachTheCaller:
+    """What a caller sees when a stored result will not decode.
+
+    The store degrades such a slot to None so the readable pages survive. That
+    is only half the fix: rendered naively, `results: null` on a one-page job is
+    indistinguishable from "still running", and the sibling law-checker reads a
+    null results list as "no content" without logging anything — which is how a
+    paid-for scrape turns into a wrong published verdict.
+    """
+
+    def test_an_unreadable_slot_is_named_and_the_job_does_not_look_pending(self, client):
+        import gzip
+
+        store = get_job_store()
+        job_id = _run(store.create([ScrapeRequest(url="https://example.com")]))
+        _run(store.client.hset(f"job:{job_id}:results", "0", gzip.compress(b"not json")))
+
+        body = client.get(f"/api/v1/scrape/{job_id}/results").json()
+
+        assert body["unreadable_slots"] == [0]
+        # The slot is FILLED — it just would not decode — so the envelope must
+        # not normalize to "nothing yet", or a poller waits for a result that
+        # is never coming.
+        assert body["results"] == [None]
+
+    def test_a_healthy_job_never_grows_the_field(self, client):
+        store = get_job_store()
+        job_id = _run(store.create([ScrapeRequest(url="https://example.com")]))
+        payload = ScrapeResponse(
+            request_id="req_ok", took_ms=1,
+            meta=ScrapeMeta(url="https://example.com", device="desktop", proxy_type="none"),
+        )
+        _run(store.write_slot(job_id, 0, pack_response(payload)))
+
+        body = client.get(f"/api/v1/scrape/{job_id}/results").json()
+
+        assert body["unreadable_slots"] is None, "the additive field stays null on a healthy job"
+        assert body["results"][0]["request_id"] == "req_ok"
+
+    def test_such_a_job_can_still_be_cancelled(self, client):
+        """The harm being fixed: it used to answer 404 and sit until the TTL."""
+        store = get_job_store()
+        job_id = _run(store.create([ScrapeRequest(url="https://example.com")]))
+        _run(store.client.hset(f"job:{job_id}:pages", "0", b"{not json"))
+
+        response = client.delete(f"/api/v1/scrape/{job_id}")
+
+        assert response.status_code == 200
+        assert response.json()["cancelled"] is True
+        assert _run(store.get_meta(job_id)).cancelled is True
+
+
+class TestEveryGetFullCallerSurvivesAnUnreadableSpec:
+    """One exception, four call sites — two of them were missed the first time.
+
+    `get_full` backs the results endpoint, cancel, run_and_wait and the
+    enqueue-failure convergence. Introducing JobPagesUnreadable without wiring
+    all four turned a crash on one endpoint into a crash on another: /search
+    polls through run_and_wait for page_task_timeout_s + 60, so it straddles a
+    deploy by construction, and the blob it reads back there is a ScrapeRequest.
+    """
+
+    def test_run_and_wait_returns_nothing_instead_of_raising(self, client, mocker, caplog):
+        """/search reaches get_full through here, and caught nothing."""
+        from src.queue.store import JobPagesUnreadable
+        from src.scrape_service import scrape_service
+
+        store = get_job_store()
+        mocker.patch.object(
+            type(store), "get_full",
+            side_effect=JobPagesUnreadable("req_x", 0),
+        )
+
+        with caplog.at_level("WARNING"):
+            results = _run(scrape_service.run_and_wait(
+                [ScrapeRequest(url="https://example.com")], timeout_s=0.01,
+            ))
+
+        assert results == [], "an unreadable spec must not become a 500 on /search"
+        assert any(
+            "page specs unreadable" in r.getMessage() for r in caplog.records
+        ), caplog.text
+
+    def test_the_results_endpoint_logs_before_it_answers_500(self, client, caplog):
+        """A 500 that says nothing leaves ops blind to a corrupt spec.
+
+        One such job means Redis holds specs this build cannot parse, i.e. every
+        in-flight job across that deploy is affected — the loudest thing in the
+        system, and it used to emit nothing at any level.
+        """
+        store = get_job_store()
+        job_id = _run(store.create([ScrapeRequest(url="https://example.com")]))
+        _run(store.client.hset(f"job:{job_id}:pages", "0", b"{not json"))
+
+        with caplog.at_level("WARNING"):
+            response = client.get(f"/api/v1/scrape/{job_id}/results")
+
+        assert response.status_code == 500, "not 404: the job exists and is cancellable"
+        assert response.json()["detail"] == "job_spec_unreadable"
+        assert any(job_id in r.getMessage() for r in caplog.records), caplog.text
+
+    def test_a_failed_enqueue_still_converges_the_job(self, client, mocker):
+        """_cancel_unfilled runs inside the enqueue-failure handler.
+
+        Raising there would replace the original failure with this one and leave
+        the partial job non-terminal — losing both the reason and the
+        convergence that handler exists to provide.
+        """
+        from src.scrape_service import scrape_service
+
+        store = get_job_store()
+        job_id = _run(store.create([ScrapeRequest(url="https://example.com")]))
+        _run(store.client.hset(f"job:{job_id}:pages", "0", b"{not json"))
+
+        _run(scrape_service._cancel_unfilled(job_id))
+
+        assert _run(store.get_meta(job_id)).cancelled is True

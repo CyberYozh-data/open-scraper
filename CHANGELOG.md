@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.11] - 2026-08-24
+
+Reliability and hardening release: partial job results survive one unreadable
+slot, self-heal can no longer overwrite a working preset with a degraded one,
+the credentialed login is masked like every other page, and proxy credentials
+are kept out of logs and error bodies. The only API change is a new
+`unreadable_slots` field on the results response.
+
+### Added
+
+- The job results response carries `unreadable_slots`. A job with one
+  corrupt or schema-skewed result slot now returns its other pages (HTTP 200)
+  and names the bad slot, instead of the whole job failing with a 500 and
+  becoming un-cancellable until its TTL expires.
+
+### Changed
+
+- The login-replay page is masked with the same host-aligned WebGL/GPU,
+  native-looking `navigator`, and Client-Hints (`Sec-CH-UA`) as the main fetch
+  path, via a shared page-preparation helper. A credentialed login no longer
+  submits a contradictory fingerprint (previously a macOS GPU and a
+  `HeadlessChrome` Client-Hint under a Windows user agent).
+
+### Fixed
+
+- Self-heal can no longer persist a degraded preset over a working one. It now
+  contributes only the regenerated selector (and its dialect), keeping the
+  preset's `all` / `attr` / `post_process` and required fields, and it is
+  graded against the original contract — so a heal that returns a bare string
+  where a coerced list belongs is no longer counted as a recovery. It also
+  never heals from a transient 5xx error page. This closes a class of silent
+  preset corruption.
+
+### Security
+
+- Proxy credentials are kept out of logs, error messages and 502 response
+  bodies. The SOCKS bridge, the rotating-credentials response and the username
+  log no longer emit `user:pass`; a shared redactor masks proxy URLs while
+  preserving `host:port` for diagnostics.
+- `litellm` is bounded `<1.98`: 1.98.0 imports `NotRequired` from `typing`
+  unguarded and fails to import on the Python 3.10 this project targets, so a
+  fresh install or image build would produce a container that cannot start.
+
 ## [0.1.10] - 2026-08-20
 
 Chromium anti-detection release: the browser now exposes a working WebGL context

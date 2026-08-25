@@ -14,6 +14,7 @@ from src.queue.broker import broker
 from src.queue.store import get_job_store, init_job_store
 from src.sessions.store import get_session_store, init_session_store
 from src.settings import settings, setup_logging
+from src.utils.redaction import redact_url
 
 _LEGACY_ENVS = ("JOBS_ENABLED", "JOB_RESULT_MAX", "JOB_TIMEOUT_MS")
 
@@ -33,7 +34,7 @@ async def lifespan(app: FastAPI):
     # Stale-pending reclaim now runs as the `reclaim_stale` scheduled task,
     # driven by the taskiq scheduler process — not an in-process loop here.
     background = [asyncio.create_task(_sessions_gc_loop())]
-    log.info("api up: redis=%s queue_maxsize=%d", settings.redis_url, settings.queue_maxsize)
+    log.info("api up: redis=%s queue_maxsize=%d", redact_url(settings.redis_url), settings.queue_maxsize)
 
     yield
 
