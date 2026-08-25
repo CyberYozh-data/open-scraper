@@ -8,8 +8,33 @@ from src.proxy.base import ProxyFailure, ProxyLease
 from src.proxy.cyberyozh.client import CyberYozhClient, OrderedProxy
 from src.proxy.models import ProxyConfig
 from src.settings import settings
+from src.utils.redaction import redact_url
 
 log = logging.getLogger(__name__)
+
+
+def _split_rotating_credentials(line: str) -> tuple[str, str, str]:
+    """`user:pass@host:port` -> (server, username, password), logged safely.
+
+    The username was logged in the clear on every parse, four lines under a
+    comment saying credentials must never reach logs or 502 bodies. On this
+    provider the username is not a mere identifier either — it encodes the
+    session and geo targeting, so it is the half worth stealing. Lengths keep
+    what the line was actually used for (spotting an empty or truncated half)
+    without carrying the value.
+    """
+    if "@" not in line:
+        raise RuntimeError("Invalid credential format (no @)")
+    auth_part, location_part = line.rsplit("@", 1)
+    if ":" not in auth_part:
+        raise RuntimeError("Invalid auth format (no :)")
+    username, password = auth_part.split(":", 1)
+    server = f"http://{location_part}"
+    log.info(
+        "parsed rotating credentials: server=%s, username_len=%d, password_len=%d",
+        server, len(username), len(password),
+    )
+    return server, username, password
 
 
 def normalize_proxy_raw_type(proxy_type_raw: str) -> str:
@@ -196,7 +221,7 @@ class CyberYozhProxyProvider:
             port = proxy.connection_port
 
             if not host or not port:
-                log.warning("connection_host/port missing, parsing url=%s", proxy.url)
+                log.warning("connection_host/port missing, parsing url=%s", redact_url(proxy.url))
                 clean_url = proxy.url.replace("socks5_http://", "http://")
                 parsed_url = urlparse(clean_url)
                 host = parsed_url.hostname
@@ -205,7 +230,7 @@ class CyberYozhProxyProvider:
             log.debug("rotating proxy: host=%s, port=%s", host, port)
 
             if not host or not port:
-                raise RuntimeError(f"missing host/port: url={proxy.url}")
+                raise RuntimeError(f"missing host/port: url={redact_url(proxy.url)}")
 
             src_payload = {
                 "connection_login": proxy.login,
@@ -269,23 +294,7 @@ class CyberYozhProxyProvider:
 
             # Never embed the raw credential string in errors or logs — these
             # messages travel into HTTP 502 details and service logs.
-            if "@" not in creds[0]:
-                raise RuntimeError("Invalid credential format (no @)")
-
-            auth_part, location_part = creds[0].rsplit("@", 1)
-
-            if ":" not in auth_part:
-                raise RuntimeError("Invalid auth format (no :)")
-
-            username, password = auth_part.split(":", 1)
-            server = f"http://{location_part}"
-
-            log.info(
-                "parsed rotating credentials: server=%s, username=%s, password_len=%d",
-                server,
-                username,
-                len(password)
-            )
+            server, username, password = _split_rotating_credentials(creds[0])
 
             return ProxyLease(
                 config=ProxyConfig(

@@ -179,6 +179,63 @@ def _navigator_platform_for_ua(user_agent: str) -> str:
     return "Linux x86_64"
 
 
+async def apply_page_masking(
+    context: BrowserContext, page: Any, *, engine: str, stealth: bool
+) -> None:
+    """Everything a freshly opened page needs before a target sees it.
+
+    Extracted so there is ONE of it. The login-replay path had its own copy that
+    was a bare `Stealth()` — playwright-stealth's macOS defaults under our
+    Windows UA, the navigator JS patches this repo deliberately disables because
+    their toString leaks, and no Client-Hints alignment at all. That was the
+    credential submit: the request where being flagged costs an account rather
+    than a retry, masked worse than every ordinary scrape around it.
+    """
+    if stealth and engine == "chromium":
+        await stealth_config().apply_stealth_async(page)
+    elif stealth:
+        log.debug("stealth requested but skipped: not supported for engine=%r", engine)
+
+    # Align Client Hints with the spoofed UA: Playwright's UA override leaves
+    # the real headless metadata, so Sec-CH-UA otherwise leaks "HeadlessChrome"
+    # + the real version. Chromium only; per-page CDP. Non-fatal: any failure
+    # (incl. building the metadata) is swallowed.
+    if engine != "chromium":
+        return
+    try:
+        ua = getattr(context, "_applied_user_agent", None)
+        ua_metadata = _chrome_ua_metadata(ua) if isinstance(ua, str) else None
+        if ua_metadata is None:
+            # The one no-op that actually happens in production, and it used to
+            # be the only silent one: the mobile preset is an iPhone Safari UA,
+            # `_chrome_ua_metadata` returns None for it, and the whole override
+            # below is skipped. Measured on the wire for that pin: Sec-CH-UA
+            # still says "HeadlessChrome" (real iOS Safari sends none at all)
+            # and navigator.platform stays Linux x86_64 under an iPhone UA.
+            # Pre-existing on both paths and not fixed here — but no longer
+            # invisible, because the except clause below argues that exact case
+            # is worth surfacing.
+            log.warning(
+                "Client-Hints override skipped: no Chrome metadata for ua=%r "
+                "(Sec-CH-UA may leak HeadlessChrome and navigator.platform will "
+                "not match)", ua,
+            )
+        else:
+            cdp = await context.new_cdp_session(page)
+            await cdp.send("Emulation.setUserAgentOverride", {
+                "userAgent": ua,
+                # Native navigator.platform (replaces the disabled stealth
+                # navigator_platform JS patch that leaked its source via
+                # toString).
+                "platform": _navigator_platform_for_ua(ua),
+                "userAgentMetadata": ua_metadata,
+            })
+    except Exception as exc:  # pylint: disable=broad-except
+        # Anti-bot-relevant: a silent no-op re-leaks "HeadlessChrome" in
+        # Sec-CH-UA and gets scrapes blocked, so surface it.
+        log.warning("Client-Hints override failed (Sec-CH-UA may leak HeadlessChrome): %s", exc)
+
+
 _CHROME_UA_VERSION_RE = re.compile(r"Chrome/\d+(?:\.\d+)*")
 
 
@@ -993,33 +1050,9 @@ class PlaywrightRunner:
                     log.warning("failed to add cookies: %s", exc)
 
             page = await context.new_page()
-            if stealth and self._engine == "chromium":
-                await stealth_config().apply_stealth_async(page)
-            elif stealth:
-                log.debug("stealth requested but skipped: not supported for engine=%r", self._engine)
-
-            # Align Client Hints with the spoofed UA: Playwright's UA override
-            # leaves the real headless metadata, so Sec-CH-UA otherwise leaks
-            # "HeadlessChrome" + the real version. Chromium only; per-page CDP.
-            # Non-fatal: any failure (incl. building the metadata) is swallowed.
-            if self._engine == "chromium":
-                try:
-                    ua = getattr(context, "_applied_user_agent", None)
-                    ua_metadata = _chrome_ua_metadata(ua) if isinstance(ua, str) else None
-                    if ua_metadata is not None:
-                        cdp = await context.new_cdp_session(page)
-                        await cdp.send("Emulation.setUserAgentOverride", {
-                            "userAgent": ua,
-                            # Native navigator.platform (replaces the disabled
-                            # stealth navigator_platform JS patch that leaked its
-                            # source via toString).
-                            "platform": _navigator_platform_for_ua(ua),
-                            "userAgentMetadata": ua_metadata,
-                        })
-                except Exception as exc:  # pylint: disable=broad-except
-                    # Anti-bot-relevant: a silent no-op re-leaks "HeadlessChrome"
-                    # in Sec-CH-UA and gets scrapes blocked, so surface it.
-                    log.warning("Client-Hints override failed (Sec-CH-UA may leak HeadlessChrome): %s", exc)
+            await apply_page_masking(
+                context, page, engine=self._engine, stealth=stealth,
+            )
         except BaseException:
             await _teardown()
             raise

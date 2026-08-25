@@ -19,6 +19,7 @@ from src.browser.ephemeral_runner import EphemeralPlaywrightRunner
 from src.browser.login_runner import LoginRunner
 from src.proxy.base import ProxyConfigError
 from src.proxy.resolver import proxy_resolver
+from src.browser.runner import apply_page_masking
 from src.queue import scrape_runner
 from src.queue.broker import broker
 from src.queue.reaper import reclaim_once
@@ -401,11 +402,20 @@ async def _run_login(runner, job: dict[str, Any]) -> dict[str, Any]:
             viewport=session_pin.get("viewport"),
         )
         page = await context.new_page()
-        try:
-            from playwright_stealth import Stealth  # type: ignore
-            await Stealth().apply_stealth_async(page)
-        except Exception:  # pylint: disable=broad-except
-            pass
+        # The same masking an ordinary scrape gets, from the same helper. This
+        # used to be a bare `Stealth()` with its failures swallowed: macOS GPU
+        # defaults under a Windows UA, the toString-leaking navigator patches
+        # the scrape path disables, and Sec-CH-UA still announcing
+        # HeadlessChrome — on the one request where being flagged costs the
+        # account rather than a retry.
+        # `login_task` always builds the pooled chromium runner, and any other
+        # runner would already have died on `_new_context` above — neither
+        # Camoufox nor the ephemeral runner has that method. So read the engine
+        # directly rather than defending with a fallback that cannot fire and
+        # implies engines this path does not support.
+        await apply_page_masking(
+            context, page, engine=runner._engine, stealth=True,
+        )
 
         login_runner = LoginRunner()
         script = LoginScript.model_validate(script_dict)

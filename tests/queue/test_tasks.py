@@ -569,3 +569,67 @@ async def test_an_empty_error_still_names_a_failure():
     """
     assert ScrapeErr(error="").error == "worker_failed"
     assert ScrapeErr(error="real reason").error == "real reason"
+
+
+async def test_login_replay_gets_the_same_masking_as_a_scrape(monkeypatch):
+    """The credential submit is the most scrutinised request we ever make.
+
+    It ran under a BARE `Stealth()`: playwright-stealth's macOS defaults (Intel
+    Iris GPU) under our Windows UA and Win32 platform, the navigator JS patches
+    the scrape path deliberately disables because their toString leaks, and no
+    Client-Hints alignment at all — so Sec-CH-UA still announced HeadlessChrome
+    on the one request where being flagged costs an account, not a retry.
+
+    Ordering is asserted, not just the call: stealth is an init script, so
+    masking applied AFTER the submit lands on the next navigation and protects
+    nothing. And the CONTEXT is asserted, because the Client-Hints half reads
+    the applied UA off it — hand it the wrong object and that half silently
+    does nothing. Both of those survived an earlier version of this test.
+    """
+    calls: list[tuple] = []
+
+    async def _fake_masking(context, page, *, engine, stealth):
+        calls.append(("mask", context, page, engine, stealth))
+
+    monkeypatch.setattr(tasks, "apply_page_masking", _fake_masking)
+    monkeypatch.setattr(
+        tasks.proxy_resolver, "open_session",
+        AsyncMock(return_value=MagicMock(current_proxy=MagicMock(return_value=None))),
+    )
+    monkeypatch.setattr(
+        tasks.scrape_runner, "apply_default_proxy_country",
+        MagicMock(return_value=None),
+    )
+
+    page = MagicMock()
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+    runner = MagicMock()
+    runner._engine = "chromium"
+    runner.start = AsyncMock()
+    runner.resolve_proxy = AsyncMock(return_value=(None, None))
+    runner._new_context = AsyncMock(return_value=context)
+
+    async def _replay(_self, **kwargs):  # patched onto the class, so `self` arrives positionally
+        calls.append(("replay",))
+        return MagicMock(model_dump=MagicMock(return_value={})), {}
+
+    monkeypatch.setattr(tasks.LoginRunner, "replay", _replay)
+    monkeypatch.setattr(
+        tasks.LoginScript, "model_validate", MagicMock(return_value=MagicMock()),
+    )
+
+    envelope = await tasks._run_login(runner, {
+        "session_pin": {"proxy_type": "none", "device": "desktop"},
+        "script": {}, "creds": {},
+    })
+
+    assert envelope.get("error") is None, envelope
+    assert [c[0] for c in calls] == ["mask", "replay"], (
+        "masking is an init script: after the credential submit it protects nothing"
+    )
+    _, masked_context, masked_page, engine, stealth = calls[0]
+    assert masked_page is page
+    assert masked_context is context, "the CH half reads the applied UA off the context"
+    assert engine == "chromium"
+    assert stealth is True

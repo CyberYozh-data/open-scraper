@@ -6,7 +6,14 @@ from typing import Any
 
 import httpx
 
+from src.utils.redaction import redact_mapping
+
 log = logging.getLogger(__name__)
+
+# Keys in a provider request body that must never travel into a log line or an
+# exception message — the latter becomes an HTTP 502 detail and a job's
+# caller-visible error.
+_SECRET_PAYLOAD_KEYS = frozenset({"connection_login", "connection_password"})
 
 
 @dataclass
@@ -49,7 +56,10 @@ class CyberYozhClient:
                 headers=self._headers(),
                 params={"category": category, "expired": str(expired).lower()},
             )
-            log.debug("CyberYozh got response %s", response.text)
+            # Was `log.debug(..., response.text)`: that body carries a
+            # credentialed URL per item. The status is what the line was ever
+            # useful for.
+            log.debug("CyberYozh proxy history responded %s", response.status_code)
             response.raise_for_status()
             data: Any = response.json()
 
@@ -80,7 +90,10 @@ class CyberYozhClient:
         return proxies
 
     async def rotating_credentials(self, payload: dict[str, Any]) -> list[str]:
-        log.debug("POST /proxies/rotating-credentials/ with payload: %s", payload)
+        log.debug(
+            "POST /proxies/rotating-credentials/ with payload: %s",
+            redact_mapping(payload, secret_keys=_SECRET_PAYLOAD_KEYS),
+        )
 
         async with httpx.AsyncClient(timeout=self._timeout_s) as client:
             response = await client.post(
@@ -91,17 +104,30 @@ class CyberYozhClient:
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as e:
+                # The payload carries connection_login/connection_password, and
+                # this message does not stay here: provider.py re-raises it as a
+                # RuntimeError which becomes an HTTP 502 `detail` and a scrape
+                # job's caller-visible `error` + `warnings`. The response body
+                # is the provider's, not ours, but it is bounded for the same
+                # reason it always was.
                 raise httpx.HTTPStatusError(
-                    f"{e} | response_body={response.text[:1000]} | payload={payload}",
+                    f"{e} | response_body={response.text[:1000]} "
+                    f"| payload={redact_mapping(payload, secret_keys=_SECRET_PAYLOAD_KEYS)}",
                     request=e.request,
                     response=e.response,
                 ) from e
 
             response_data = response.json()
 
-        log.debug("rotating_credentials response: %s", response_data)
-
         creds = response_data.get("credentials") or []
+        # NOT the response body: `credentials` is a list of `user:pass@host`
+        # strings, so this line put the proxy password in the log on the SUCCESS
+        # path — the one place a sweep for error handling does not look. Caught
+        # in review after the first pass missed it.
+        log.debug(
+            "rotating_credentials returned %d credentials",
+            len(creds) if isinstance(creds, list) else 1,
+        )
         if isinstance(creds, list):
             return [str(x) for x in creds]
         return [str(creds)]

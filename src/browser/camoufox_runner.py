@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import base64
 import logging
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 
 from browserforge.fingerprints import Screen
 from camoufox.async_api import AsyncCamoufox
-from playwright.async_api import TimeoutError as PWTimeoutError
+from playwright.async_api import Browser, TimeoutError as PWTimeoutError
 
 from src.browser.runner import (
     DEFAULT_DESKTOP_VIEWPORT,
@@ -315,6 +315,14 @@ class CamoufoxRunner:
         warmup_error: str | None = None
         try:
             async with AsyncCamoufox(**opts) as browser:
+                # camoufox annotates __aenter__ as `Browser | BrowserContext`;
+                # the BrowserContext half is its persistent_context mode, which
+                # build_camoufox_options never asks for, so `new_page` here is
+                # Browser's — the one that takes context options. Stated as a
+                # cast, not an isinstance guard: the guard version rejected the
+                # AsyncMock doubles in 19 tests, i.e. it invented a runtime
+                # failure mode to satisfy a type checker.
+                browser = cast(Browser, browser)
                 # Unconditional: without it Playwright applies its own 1280x720
                 # viewport, so the window says one size while the page renders
                 # another — horizontal browser chrome, which no browser has.

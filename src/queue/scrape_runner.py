@@ -294,7 +294,8 @@ def _evidence_rank(result: FetchResult) -> int:
     """How much a failed attempt explains, highest first.
 
     A page that merely lacks its selector outranks an interstitial: it is the
-    only one `apply_parser` will touch (parsing is gated on `not blocked`) and
+    only one `apply_parser` will touch (parsing is gated on `not blocked`
+    AND on the same retryable-status set used here) and
     the only input self-heal can regenerate selectors from. An interstitial in
     turn outranks nothing at all, because "this exit is burned" and "the
     connection failed" send the caller to different remedies.
@@ -700,11 +701,28 @@ async def run_scrape(
         # perfectly good DOM, and self-heal would regenerate selectors from
         # it — an LLM call per blocked request, and for a user preset those
         # regenerated selectors are persisted over the working ones.
-        if (
-            (request.get("extract") or request.get("parser_plan"))
-            and fetch_result.html
-            and not fetch_result.blocked
-        ):
+        #
+        # A retryable status has to be excluded here for the SAME reason, and it
+        # is not covered by `blocked`: `classify_fetch` leaves a transient 5xx
+        # blocked=False while its own docstring calls it "not genuine content",
+        # so a gateway error page — a perfectly parseable DOM — reached the
+        # parser and could be persisted over a working user preset. The
+        # attempt-ranking function above already excludes these statuses for
+        # exactly this reason; the gate did not, so the two disagreed about what
+        # counts as a page.
+        wants_parsing = bool(request.get("extract") or request.get("parser_plan"))
+        not_genuine = fetch_result.blocked or (
+            fetch_result.status_code in _RETRYABLE_HTTP_STATUSES
+        )
+        if wants_parsing and fetch_result.html and not_genuine:
+            # Otherwise "why is data null on a preset scrape" is answerable only
+            # by inferring it from status_code, and the suppression is the whole
+            # point of the gate.
+            warnings.append(
+                "parsing skipped: the page is not genuine content "
+                f"(blocked={fetch_result.blocked}, status={fetch_result.status_code})"
+            )
+        if wants_parsing and fetch_result.html and not not_genuine:
             parsed_data, parse_warnings = await within_deadline(
                 apply_parser(
                     fetch_result.html,

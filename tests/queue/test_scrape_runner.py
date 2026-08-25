@@ -651,3 +651,89 @@ async def test_a_page_whose_schema_really_rejects_becomes_an_error_not_a_crash(m
     # Summarised, not the raw pydantic paragraph: this reaches the caller.
     assert "errors.pydantic.dev" not in out.error
     assert "element_screenshot_status" in out.error
+
+
+async def test_a_transient_5xx_body_never_reaches_the_parser(monkeypatch, mocker):
+    """The gateway error page must not become a preset's new selectors.
+
+    `classify_fetch` leaves a transient 5xx `blocked=False` while its own
+    docstring calls it "not genuine content", so the parse gate — which only
+    asked `not blocked` — let a 503 body through. On a user preset with
+    self-heal that means an LLM call per failure, selectors regenerated from an
+    error page, and those selectors PERSISTED over the working ones. The ranking
+    function two hundred lines up already excludes retryable statuses for
+    exactly this reason (#84); the gate did not.
+    """
+    parser = mocker.patch(
+        "src.queue.scrape_runner.apply_parser",
+        new=mocker.AsyncMock(return_value=({"title": "502 Bad Gateway"}, [])),
+    )
+    # Every attempt returns the SAME error page, so the ranked-best result is
+    # a 503 carrying a perfectly parseable DOM.
+    error_page = _fr(
+        ok=False, blocked=False, status_code=503,
+        html="<html><h1>502 Bad Gateway</h1></html>",
+        final_url="https://e.com/", error="HTTP 503 (transient upstream failure)",
+    )
+    runner = MagicMock()
+    runner.fetch = AsyncMock(return_value=error_page)
+
+    session = MagicMock()
+    session.max_attempts.return_value = 2
+    session.current_proxy.return_value = None
+    session.on_failure = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "src.queue.scrape_runner.proxy_resolver.open_session",
+        AsyncMock(return_value=session),
+    )
+
+    out = await run_scrape(
+        runner, "req_5xx",
+        {
+            "url": "https://e.com/", "device": "desktop", "proxy_type": "res_rotating",
+            "parser_plan": {"preset_name": "my_preset", "preset_kind": "user",
+                            "self_heal": True, "llm_model": "openai/gpt-5.4-mini"},
+            "extract": {"type": "css", "fields": {"title": {"selector": "h1", "required": True}}},
+        },
+        storage_state=None,
+    )
+
+    parser.assert_not_awaited()
+    assert out.result.meta.fetch_ok is False
+    assert out.result.data is None
+    # Silence here means "why is data null on a preset scrape" can only be
+    # answered by inferring it from status_code.
+    assert any("parsing skipped" in w for w in out.result.warnings), out.result.warnings
+
+
+async def test_a_healthy_page_still_reaches_the_parser(monkeypatch, mocker):
+    """The gate must not cost the case it exists to serve."""
+    parser = mocker.patch(
+        "src.queue.scrape_runner.apply_parser",
+        new=mocker.AsyncMock(return_value=({"title": "Widget"}, [])),
+    )
+    good = _fr(ok=True, blocked=False, status_code=200,
+               html="<html><h1>Widget</h1></html>", final_url="https://e.com/",
+               error=None, element_status="not_requested")
+    runner = MagicMock()
+    runner.fetch = AsyncMock(return_value=good)
+
+    session = MagicMock()
+    session.max_attempts.return_value = 2
+    session.current_proxy.return_value = None
+    monkeypatch.setattr(
+        "src.queue.scrape_runner.proxy_resolver.open_session",
+        AsyncMock(return_value=session),
+    )
+
+    out = await run_scrape(
+        runner, "req_ok",
+        {
+            "url": "https://e.com/", "device": "desktop", "proxy_type": "res_rotating",
+            "extract": {"type": "css", "fields": {"title": {"selector": "h1", "required": True}}},
+        },
+        storage_state=None,
+    )
+
+    parser.assert_awaited_once()
+    assert out.result.data == {"title": "Widget"}

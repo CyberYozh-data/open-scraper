@@ -655,6 +655,19 @@ class JobResultsResponse(BaseModel):
     done: int = 0
     error: str | None = None
     results: list[ScrapeResponse | None] | None = None
+    unreadable_slots: list[int] | None = Field(
+        default=None,
+        description=(
+            "Indexes whose stored result could not be decoded. Null on every "
+            "healthy job — the field is always present, it just carries no "
+            "indexes unless something failed to decode. "
+            "Such a slot comes back null, which otherwise reads exactly like a "
+            "page that has not finished: on a single-page job that made a "
+            "finished response look like one still running, and a caller "
+            "polling for a non-null result would wait for something that is "
+            "never coming."
+        ),
+    )
 
 
 class SearchRequest(BaseModel):

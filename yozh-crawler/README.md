@@ -246,13 +246,27 @@ python -m uvicorn src.main:app --reload --host 0.0.0.0 --port 8001
 ## Tests
 
 ```bash
-pip install pytest
+cd yozh-crawler
+pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Unit tests cover pure modules: `dedup`, `scope`, `frontier`, `linkextract`.
-Engine / jobs / fetcher are integration-tested via docker-compose runs; no
-network mocks in the test suite.
+212 tests, run in CI by the `crawler` job on Python 3.12 (what this service's
+Dockerfile ships). `pip install pytest` alone is not enough, and the two missing
+plugins fail differently: without `pytest-asyncio` collection aborts on the
+unregistered `asyncio` marker, and without `pytest-mock` the SSRF-guard tests
+fail later, when the `mocker` fixture cannot be resolved.
+
+Coverage is no longer only the pure modules — `engine`, `jobs`, `fetcher` and
+the `/map` API are all mocked and tested here; docker-compose runs are for
+end-to-end confidence, not for basic coverage.
+
+Lint the way CI does, which needs the repo's config explicitly — pylint cannot
+discover it from this directory, since `yozh-crawler` is not a package:
+
+```bash
+python -m pylint --rcfile=../.pylintrc --fail-under=9.85 src/
+```
 
 ## Known limitations (v1)
 

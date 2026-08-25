@@ -96,10 +96,11 @@ async def test_a_real_fetch_patches_the_page_with_the_resolved_identity(monkeypa
     """The last link: that `fetch()` reaches for the resolver at all.
 
     Everything above proves resolver → factory → cached object. None of it
-    notices a call site pointed at some OTHER Stealth instance, which is not a
-    hypothetical: `src/queue/tasks.py` builds a bare `Stealth()` on the
-    login-replay path and gets playwright-stealth's macOS default. So drive the
-    real `fetch()` and assert the object it applies is the resolved one.
+    notices a call site pointed at some OTHER Stealth instance, which was not a
+    hypothetical: the login-replay path in `src/queue/tasks.py` built a bare
+    `Stealth()` and got playwright-stealth's macOS default until both call sites
+    were moved onto `apply_page_masking`. So drive the real `fetch()` and assert
+    the object it applies is the resolved one.
     """
     from tests.browser.test_selector_timeout_classification import (
         SERP_URL, _page, _playwright_fetch,

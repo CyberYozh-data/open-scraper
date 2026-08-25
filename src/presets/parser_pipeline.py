@@ -62,9 +62,59 @@ def _missing_required(
     ]
 
 
+def _missing_required_names(instructions: ParsingInstructions) -> list[str]:
+    return [name for name, rule in instructions.fields.items() if rule.required]
+
+
 def _schema_from(instructions: ParsingInstructions) -> dict[str, str]:
     # Coarse schema hint for the selector regenerator: just the field names.
     return {name: "string" for name in instructions.fields}
+
+
+def _under_original_contract(
+    original: ParsingInstructions, healed: ParsingInstructions
+) -> ParsingInstructions | None:
+    """The healed SELECTORS, everything else from the preset. Or None.
+
+    Grading the heal against the preset is only half the job: what gets written
+    to a user preset is a whole `parsing_instructions` replacement, so returning
+    the model's object hands it the field set and every extraction knob too.
+    Measured before this existed: one successful heal persisted
+    `required: false`, and on the NEXT drift `_missing_required` came back
+    empty, self-heal never ran again, and the caller got `{"title": None}`
+    labelled deterministic with no warnings at all.
+
+    Restoring only `required` was still not enough (caught in review): `all`,
+    `attr` and `post_process` are what turn matched nodes into the shape a
+    consumer reads. `amazon_search.urls` is attr="href" all=True, `prices`
+    carries parse_price — and a model asked for selectors answers with bare
+    text scalars, so the heal would quietly return one label where a list of
+    coerced numbers belongs. The heal contributes a selector (and the dialect
+    that selector is written in); the preset keeps the rest.
+
+    Returns None when the healed plan does not cover every original field —
+    persisting that would truncate the preset permanently, and a version bump
+    makes it look deliberate. Fields the model invented are dropped: fine to
+    extract for one request, but nobody agreed to add them to a preset.
+    """
+    if not set(original.fields) <= set(healed.fields):
+        return None
+    return healed.model_copy(
+        update={
+            "fields": {
+                name: rule.model_copy(
+                    update={
+                        "selector": healed.fields[name].selector,
+                        # The per-field dialect travels WITH the selector: an
+                        # xpath expression under the preset's `css` would match
+                        # nothing at all.
+                        "type": healed.fields[name].type,
+                    }
+                )
+                for name, rule in original.fields.items()
+            }
+        }
+    )
 
 
 async def run(  # pylint: disable=too-many-return-statements
@@ -82,6 +132,23 @@ async def run(  # pylint: disable=too-many-return-statements
             return ParserResult(data=data, warnings=warnings, mode="deterministic")
 
         if self_heal and llm_model:
+            # The ask and the grade come from different places: the model is
+            # given `output_schema` when the preset has one, while the heal is
+            # graded on the instructions' required names. A preset whose schema
+            # omits a required field can therefore never pass — and because a
+            # schema is set, the pipeline then pays for a full llm_extract on
+            # every request, forever, with nothing saying why. All ten built-ins
+            # are aligned today; a hand-written preset need not be.
+            uncovered = (
+                sorted(set(_missing_required_names(instructions)) - set(output_schema))
+                if output_schema else []
+            )
+            if uncovered:
+                log.warning(
+                    "self-heal: preset requires %s but its output_schema does not "
+                    "name them, so no regenerated plan can satisfy the grade",
+                    ", ".join(uncovered),
+                )
             try:
                 healed = await generate_selectors(
                     page_html,
@@ -95,13 +162,37 @@ async def run(  # pylint: disable=too-many-return-statements
                     warnings=[*warnings, f"self_heal_failed: {exc}"],
                     mode="deterministic",
                 )
-            healed_data, healed_warnings = extract_fields(page_html, healed)
-            if not _missing_required(healed, healed_data):
+            # Extracted with the RESTORED plan, so the data the caller gets is
+            # the data the persisted preset will produce. Graded on it for the
+            # same reason: with the model's bare selectors a price field looks
+            # filled because the raw label is a non-empty string, while under
+            # the preset's parse_price — the coercion that actually ships — it
+            # is None, and the heal has recovered nothing.
+            persistable = _under_original_contract(instructions, healed)
+            plan_for_this_request = persistable if persistable is not None else healed
+            healed_data, healed_warnings = extract_fields(page_html, plan_for_this_request)
+            # Graded against the ORIGINAL instructions, not the healed ones.
+            # `healed` arrives from the model with its own `required` flags, so
+            # judging it by those let it grade its own homework: a plan that
+            # marks nothing required trivially "recovers", gets labelled
+            # self_healed, and — for a user preset — is then written over the
+            # selectors that were working. The preset's contract is the only one
+            # the caller ever agreed to.
+            if not _missing_required(instructions, healed_data):
+                notes = [*warnings, *healed_warnings, "self_healed"]
+                if persistable is None:
+                    # Usable for THIS request, never written to the preset: a
+                    # plan missing fields would truncate it for every later
+                    # scrape, and the caller asked for a repair, not a rewrite.
+                    notes.append(
+                        "self_heal_not_persisted: the healed plan does not cover "
+                        + ", ".join(sorted(set(instructions.fields) - set(healed.fields)))
+                    )
                 return ParserResult(
                     data=healed_data,
-                    warnings=[*warnings, *healed_warnings, "self_healed"],
+                    warnings=notes,
                     mode="self_healed",
-                    healed_instructions=healed,
+                    healed_instructions=persistable,
                 )
             warnings = [*warnings, "self_heal_did_not_recover"]
 

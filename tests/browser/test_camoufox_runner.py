@@ -23,6 +23,24 @@ def test_build_options_maps_normalized_fields():
     assert opts["proxy"]["server"] == "http://h:1"
 
 
+def test_options_never_ask_for_a_persistent_context():
+    """Pins what `cast(Browser, browser)` in fetch() assumes.
+
+    camoufox's `__aenter__` returns a BrowserContext instead of a Browser when
+    `persistent_context=True`, and only Browser.new_page takes the context
+    options this runner passes (`no_viewport`). Nothing here sets that flag, so
+    the cast holds — but that is an invariant of this builder, not a law, and
+    without a test the next option added here would break the launch with a
+    TypeError mid-scrape instead of failing at review.
+    """
+    for kwargs in (
+        {"proxy": None, "block_assets": False, "webrtc_block": False},
+        {"proxy": None, "block_assets": True, "webrtc_block": True,
+         "viewport": {"width": 1920, "height": 1080}},
+    ):
+        assert "persistent_context" not in build_camoufox_options(**kwargs)
+
+
 def test_build_options_defaults_are_sane():
     opts = build_camoufox_options(proxy=None, block_assets=False, webrtc_block=False)
     assert opts["geoip"] is True          # always geoip when proxying

@@ -1,3 +1,8 @@
+# NOTE: two services score against this file. The root `src/` tree is gated at
+# 9.96 and yozh-crawler/src at 9.85 (the crawler job passes --rcfile explicitly,
+# because pylint cannot discover this file from a non-package directory).
+# Re-enabling a check here moves BOTH numbers — re-enabling the docstring
+# checks, for one, drops the crawler from 9.90 to 9.01 and reds its job.
 [MASTER]
 # Use multiple processes
 jobs=1

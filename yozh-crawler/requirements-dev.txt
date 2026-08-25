@@ -1,0 +1,18 @@
+# Test/lint tooling for this service only.
+#
+# Deliberately NOT `-r ../requirements-dev.txt`: that file pulls the SCRAPER's
+# runtime (playwright, camoufox, litellm, taskiq, redis) — an install this
+# lxml+httpx service has no use for, and a dependency tree CI would then execute
+# for nothing. requirements.txt already names the March 2026 compromised litellm
+# releases; the smallest tree that can run these tests is the safer one.
+#
+# The cost is that these pins must be kept in step with ../requirements-dev.txt
+# by hand. pylint is pinned exactly for the reason stated there: a score gate
+# moves under any release that adds or widens a checker.
+-r requirements.txt
+
+pytest>=8.0
+pytest-asyncio>=0.23
+# tests/test_api_map.py drives the SSRF guard through the `mocker` fixture.
+pytest-mock>=3.11.0
+pylint==4.0.6

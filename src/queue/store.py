@@ -15,10 +15,12 @@ import gzip
 import json
 import logging
 import time
+import zlib
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 import redis.asyncio as aioredis
+from pydantic import ValidationError
 
 from src.schemas import JobStatus, ScrapeRequest, ScrapeResponse
 from src.settings import settings
@@ -29,6 +31,35 @@ log = logging.getLogger(__name__)
 SAFETY_TTL_S = 24 * 3600  # orphan guard; finalization re-arms to result_ttl_s
 
 TERMINAL_STATUSES = ("done", "failed", "cancelled")
+
+
+# Everything a stored blob can raise on the way back to an object. gzip raises
+# BadGzipFile (an OSError, NOT a ValueError) on a bad magic number, zlib.error
+# on a corrupt deflate body and EOFError on a truncated one — truncation being
+# the likeliest physical corruption of a Redis value, and neither of those last
+# two inherits from ValueError or OSError. json/utf-8 failures and pydantic's
+# ValidationError are all ValueError subclasses.
+_STORED_BLOB_ERRORS = (ValueError, OSError, zlib.error, EOFError)
+
+# Pages are stored as plain JSON (see `create`), so only the json/utf-8/pydantic
+# half of the set above can fire on them. Spelled separately rather than reusing
+# the wider tuple: three of those members would be unreachable there, and a dead
+# except member reads as a claim about the data that is not true.
+_STORED_JSON_ERRORS = (ValueError,)
+
+
+class JobPagesUnreadable(RuntimeError):
+    """The job exists, but its page specs cannot be decoded.
+
+    Distinct from "not found" on purpose: collapsing the two is what left such a
+    job uncancellable, since cancel answered 404 for a job whose meta and slots
+    were sitting right there.
+    """
+
+    def __init__(self, job_id: str, index: int) -> None:
+        super().__init__(f"job {job_id}: page {index} is unreadable")
+        self.job_id = job_id
+        self.index = index
 
 
 class JobNotInStore(KeyError):
@@ -68,6 +99,10 @@ class JobMeta:
 class JobSnapshot(JobMeta):
     pages: list[ScrapeRequest] = field(default_factory=list)
     results: list[ScrapeResponse | None] = field(default_factory=list)
+    # Slots that exist in Redis but would not decode. Without this a degraded
+    # slot is indistinguishable from one that was never written, so a caller
+    # polling for `results != null` waits forever on a job that is done.
+    unreadable_slots: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -269,15 +304,69 @@ class RedisJobStore:
             blob = raw_pages.get(str(i).encode())
             if blob is None:
                 return None
-            pages.append(ScrapeRequest.model_validate(json.loads(blob)))
+            try:
+                pages.append(ScrapeRequest.model_validate(json.loads(blob)))
+            except _STORED_JSON_ERRORS as exc:
+                # A page cannot degrade to None the way a result can: `results`
+                # is index-aligned with this list, and dropping one would shift
+                # every later slot — the silent misalignment this codebase has
+                # been bitten by before. So the job cannot be described — but it
+                # still EXISTS, and saying "absent" here is what left it
+                # uncancellable. Callers that need the spec (the results
+                # response carries `pages`) surface this; cancel does not need
+                # it and converges the job anyway.
+                raise JobPagesUnreadable(job_id, i) from exc
         results: list[ScrapeResponse | None] = [None] * meta.total
+        unreadable: list[int] = []      # placeable, but the blob would not decode
+        unplaceable: list[str] = []     # the FIELD NAME itself is not a slot
         for k, blob in raw_results.items():
-            # redis-py types decoded values as `bytes | str`; runtime is bytes.
-            idx = int(k.decode())  # type: ignore[union-attr]
-            results[idx] = ScrapeResponse.model_validate(
-                unpack_payload(blob)  # type: ignore[arg-type]
+            # Everything about a slot comes out of the same possibly-corrupt
+            # hash — the FIELD NAME as much as the value — so the parse and the
+            # bounds check belong inside the guard with the decode. Left
+            # outside, a non-numeric field raised ValueError (the original bug
+            # verbatim), an out-of-range one raised IndexError, and a NEGATIVE
+            # one silently wrote a plausible result into the last slot, which is
+            # exactly the misalignment the page branch above refuses to allow.
+            # Not named `field`: this module imports dataclasses.field, and it
+            # is used for the very snapshot attribute this loop populates.
+            raw_field = k.decode(errors="replace") if isinstance(k, bytes) else str(k)
+            try:
+                idx = int(raw_field)
+            except ValueError:
+                unplaceable.append(raw_field)
+                continue
+            if not 0 <= idx < meta.total:
+                unplaceable.append(raw_field)
+                continue
+            try:
+                results[idx] = ScrapeResponse.model_validate(
+                    unpack_payload(blob)  # type: ignore[arg-type]
+                )
+            except _STORED_BLOB_ERRORS:
+                # Per slot, because this loop backs the results endpoint, cancel
+                # AND run_and_wait: one bad blob used to take all three down
+                # until the TTL expired, losing the pages that were fine and
+                # leaving the job uncancellable. Degrade the field, keep the
+                # page. The likeliest cause is not corruption but schema skew —
+                # a rolling deploy moves ScrapeResponse while jobs written by
+                # the previous build are still in Redis, and this host deploys
+                # by swapping the checkout under a running worker.
+                unreadable.append(idx)
+        if unreadable or unplaceable:
+            # One line per read, not one per slot: reads are client-driven, and
+            # a schema-skew deploy invalidates every in-flight job at once. The
+            # payload never appears here — page content in an operator- or
+            # caller-visible field is how a scan gets published with a false
+            # verdict.
+            log.warning(
+                "job %s: %d of %d result slots unreadable %s; unplaceable fields: %s",
+                job_id, len(unreadable), meta.total,
+                sorted(unreadable), unplaceable or "none",
             )
-        return JobSnapshot(**meta.__dict__, pages=pages, results=results)
+        return JobSnapshot(
+            **meta.__dict__, pages=pages, results=results,
+            unreadable_slots=sorted(unreadable),
+        )
 
     async def queue_depth(self, stream_key: str) -> int:
         """Live backlog: undelivered entries (group ``lag``) plus delivered-
