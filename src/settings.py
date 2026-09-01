@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import Field, SecretStr
+
+from src.observability.log_context import install_record_factory
+from src.observability.log_format import JsonFormatter, TextFormatter
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -273,6 +276,22 @@ class Settings(BaseSettings):
         description="Per-session storage_state byte cap. Rejected on overflow.",
     )
 
+    log_format: Literal["text", "json"] = Field(
+        default="text",
+        alias="LOG_FORMAT",
+        description=(
+            "Log line shape. TEXT by default, deliberately: the containers use "
+            "the json-file driver with no shipper, so nothing on this host can "
+            "query JSON today and the only reader is a human at `docker logs`, "
+            "for whom quoted keys and escaped tracebacks are strictly worse. "
+            "Two of the four long-lived processes could not emit JSON anyway "
+            "(the scheduler and the taskiq worker master configure their own "
+            "logging), so a JSON default would advertise a guarantee this "
+            "deployment cannot keep. Flip it the day a shipper lands. "
+            "Correlation and event names are emitted in BOTH shapes."
+        ),
+    )
+
     # =====================
     # Service-to-service auth
     # =====================
@@ -280,11 +299,49 @@ class Settings(BaseSettings):
         default=None,
         alias="SERVICE_TOKEN",
         description=(
-            "Shared secret guarding credential-bearing internal endpoints "
-            "(GET /api/v1/proxies/resolve). Callers on the internal network "
-            "(the crawler's /map) present it as the X-Service-Token header. "
-            "When unset, those endpoints refuse to serve rather than leak "
-            "proxy credentials (fail-closed)."
+            "Shared secret guarding the internal endpoints: "
+            "GET /api/v1/proxies/resolve, the /api/v1/sessions router and the "
+            "/api/v2/prem-proxies catalog. Callers on the internal network "
+            "(the crawler's /map, yozh-law-checker) present it as the "
+            "X-Service-Token header. When unset, those endpoints refuse to "
+            "serve rather than leak (fail-closed) — note that for prem-proxies "
+            "the refusal silently strips country geo from every yozh scan."
+        ),
+    )
+
+    # Plain `str`, not `list[str]`: pydantic-settings JSON-parses list-typed
+    # env vars, so `EGRESS_ALLOW_HOSTS=127.0.0.1` would fail to parse rather
+    # than yield one entry.
+    egress_transport_guard: bool = Field(
+        default=True,
+        alias="EGRESS_TRANSPORT_GUARD",
+        description=(
+            "Route direct-path browser traffic through a local proxy that "
+            "refuses non-public targets, so a blocked request is never made "
+            "rather than having its content withheld. ON, because the layers "
+            "that remain without it leave a real hole: a redirect into the "
+            "internal network still fires one GET, and Chromium's favicon "
+            "request is issued below the level a route handler can see. "
+            "It does change behaviour on the direct path — a proxied Chromium "
+            "context is TCP-only so HTTP/3 never negotiates, and plain-HTTP "
+            "forwards cost about ten times the connections. Measured on this "
+            "host, that costs nothing observable: 25/30 ok in both arms, and "
+            "the only target that blocks (Google) blocks the host IP with the "
+            "guard OFF too — so on the direct path the fingerprint argument "
+            "protects a capability this host does not have. Set false to fall "
+            "back to the pre-flight, route guard, redirect-chain and read-time "
+            "checks, which all still apply."
+        ),
+    )
+    egress_allow_hosts: str = Field(
+        default="",
+        alias="EGRESS_ALLOW_HOSTS",
+        description=(
+            "Comma-separated hostnames / IP literals that browser navigation "
+            "may reach even though they are not public addresses. Empty by "
+            "default. Matching is exact — there is no wildcard and no global "
+            "off-switch, because a guard with an off-switch is a guard that "
+            "silently does nothing. Needed only by the loopback e2e tests."
         ),
     )
 
@@ -394,11 +451,21 @@ def setup_logging(level: str = "INFO", tag: Optional[str] = None) -> None:
     for _handler in list(root.handlers):
         root.removeHandler(_handler)
 
+    # Correlation first: the factory has to be in place before anything logs,
+    # and it is idempotent so repeated calls (tests, a re-init) cannot stack.
+    install_record_factory()
+
     handler = logging.StreamHandler()
     handler.setLevel(level_value)
-
-    _format = "%(asctime)s | %(levelname)s | [%(tag)s] | %(name)s | %(message)s"
-    handler.setFormatter(logging.Formatter(_format))
+    handler.setFormatter(
+        JsonFormatter() if settings.log_format == "json" else TextFormatter()
+    )
+    # The filter stays on the SAME handler as the formatter. That pairing is
+    # load-bearing: the old formatter interpolated %(tag)s, so a record that
+    # reached it without one raised `ValueError: Formatting field not found in
+    # record: 'tag'` and the line was LOST outright. Both renderers now default
+    # the tag as well, so the pairing is belt and braces rather than the only
+    # thing standing between a record and the floor.
     handler.addFilter(LogTagFilter(tag))
     root.addHandler(handler)
 

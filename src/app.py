@@ -4,12 +4,10 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi_mcp import FastApiMCP
 
 from src.api import prem_proxies
 from src.api.router import router
-from src.api.sessions import router as sessions_router
 from src.queue.broker import broker
 from src.queue.store import get_job_store, init_job_store
 from src.sessions.store import get_session_store, init_session_store
@@ -59,42 +57,81 @@ async def _sessions_gc_loop() -> None:
             logging.getLogger(__name__).exception("sessions GC sweep failed")
 
 
-def disable_cors(app: FastAPI) -> FastAPI:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "http://localhost:6274",
-            "http://127.0.0.1:6274",
-        ],
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
-        allow_headers=["*"],
-        expose_headers=[
-            "Mcp-Session-Id",
-            "mcp-session-id",
-        ],
-    )
-    return app
+# Every operation the (unauthenticated) MCP transport advertises as an agent
+# tool. An ALLOWLIST, not a denylist, and the difference is not stylistic.
+#
+# The denylist this replaces filtered on `route.operation_id`. The eight
+# `/api/v2/prem-proxies/*` routes declare no explicit id, so FastAPI generated
+# names like `sub_users_api_v2_prem_proxies_sub_users_get` — names no
+# hand-written exclusion could have matched even if someone had tried. They
+# were live, anonymously callable agent tools while this module's docstring
+# promised that nothing could drift onto the surface, and CI was green
+# throughout. Generated ids are path-derived and therefore unstable too:
+# renaming a handler silently renames its tool.
+#
+# A denylist fails by silently EXPOSING something new. An allowlist fails by a
+# MISSING tool — visible, harmless, one line to fix. Only one of those is the
+# right direction to be wrong in.
+#
+# Contents: everything advertised before this change, minus the eight
+# prem-proxies operations. No existing MCP consumer loses a tool it had.
+# Note this is not access control — these routes stay anonymous over REST
+# either way; it decides only what is offered to agents.
+MCP_TOOLS: tuple[str, ...] = (
+    "health",
+    "get_queue_stats",
+    "run_scrape_page",
+    "run_scrape_pages",
+    "get_job_status",
+    "get_job_result",
+    "cancel_scrape_job",
+    "run_scrape_preset_page",
+    "run_scrape_preset_pages",
+    "run_search",
+    "list_presets",
+    "get_preset",
+    "create_preset",
+    "update_preset",
+    "delete_preset",
+    "generate_preset",
+    "test_preset",
+    "preview_preset",
+    "list_llm_models",
+    # `list_available_proxies` is NOT here: it is gated behind SERVICE_TOKEN
+    # (HIGH-03 — it enumerates the purchased proxies on the account), and the
+    # MCP transport carries no such header. `list_proxy_countries` stays: a
+    # static country list with nothing account-specific in it.
+    "list_proxy_countries",
+)
 
 
-def mcp_excluded_operations() -> list[str]:
-    """Operations kept off the (unauthenticated) MCP tool surface.
+def _assert_mcp_allowlist_resolves(app: FastAPI, names: tuple[str, ...]) -> None:
+    """Fail startup rather than advertise a surface nobody meant.
 
-    The REST routes gate these behind SERVICE_TOKEN, but the MCP transport
-    carries no such header, so they must not be advertised as agent tools:
-      - resolve_proxy: returns upstream proxy credentials (the crawler's /map).
-      - every /sessions op (CRIT-02): create/read/list/mutate/login/delete an
-        authenticated browser session — never an agent tool.
+    Two distinct failures, both silent without this:
 
-    The session ops are derived from the router so a newly added session route
-    can't silently drift onto the MCP surface.
+    * An empty allowlist. `fastapi_mcp` prunes its `operation_map` only when
+      the filtered list is non-empty, so an allowlist that matches nothing
+      advertises zero tools while leaving EVERY operation callable by name
+      through `tools/call` — strictly worse than the denylist it replaced.
+    * A name that no longer exists. Renaming a handler or dropping a route
+      would quietly shrink the surface, and a tool that vanished is only
+      obvious to whoever was using it.
     """
-    session_ops = [
-        route.operation_id
-        for route in sessions_router.routes
-        if getattr(route, "operation_id", None)
-    ]
-    return ["resolve_proxy", *session_ops]
+    if not names:
+        raise RuntimeError(
+            "MCP_TOOLS is empty: fastapi-mcp would leave every operation "
+            "callable while advertising none"
+        )
+    known = {
+        operation.get("operationId")
+        for path in app.openapi()["paths"].values()
+        for operation in path.values()
+        if isinstance(operation, dict)
+    }
+    missing = sorted(name for name in names if name not in known)
+    if missing:
+        raise RuntimeError(f"MCP_TOOLS names operations that do not exist: {missing}")
 
 
 def create_app() -> FastAPI:
@@ -108,7 +145,8 @@ def create_app() -> FastAPI:
     app.include_router(router)
     app.include_router(prem_proxies.router)
 
-    mcp = FastApiMCP(app, exclude_operations=mcp_excluded_operations())
+    _assert_mcp_allowlist_resolves(app, MCP_TOOLS)
+    mcp = FastApiMCP(app, include_operations=list(MCP_TOOLS))
     mcp.mount_http()
 
     return app

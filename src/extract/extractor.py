@@ -5,6 +5,7 @@ import logging
 import re
 from html import unescape
 from typing import Any, Dict, Tuple
+from urllib.parse import unquote, urljoin, urlsplit
 
 from lxml import etree, html as lxml_html
 
@@ -130,9 +131,22 @@ def _parse_int(value: Any) -> int | None:
 def _parse_price(value: Any, locale: str = "us") -> float | None:
     """Parse a numeric string with currency and thousands/decimal separators.
 
-    `locale` resolves single-separator ambiguity:
-      - "us" (default): `.` is decimal, `,` is thousands.
-      - "eu": `,` is decimal, `.` is thousands.
+    A lone `.` or `,` is read from the TEXT itself wherever the text alone
+    settles it, regardless of `locale`:
+      - a 2-digit tail is always a decimal point ("899,00" == 899.0 no
+        matter what `locale` says) — no locale groups thousands two digits
+        at a time, so that shape cannot mean anything else.
+      - a 3-or-more-digit tail, or more than one occurrence of the same
+        separator, is always a thousands grouping ("1.399" == 1399.0 no
+        matter what `locale` says).
+
+    `locale` has exactly one remaining vote: a lone separator with a
+    1-digit tail, which really is ambiguous ("1.3" as one-point-three vs.
+    "1.3" as a stray separator around "13"):
+      - "us" (default): a lone `.` with a 1-digit tail is decimal; a lone
+        `,` with a 1-digit tail is not (thousands-stripped instead).
+      - "eu": a lone `,` with a 1-digit tail is decimal; a lone `.` with a
+        1-digit tail is not.
 
     When both `.` and `,` appear, the last-position-wins rule is used and the
     locale arg is ignored — that case is unambiguous regardless of locale.
@@ -175,15 +189,50 @@ def _parse_price(value: Any, locale: str = "us") -> float | None:
     if last_dot > -1 and last_comma > -1:
         decimal = "." if last_dot > last_comma else ","
     elif last_dot > -1:
-        if locale == "us":
-            tail = raw.rsplit(".", 1)[-1]
-            decimal = "." if (raw.count(".") == 1 and len(tail) <= 2) else None
+        tail = raw.rsplit(".", 1)[-1]
+        if raw.count(".") != 1:
+            # More than one dot with no comma anywhere: always a thousands
+            # grouping ("1.234.567" == 1234567.0). `locale` is never
+            # consulted here, in either branch below -- there is no locale
+            # in which repeated same-kind separators inside one number mean
+            # anything but grouping.
+            decimal = None
+        elif len(tail) == 2:
+            # Unambiguous from the TEXT alone: no locale groups thousands
+            # two digits at a time, so a lone `.` immediately followed by
+            # exactly two digits can only be a decimal point. `locale` is
+            # not consulted. `locale` comes from the preset's DECLARED
+            # country (materializer.py), while the separator actually used
+            # comes from whichever page the browser was served; the two are
+            # independent and can disagree. Live failure: a preset declared
+            # for Germany carried locale="eu", but the browser announced
+            # en-DE and Amazon served an English dot-decimal page, so
+            # "€32.99" parsed as 3299.0 -- numeric, positive, euro sign
+            # intact in price_raw, so every shipped check passed it.
+            decimal = "."
+        elif len(tail) == 1:
+            # The one shape `locale` still decides: "1.3" is genuinely
+            # ambiguous between one-point-three and a stray separator
+            # around "13". Measured: _parse_price("1.3", "us") == 1.3 but
+            # _parse_price("1.3", "eu") == _parse_price("1.3", "zz") == 13.0.
+            decimal = "." if locale == "us" else None
         else:
+            # 3-or-more-digit tail: always a thousands grouping, and
+            # `locale` has NO effect here despite what an earlier version of
+            # this comment claimed -- measured:
+            # _parse_price("1.399", "us") == _parse_price("1.399", "eu")
+            # == 1399.0.
             decimal = None
     elif last_comma > -1:
-        if locale == "eu":
-            tail = raw.rsplit(",", 1)[-1]
-            decimal = "," if (raw.count(",") == 1 and len(tail) <= 2) else None
+        tail = raw.rsplit(",", 1)[-1]
+        # Mirror of the dot branch above: "32,99€" under a "us" hint is the
+        # same defect the other way around.
+        if raw.count(",") != 1:
+            decimal = None
+        elif len(tail) == 2:
+            decimal = ","
+        elif len(tail) == 1:
+            decimal = "," if locale == "eu" else None
         else:
             decimal = None
     else:
@@ -230,6 +279,125 @@ def _base64_decode(value: Any) -> str | None:
     # ships a wrong URL instead of an honest null. altchars maps the url-safe
     # pair back onto the standard one.
     return base64.b64decode(padded.encode("ascii"), altchars=b"-_", validate=True).decode("utf-8")
+
+
+# Matches `?param=value` or `&param=value`, capturing everything up to the
+# next UNESCAPED `&` -- which is exactly the boundary of a query parameter's
+# raw (still percent-encoded) value. A nested query string belonging to the
+# wrapped destination survives inside that capture as `%26`-escaped `&`s and
+# is recovered correctly by the unquote() below; only the OUTER query's own
+# separators end the match.
+def _unwrap_param_pattern(param: str) -> re.Pattern[str]:
+    return re.compile(rf"(?:^|[?&]){re.escape(param)}=([^&]*)")
+
+
+# Characters a URL parser deletes or trims BEFORE it looks at the value at all:
+# tab/CR/LF are removed anywhere, C0 controls and space are trimmed from both
+# ends (WHATWG; `urlsplit` has mirrored this since 3.10). `_leading_slash_run`
+# has to see the same string the parser will, or `" //host"` slips past it.
+_URL_DELETED = str.maketrans("", "", "\t\r\n")
+_URL_TRIMMED = "".join(chr(c) for c in range(0x21))
+
+
+def _leading_slash_run(candidate: str) -> int:
+    """How many `/` or `\\` characters the value opens with, as a parser sees it.
+
+    Backslash counts as a slash because a WHATWG parser's "special authority
+    ignore slashes" state skips a run of BOTH -- so `//h`, `///h`, `/\\h`,
+    `\\\\h` and `\\/h` are all one spelling of the same authority.
+    """
+    probe = candidate.translate(_URL_DELETED).strip(_URL_TRIMMED)
+    run = 0
+    for char in probe:
+        if char not in "/\\":
+            break
+        run += 1
+    return run
+
+
+def _is_followable_destination(candidate: str) -> bool:
+    """True when `candidate` is a value this op may hand on as a destination.
+
+    The decoded parameter is PAGE-CONTROLLED text: whatever a redirect's query
+    string says, percent-decoded. Only two shapes are destinations a caller can
+    follow, and everything else is refused:
+
+    * an absolute ``http(s)`` URL with a host; or
+    * a plain relative path (``/dp/ASIN/ref=...``), which the ``urljoin`` step
+      that normally follows resolves against the page's own URL.
+
+    Refused, specifically:
+
+    * Any other scheme (``javascript:``, ``data:``, ``file:``, ``ftp:`` ...),
+      which ``urljoin`` and ``null_if_regex`` pass through verbatim into a
+      field whose contract is a followable link. An ``http(s)`` value without
+      an authority (``http:///etc/passwd``, ``http:/foo``) is refused for the
+      same reason: it names no host, so it is not the absolute URL it looks
+      like.
+    * Anything OPENING WITH TWO OR MORE SLASHES, backslashes included. Only
+      ``//host`` carries an authority as far as ``urlsplit`` is concerned, but
+      a WHATWG parser -- a browser href, a Playwright navigation, any JS
+      consumer -- resolves ``///host``, ``////host``, ``/\\host``, ``\\\\host``
+      and ``\\/host`` to ``https://host`` identically, because its "special
+      authority ignore slashes" state skips the whole run. The docstring
+      rationale ("carries an authority, is not relative at all") applies to
+      every spelling, so the check counts the run rather than trusting
+      ``netloc``.
+    * A relative reference naming no path segment of its own. ``""``, ``?a=b``
+      and ``#frag`` resolve to the page BEING SCRAPED; ``.`` and ``..`` to one
+      of its ancestors. None is a destination the parameter actually supplied,
+      and shipping one would put the search page itself in every unwrapped
+      row's product link.
+
+    Same property, and the same fail-safe passthrough, as
+    ``src/api/search.py:_unwrap_redirect``.
+    """
+    if _leading_slash_run(candidate) >= 2:
+        return False
+    try:
+        parts = urlsplit(candidate)
+    except ValueError:
+        # Unparseable (e.g. a malformed IPv6 literal) -- not a destination.
+        return False
+    if parts.scheme:
+        return parts.scheme in ("http", "https") and bool(parts.netloc)
+    if parts.netloc:
+        # `//host/path`: no scheme, but an authority. Not a relative path.
+        return False
+    return any(
+        seg not in (".", "..") for seg in parts.path.split("/") if seg
+    )
+
+
+def _unwrap_param(value: Any, param: str) -> Any:
+    """Recover a redirect's real destination from one of its own query params.
+
+    Amazon's sponsored-result links carry the destination inline rather than
+    behind an opaque token: `/sspa/click?ie=UTF8&spc=...&url=%2FAcer-...` --
+    percent-decoding the `url` parameter's value yields the real (still
+    relative) product path directly, no base64 needed (contrast Bing's
+    `bing.com/ck/a?...&u=a1<base64url>`, which does need `base64_decode`).
+
+    A value that does NOT carry `param` is returned UNCHANGED, not null --
+    the defining property that lets this run over a field mixing wrapped and
+    unwrapped values (amazon_search's `urls`: sponsored rows carry `url=`,
+    organic rows don't) in one pipeline without a separate branch per shape.
+
+    The decoded value is returned only when it is an http(s) URL or a plain
+    relative path (see `_is_followable_destination`); anything else is
+    refused the same way -- the ORIGINAL value passes through UNCHANGED, not
+    null. A crafted `url=javascript:...` / `data:...` / `file:...` / `//host`
+    parameter therefore cannot turn this op into a link the caller is told is
+    "a real, followable destination"; worst case is a passthrough of the
+    wrapper the page already served.
+    """
+    if value is None:
+        return None
+    match = _unwrap_param_pattern(param).search(str(value))
+    if match is None:
+        return value
+    unwrapped = unquote(match.group(1))
+    return unwrapped if _is_followable_destination(unwrapped) else value
 
 
 def _apply_post_process(
@@ -283,6 +451,38 @@ def _apply_post_process(
                 current = str(current).replace(str(args[0]), str(args[1]))
             elif op == "base64_decode":
                 current = _base64_decode(current)
+            elif op == "unwrap_param":
+                current = _unwrap_param(current, str(args[0]))
+            elif op == "urljoin":
+                # extract_fields is never given the page's own URL, so a
+                # preset that relies on the materializer to inject the base
+                # (see materializer.inject_url_base) leaves this arg empty at
+                # rest. No base -> the value is left UNCHANGED (never
+                # crashed, never nulled) -- but unlike parse_price's "us"
+                # default, there is no sensible default transform for a URL
+                # with no base, so this is not silent: it warns, once per
+                # field, so "urls came back relative" has a stated cause
+                # instead of looking like a healthy, absolute result.
+                base = args[0] if args else None
+                if base:
+                    current = urljoin(str(base), str(current))
+                else:
+                    _warn(
+                        "urljoin", "no_base",
+                        f"field '{field_name}': urljoin has no base_url -- "
+                        "materialize a preset (which injects the request's "
+                        "own URL) or pass args=[base_url] explicitly; the "
+                        "value was left unresolved"
+                    )
+            elif op == "null_if_regex":
+                # Nulls IN PLACE rather than removing the item: extract_fields
+                # matches each field independently against the whole document
+                # (no notion of a "row"), so the only way to exclude one shape
+                # (Amazon's /sspa/click sponsored redirects) from an all=true
+                # field without shrinking it — and misaligning every later row
+                # against its sibling fields — is to null that slot, not drop it.
+                if re.search(str(args[0]), str(current)):
+                    current = None
             else:  # pragma: no cover — guarded by Literal at validation
                 _warn(op, "unknown", f"field '{field_name}': unknown op '{op}'")
                 return None

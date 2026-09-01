@@ -388,7 +388,7 @@ class TestGoogleBuiltinPresetsExitViaGB:
     US market (gl=us)."""
 
     @pytest.mark.parametrize(
-        "preset_file", ["google_search.json", "google_shopping.json"]
+        "preset_file", ["google_search_chromium.json", "google_shopping_chromium.json"]
     )
     def test_us_locale_resolves_to_gb_exit_with_us_market(self, preset_file):
         import json
@@ -508,6 +508,155 @@ class TestParsePriceLocaleInjection:
         )
         scrape = materialize(preset, req)
         assert scrape.extract.fields["p"].post_process[0].args == ["eu"]
+
+
+class TestUrlBaseInjection:
+    """`urljoin`'s base is the materialized request URL itself -- the same
+    per-locale-derived value the preset is about to be fetched with. This is
+    how the fix works within the constraint that extract_fields never sees a
+    page URL (it takes only page_html; see src/extract/extractor.py): rather
+    than threading the *navigated* URL all the way down through worker_parse
+    -> parser_pipeline -> extract_fields, the materializer injects the URL it
+    already computed for the fetch, at the one place both are in scope
+    together -- exactly the pattern `_inject_price_locale` established for
+    parse_price's locale arg."""
+
+    def _preset_with_url(self, **over):
+        from src.extract.models import PostProcess
+
+        return _amazon_preset(
+            url_template="https://www.amazon.{domain}/s?k={query}",
+            parsing_instructions=ParsingInstructions(
+                type="css",
+                fields={
+                    "urls": FieldRule(
+                        selector="a",
+                        attr="href",
+                        all=True,
+                        post_process=[PostProcess(op="urljoin")],
+                    ),
+                    "urls_explicit_base": FieldRule(
+                        selector="a",
+                        attr="href",
+                        all=True,
+                        post_process=[
+                            PostProcess(op="urljoin", args=["https://pinned.example"])
+                        ],
+                    ),
+                },
+            ),
+            **over,
+        )
+
+    def test_empty_args_get_the_materialized_url_injected(self):
+        preset = self._preset_with_url()
+        req = PresetScrapeRequest(
+            source="amazon_product", preset_params={"query": "x"}, locale="us"
+        )
+        scrape = materialize(preset, req)
+        pp = scrape.extract.fields["urls"].post_process[0]
+        assert pp.op == "urljoin"
+        assert pp.args == ["https://www.amazon.com/s?k=x"]
+
+    def test_different_locale_injects_its_own_domain(self):
+        preset = self._preset_with_url()
+        req = PresetScrapeRequest(
+            source="amazon_product", preset_params={"query": "x"}, locale="de"
+        )
+        scrape = materialize(preset, req)
+        assert scrape.extract.fields["urls"].post_process[0].args == [
+            "https://www.amazon.de/s?k=x"
+        ]
+
+    def test_explicit_base_is_not_overwritten(self):
+        preset = self._preset_with_url()
+        req = PresetScrapeRequest(
+            source="amazon_product", preset_params={"query": "x"}, locale="de"
+        )
+        scrape = materialize(preset, req)
+        assert scrape.extract.fields["urls_explicit_base"].post_process[0].args == [
+            "https://pinned.example"
+        ]
+
+
+class TestMaterializerInjectedTracking:
+    """Fix-round-1 finding 3: a self-heal must not freeze THIS request's
+    injected locale/URL into a user preset forever -- the next request
+    (different locale, different domain) would silently resolve against a
+    stale, wrong value. The fix needs to know, after the fact, exactly which
+    (op, field) pairs were actually injected (as opposed to author-set
+    explicit args, indistinguishable from injected ones by content alone once
+    both have round-tripped through the same PostProcess.args list) --
+    `ParserPlan.materializer_injected` is where that gets recorded. See
+    tests/presets/test_worker_parse.py for the strip-before-persist half."""
+
+    def _preset_with_url_and_price(self, **over):
+        from src.extract.models import PostProcess
+
+        return _amazon_preset(
+            url_template="https://www.amazon.{domain}/s?k={query}",
+            parsing_instructions=ParsingInstructions(
+                type="css",
+                fields={
+                    "urls": FieldRule(
+                        selector="a", attr="href", all=True,
+                        post_process=[PostProcess(op="urljoin")],
+                    ),
+                    "urls_explicit_base": FieldRule(
+                        selector="a", attr="href", all=True,
+                        post_process=[
+                            PostProcess(op="urljoin", args=["https://pinned.example"])
+                        ],
+                    ),
+                    "price": FieldRule(
+                        selector=".a-offscreen",
+                        post_process=[PostProcess(op="parse_price")],
+                    ),
+                    "price_eu_explicit": FieldRule(
+                        selector=".x",
+                        post_process=[PostProcess(op="parse_price", args=["eu"])],
+                    ),
+                },
+            ),
+            **over,
+        )
+
+    def test_injected_urljoin_field_is_recorded(self):
+        preset = self._preset_with_url_and_price()
+        req = PresetScrapeRequest(
+            source="amazon_product", preset_params={"query": "x"}, locale="us"
+        )
+        scrape = materialize(preset, req)
+        assert scrape.parser_plan.materializer_injected.get("urljoin") == ["urls"]
+
+    def test_explicit_base_field_is_not_recorded_as_injected(self):
+        preset = self._preset_with_url_and_price()
+        req = PresetScrapeRequest(
+            source="amazon_product", preset_params={"query": "x"}, locale="us"
+        )
+        scrape = materialize(preset, req)
+        assert "urls_explicit_base" not in scrape.parser_plan.materializer_injected.get(
+            "urljoin", []
+        )
+
+    def test_injected_price_locale_field_is_recorded_too(self):
+        preset = self._preset_with_url_and_price()
+        req = PresetScrapeRequest(
+            source="amazon_product", preset_params={"query": "x"}, locale="de"
+        )
+        scrape = materialize(preset, req)
+        assert scrape.parser_plan.materializer_injected.get("parse_price") == ["price"]
+        assert "price_eu_explicit" not in scrape.parser_plan.materializer_injected.get(
+            "parse_price", []
+        )
+
+    def test_no_injection_at_all_records_an_empty_mapping(self):
+        preset = _amazon_preset()  # title only, no urljoin/parse_price fields
+        req = PresetScrapeRequest(
+            source="amazon_product", preset_params={"asin": "X"}, locale="us"
+        )
+        scrape = materialize(preset, req)
+        assert scrape.parser_plan.materializer_injected == {}
 
 
 class TestParserPlan:
@@ -637,10 +786,17 @@ def test_yandex_preset_uses_prem_and_warmup():
     from src.presets.materializer import materialize, PresetScrapeRequest
 
     raw = json.loads(
-        pathlib.Path("src/presets/builtin/yandex_search.json").read_text()
+        pathlib.Path("src/presets/builtin/yandex_search_camoufox.json").read_text()
     )
     preset = Preset(**raw)
-    out = materialize(preset, PresetScrapeRequest(source="yandex_search", locale="ru", preset_params={"query": "купить ноутбук"}))
+    out = materialize(
+        preset,
+        PresetScrapeRequest(
+            source="yandex_search_camoufox",
+            locale="ru",
+            preset_params={"query": "купить ноутбук"},
+        ),
+    )
     assert out.proxy_type == "prem_res_rotating"
     assert out.prem_proxy_options.ip_filter == "quality-security"
     assert out.warmup.type == "homepage"
@@ -795,7 +951,7 @@ class TestBingSearchUnwrapsItsLinks:
         import json
         import pathlib
 
-        raw = json.loads(pathlib.Path("src/presets/builtin/bing_search.json").read_text())
+        raw = json.loads(pathlib.Path("src/presets/builtin/bing_search_chromium.json").read_text())
         return Preset(**raw).parsing_instructions.fields["links"]
 
     def test_the_wrapper_is_unwrapped(self):

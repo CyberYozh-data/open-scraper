@@ -60,10 +60,13 @@ class TestBehaviourNotRegressed:
         "value,expected",
         [
             ("$19.99", 19.99),
-            # Unchanged and intentional: under the default us locale a lone
-            # comma is a thousands separator. materializer.py injects "eu"
-            # for the locales where it is the decimal mark.
-            ("899,00 €", 89900.0),
+            # Corrected, not unchanged: this used to assert 89900.0. A lone
+            # comma with a 2-digit tail is unambiguously a decimal point in
+            # any locale -- no locale groups thousands two digits at a time
+            # -- so the "us" hint no longer overrides what the text itself
+            # says. See TestTextOverridesLocaleHint for the live failure
+            # this shape is a mirror of.
+            ("899,00 €", 899.0),
             ("1.234,56", 1234.56),
             # Newly correct, not unchanged: the sign used to ride inside the
             # match, so "-$5.00" matched the bare "-", reduced to "" and
@@ -128,3 +131,65 @@ class TestLeadingSeparator:
     )
     def test_leading_separator_keeps_the_magnitude(self, value, locale, expected):
         assert _parse_price(value, locale) == expected
+
+
+class TestTextOverridesLocaleHint:
+    """The audit's highest-severity defect: `locale` comes from the preset's
+    DECLARED country (materializer.py injects it from `LocaleProfile`, never
+    from the page), while the actual separator convention comes from
+    whatever page the browser was actually served. The two can disagree.
+
+    Live failure: a preset declared for Germany carried `locale="eu"`, but
+    the browser announced `en-DE` and Amazon served an English dot-decimal
+    page, so `price_raw="€32.99"` parsed as 3299.0 -- numeric, positive, euro
+    sign intact in `price_raw` -- passing every shipped check. The mirror,
+    `_parse_price("32,99€", "us")`, produces the same 3299.0 the other way.
+
+    A lone separator followed by exactly two digits is unambiguous from the
+    TEXT alone: no locale groups its thousands two digits at a time, so that
+    shape can only be a decimal point, regardless of `locale`. A 3-or-more
+    digit tail, and a repeated separator of one kind, are likewise
+    hint-INVARIANT the other way -- always a thousands grouping. Measured,
+    not assumed: `_parse_price("1.399", "us") == _parse_price("1.399", "eu")
+    == 1399.0`. The four "must keep working" cases below pin exactly that:
+    they do not exercise `locale` at all, and would keep passing even if the
+    `elif locale ==` branches in `_parse_price` were deleted outright.
+
+    `locale`'s entire remaining vote is pinned separately, in
+    `test_one_digit_tail_is_the_only_shape_the_hint_still_decides` below: a
+    lone separator with a 1-digit tail, which really is ambiguous.
+    """
+
+    @pytest.mark.parametrize(
+        "text,locale,expected",
+        [
+            # The audit's live failure: Amazon served a dot-decimal page
+            # because the browser announced en-DE, while the preset's hint
+            # said eu.
+            ("€32.99", "eu", 32.99),
+            # The mirror, which the same branch of the code produces.
+            ("32,99€", "us", 32.99),
+            # Hint-INVARIANT, not hint-decided: a 3-digit tail is always a
+            # thousands grouping and both-separators-present is always
+            # last-position-wins, under any locale. Kept as regression
+            # coverage that the 2-digit fix does not creep into these
+            # shapes -- see the class docstring for the measurement, and
+            # the test below for the one shape the hint actually decides.
+            ("1.399,00 €", "eu", 1399.00),
+            ("1,399.00", "us", 1399.00),
+            ("€1.399", "eu", 1399.0),
+            ("$1,399", "us", 1399.0),
+        ],
+    )
+    def test_parse_price_trusts_the_text_over_the_locale_hint(self, text, locale, expected):
+        assert _parse_price(text, locale) == pytest.approx(expected)
+
+    def test_one_digit_tail_is_the_only_shape_the_hint_still_decides(self):
+        # `locale`'s entire remaining authority. Deleting the `elif locale
+        # ==` branches in `_parse_price` collapses "1.3"/"us" to 13.0 and
+        # "1,3"/"eu" to 13.0, which is what makes this go red on that
+        # deletion -- unlike every case above, which would not notice.
+        assert _parse_price("1.3", "us") == 1.3
+        assert _parse_price("1.3", "eu") == 13.0
+        assert _parse_price("1,3", "eu") == 1.3
+        assert _parse_price("1,3", "us") == 13.0

@@ -483,7 +483,7 @@ class ScrapeRequest(BaseModel):
         draft compared the strings and so rejected `spoof_os='windows'` beside
         `fingerprint_profile='windows_on_host'`, which name the same OS and
         differ only in what else they pin. That turned every `spoof_os` call on
-        the two Camoufox presets — which state a profile — into a 400.
+        every Camoufox preset — which state a profile — into a 400.
 
         A profile that claims no OS (`random`, and `auto` before the server
         default is applied) is not a disagreement: `fingerprint_profile` still
@@ -694,8 +694,9 @@ class SearchRequest(BaseModel):
         ),
     )
     # Proxy override for the SERP fetch (and per-result scrapes when scrape=true).
-    # When unset, the SERP keeps the google_search preset's own proxy. Useful to
-    # route the Google fetch through a residential/mobile pool that isn't blocked.
+    # When unset, the SERP keeps its engine's own preset's proxy (google ->
+    # google_search_chromium; see api/search.py ENGINES). Useful to route the
+    # Google fetch through a residential/mobile pool that isn't blocked.
     proxy_type: ScrapeProxyType | None = Field(
         default=None,
         description="Override the SERP preset's proxy_type; preset default if unset.",

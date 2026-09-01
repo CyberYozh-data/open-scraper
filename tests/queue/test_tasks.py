@@ -607,7 +607,7 @@ async def test_login_replay_gets_the_same_masking_as_a_scrape(monkeypatch):
     runner = MagicMock()
     runner._engine = "chromium"
     runner.start = AsyncMock()
-    runner.resolve_proxy = AsyncMock(return_value=(None, None))
+    runner.resolve_proxy = AsyncMock(return_value=(None, None, None))
     runner._new_context = AsyncMock(return_value=context)
 
     async def _replay(_self, **kwargs):  # patched onto the class, so `self` arrives positionally

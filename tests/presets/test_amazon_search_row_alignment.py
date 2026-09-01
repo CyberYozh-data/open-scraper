@@ -23,8 +23,11 @@ markup (verified against live amazon.co.uk / amazon.de captures 2026-07-17).
 from __future__ import annotations
 
 import json
+import pathlib
+from html import escape as html_escape
 
 from src.extract.extractor import extract_fields
+from src.extract.models import ExtractRule, FieldRule
 from src.presets.materializer import PresetScrapeRequest, materialize
 from src.presets.models import Preset
 from src.presets.store import DEFAULT_BUILTIN_DIR
@@ -73,7 +76,7 @@ def _amazon_page(cards: list[str]) -> str:
 
 class TestAmazonSearchSelectors:
     def setup_method(self):
-        self.preset = _load("amazon_search")
+        self.preset = _load("amazon_search_chromium")
         self.fields = self.preset.parsing_instructions.fields
 
     def test_titles_anchored_to_title_recipe_container(self):
@@ -106,6 +109,62 @@ class TestAmazonSearchSelectors:
         assert rule.attr == "href"
         assert rule.all is True
 
+    def test_urls_unwraps_the_sponsored_redirect_then_resolves_absolute(self):
+        # Fix round 1: unwrap_param recovers the real destination Amazon
+        # embeds inline in a sponsored /sspa/click redirect's own 
+        # query param (passing any other value through unchanged -- which is
+        # what lets one pipeline handle organic and sponsored hrefs
+        # together), THEN urljoin resolves whatever comes out of that
+        # absolute. Round 0 nulled the sponsored row's url instead, which
+        # closed the relative-url defect but discarded the destination.
+        assert _ops(self.fields["urls"]) == [
+            ("unwrap_param", ["url"]),
+            ("urljoin", []),
+        ]
+
+    def test_sponsored_marker_shares_the_urls_selector_and_length(self):
+        # Same selector/attr/all as urls, so the marker is always exactly as
+        # long as urls -- it can never itself desync the row-alignment guard
+        # (see test_preset_engine_variants -> its length always matches urls
+        # because both are the SAME node set, only the post_process differs).
+        rule = self.fields["sponsored"]
+        assert rule.selector == self.fields["urls"].selector
+        assert rule.attr == "href"
+        assert rule.all is True
+        # Fix round 2 (finding 5): an always-matching alternation, not a
+        # plain "(sspa/click)" -- the pattern always finds something (the
+        # literal text, or a zero-width empty match), so the field never
+        # legitimately nulls and reads truthy ("sspa/click") vs empty ("")
+        # rather than value vs null. See TestAmazonSearchSponsoredMarkerOp.
+        # `(?s)` is load-bearing, not decoration: `.` does not cross a
+        # newline by default, so an href carrying one BEFORE the wrapper
+        # makes the negative-lookahead branch succeed at position 0 and the
+        # marker report "organic" while `unwrap_param` (whose own pattern is
+        # not `.`-based) still unwraps the row -- the two fields disagreeing,
+        # which this preset's description says cannot happen. See
+        # test_a_newline_before_the_wrapper_still_marks_the_row_sponsored.
+        assert _ops(rule) == [("regex", ["(?s)sspa/click|(?!.*sspa/click)"])]
+
+    def test_output_schema_item_types_are_honest_about_which_fields_null(self):
+        """Fix-round-2 finding 3, now guarded (fix-round-3 finding 6):
+        reverting `prices`/`ratings` back to a bare `{"type": "number"}` --
+        losing the `null` this preset's own row-alignment invariant
+        documents as by-design (measured: 5/176 null prices, 15/176 null
+        ratings in the 2026-08-27 audit) -- left the suite fully green
+        before this test existed. `output_schema` is handed to the self-heal
+        LLM as the target contract (parser_pipeline.run -> generate_selectors),
+        so a false non-nullable claim steers a heal toward exactly the
+        per-row selector shape this preset forbids. `urls`/`titles` stay
+        plain `string` (they no longer null by design at all); `sponsored`
+        stays plain `string` too (fix-round-2 finding 5: always matches, so
+        it never nulls either)."""
+        props = self.preset.output_schema["properties"]
+        assert props["prices"]["items"]["type"] == ["number", "null"]
+        assert props["ratings"]["items"]["type"] == ["number", "null"]
+        assert props["urls"]["items"]["type"] == "string"
+        assert props["titles"]["items"]["type"] == "string"
+        assert props["sponsored"]["items"]["type"] == "string"
+
     def test_prices_anchored_to_container_but_read_from_a_offscreen(self):
         # The container anchor is what guarantees the slot; the a-offscreen
         # anchor inside it is what guarantees the *value*. Reading the
@@ -124,7 +183,10 @@ class TestAmazonSearchSelectors:
 
     def test_prices_locale_left_empty_for_materializer(self):
         # MUST stay empty: src/presets/materializer.py injects us/eu per
-        # locale. Hardcoding it here breaks DE prices (899.0 -> 89900.0).
+        # locale. _parse_price now reads a 2-digit tail straight from the
+        # text regardless of locale, so hardcoding "us" here no longer
+        # breaks a price like "899,00 €" -- but it would still break a
+        # 1-digit-tail DE price ("12,3 €" -> 123.0 instead of 12.3).
         assert self.fields["prices"].post_process[-1].args == []
 
     def test_ratings_anchored_to_faceout_container_via_html(self):
@@ -167,7 +229,7 @@ class TestAmazonSearchExtraction:
     missing its rating or price, instead of shrinking and misaligning."""
 
     def setup_method(self):
-        self.preset = _load("amazon_search")
+        self.preset = _load("amazon_search_chromium")
 
     def test_missing_rating_and_price_do_not_shrink_arrays(self):
         html = _amazon_page(
@@ -200,8 +262,12 @@ class TestAmazonSearchExtraction:
         assert len(data["urls"]) == 4
         assert len(data["prices"]) == 4
         assert len(data["ratings"]) == 4
+        assert len(data["sponsored"]) == 4
 
         assert data["titles"] == ["Widget One", "Widget Two", "Widget Three", "Widget Four"]
+        # None of these hrefs carry a sponsored "url=" wrapper, so
+        # unwrap_param passes them through unchanged -- unmaterialized here,
+        # so urljoin has no base and leaves them relative too.
         assert data["urls"] == [
             "/dp/A1/ref=sr_1",
             "/dp/A2/ref=sr_1",
@@ -210,7 +276,17 @@ class TestAmazonSearchExtraction:
         ]
         assert data["prices"] == [19.99, 9.99, None, 5.49]
         assert data["ratings"] == [4.5, None, 3.0, 5.0]
-        assert not warnings
+        # No sponsored rows on this page at all -- an empty string (truthy
+        # vs empty), not null (fix round 2, finding 5), so this column never
+        # trips the silent-null guard regardless of row count.
+        assert data["sponsored"] == ["", "", "", ""]
+        # One DOCUMENTED warning, not a regression of the behaviour this test
+        # actually pins (missing rating/price don't shrink arrays): urljoin
+        # has no base, since this call bypasses materialize(), the only
+        # thing that ever fills it in (see TestUrlBaseInjection in
+        # test_materializer.py).
+        assert len(warnings) == 1
+        assert "urljoin" in warnings[0]
 
     def test_missing_price_recipe_container_shrinks_the_array(self):
         """Pins the invariant the whole fix depends on.
@@ -249,9 +325,17 @@ class TestAmazonSearchExtraction:
         assert len(data["prices"]) == 1
         assert data["prices"] == [19.99]
         # Wrong, but not silent: the length guard flags the shrunk field.
-        assert len(warnings) == 1
-        assert warnings[0].startswith("row_alignment_mismatch:")
-        assert "'prices'=1" in warnings[0]
+        # Plus the same documented warning as the test above (no
+        # materialize() -> urljoin has no base) -- unrelated to the shrink
+        # this test actually pins. `sponsored` contributes nothing here: an
+        # empty-string marker on both (non-sponsored) rows never trips the
+        # silent-null guard (fix round 2, finding 5).
+        assert data["sponsored"] == ["", ""]
+        assert len(warnings) == 2
+        assert any(w.startswith("row_alignment_mismatch:") for w in warnings)
+        assert any("urljoin" in w for w in warnings)
+        alignment_warning = next(w for w in warnings if w.startswith("row_alignment_mismatch:"))
+        assert "'prices'=1" in alignment_warning
 
 
 class TestAmazonSearchPriceValueTraps:
@@ -260,7 +344,7 @@ class TestAmazonSearchPriceValueTraps:
     number is what the old `(\\d[\\d.,]*)` regex did."""
 
     def setup_method(self):
-        self.preset = _load("amazon_search")
+        self.preset = _load("amazon_search_chromium")
 
     def _prices(self, price_html: str):
         html = _amazon_page([_amazon_card(asin="A1", title="T", price_html=price_html)])
@@ -311,7 +395,7 @@ class TestAmazonSearchRatingMarkupShapes:
     not assume minified, un-nested markup."""
 
     def setup_method(self):
-        self.preset = _load("amazon_search")
+        self.preset = _load("amazon_search_chromium")
 
     def _ratings(self, rating_html: str):
         html = _amazon_page([_amazon_card(asin="A1", title="T", rating_html=rating_html)])
@@ -403,7 +487,7 @@ class TestAmazonSearchTitleAnchoring:
     """
 
     def setup_method(self):
-        self.preset = _load("amazon_search")
+        self.preset = _load("amazon_search_chromium")
 
     def _titles(self, h2_inner: str):
         html = _amazon_page(
@@ -424,9 +508,16 @@ class TestAmazonSearchTitleAnchoring:
             ]
         )
         data, warnings = extract_fields(html, self.preset.parsing_instructions)
-        for key in ("titles", "urls", "prices", "ratings"):
+        for key in ("titles", "urls", "prices", "ratings", "sponsored"):
             assert len(data[key]) == 1, key
-        assert not warnings
+        # One DOCUMENTED warning unrelated to title anchoring (what this
+        # helper actually tests): unmaterialized -> urljoin has no base.
+        # `sponsored` never contributes a warning at all (fix round 2): its
+        # always-matching regex yields "" for this non-sponsored card, never
+        # null, so there is nothing for the silent-null guard to see.
+        assert len(warnings) == 1
+        assert "urljoin" in warnings[0]
+        assert data["sponsored"] == [""]
         return data["titles"]
 
     def test_live_card_shape_reads_the_title_exactly_once(self):
@@ -497,16 +588,317 @@ class TestAmazonSearchTitleAnchoring:
         ) == ["Real TitleReal Title"]
 
 
+class TestAmazonSearchUrlsAbsoluteAndSponsoredMarked:
+    """MEASURED 2026-08-27: five successful audit runs returned 76/76 relative
+    `urls` (`/dp/ASIN/ref=...`), and 6 of 22 rows in three of five runs were a
+    `/sspa/click?...&url=%2F...` sponsored redirect sitting in the SAME
+    `div[data-component-type='s-search-result']` container as organic rows —
+    indistinguishable except by that href shape.
+
+    FIXED 2026-08-28 (round 0): `urljoin` resolved organic urls absolute and
+    `null_if_regex` nulled the sponsored row's url in place. Closed the
+    relative-url defect, but only HALF the sponsored one: deleting the url
+    identified a sponsored row without recovering its destination, so the row
+    still carried its title/price into the organic list unlabelled, and its
+    None was indistinguishable from a drifted selector.
+
+    FIX ROUND 1 2026-08-28 (review finding 2): Amazon's own sponsored
+    redirect carries the real destination INLINE —
+    `/sspa/click?...&url=%2FAcer-Aspire-Laptop-Ryzen-Netzteil%2Fdp%2F...` —
+    so `urls` now UNWRAPS it (percent-decodes the `url` query param via the
+    new `unwrap_param` op; any value without that param passes through
+    UNCHANGED, which is what lets one pipeline handle organic and sponsored
+    hrefs together) and resolves the recovered path absolute the same way as
+    every organic url. A parallel `sponsored` field — same selector, same
+    length — carries the marker `"sspa/click"` exactly on the rows that were
+    unwrapped, so a caller can still filter organic-only. All 48 real
+    sponsored hrefs from the 2026-08-27 audit are checked against the actual
+    shipped pipeline in TestAmazonSearchSponsoredUnwrapAgainstRealAuditCaptures
+    below.
+
+    FIX ROUND 2 2026-08-28 (review finding 5): `sponsored` originally read
+    `None` for an organic row -- byte-identical to what a caller would see if
+    Amazon renamed `sspa/click` and the marker died outright, and a false
+    `_warn_on_silent_nulls` trip on a genuinely ad-free page (every row
+    legitimately null is indistinguishable from "the pipeline broke"). The
+    regex is now an always-matching alternation
+    (`sspa/click|(?!.*sspa/click)`): the literal text on a sponsored row, an
+    empty string `""` on an organic one -- never `None` -- so the field reads
+    truthy-vs-empty and never trips the silent-null guard regardless of how
+    many rows are (or aren't) sponsored.
+
+    LIVE-VERIFIED 2026-08-28 against real amazon.de/amazon.co.uk captures:
+    amazon.de sometimes serves results under an English-UI `/-/en/` path
+    prefix, putting that prefix in front of the sponsored redirect too
+    (`/-/en/sspa/click?...`) — round 0's anchored `^/sspa/click` pattern
+    MISSED every sponsored row under this prefix (see
+    test_sponsored_href_under_a_locale_path_prefix_still_unwraps_and_marks);
+    neither `unwrap_param` (matches `url=` anywhere) nor the `sponsored`
+    marker's regex (matches `sspa/click` anywhere) depend on where in the
+    path the wrapper sits, so this shape needs no special-casing this time.
+    """
+
+    # Verbatim shapes from the audit record (research/preset_audit... 2026-08-27).
+    ORGANIC_HREF = (
+        "/HP-Display-Graphics-Microsoft-enthalten/dp/B0F8L98RLY/ref=sr_1_3"
+        "?dib=eyJ2IjoiMSJ9"
+    )
+    SPONSORED_HREF = (
+        "/sspa/click?ie=UTF8&spc=MTo3Nzk4MTkzMTM5MDgyNDAyOjE3ODc4MjU1NTY6c3BfYXRm"
+        "&url=%2FAcer-Aspire-Laptop-Ryzen-Netzteil%2Fdp%2FB0EXAMPLE1"
+    )
+    # The real destination Amazon embeds in SPONSORED_HREF's `url=` param,
+    # percent-decoded -- what unwrap_param must recover.
+    SPONSORED_UNWRAPPED = "/Acer-Aspire-Laptop-Ryzen-Netzteil/dp/B0EXAMPLE1"
+
+    def _card(self, *, asin: str, title: str, href: str) -> str:
+        return f"""
+        <div data-component-type="s-search-result" data-asin="{asin}">
+          <div data-cy="title-recipe" class="a-section s-title-instructions-style">
+            <a class="a-link-normal s-line-clamp-4" href="{href}">
+              <h2 aria-label="{title}" class="a-size-base-plus"><span>{title}</span></h2>
+            </a>
+          </div>
+          <div data-cy="price-recipe">{_price("$19.99")}</div>
+          <div data-cy="asin-faceout-container"></div>
+        </div>
+        """
+
+    def _page(self) -> str:
+        return _amazon_page(
+            [
+                self._card(asin="ORG1", title="HP Laptop", href=self.ORGANIC_HREF),
+                self._card(
+                    asin="SPON1", title="Acer Laptop Sponsored", href=self.SPONSORED_HREF
+                ),
+            ]
+        )
+
+    def test_materialized_organic_and_sponsored_urls_are_both_absolute(self):
+        preset = _load("amazon_search_chromium")
+        scrape = materialize(
+            preset,
+            PresetScrapeRequest(
+                source="amazon_search_chromium",
+                preset_params={"query": "laptop"},
+                locale="de",
+            ),
+        )
+
+        data, warnings = extract_fields(self._page(), scrape.extract)
+
+        assert (
+            len(data["titles"]) == len(data["urls"]) == len(data["prices"])
+            == len(data["sponsored"]) == 2
+        )
+
+        assert data["urls"][0] == "https://www.amazon.de" + self.ORGANIC_HREF
+        # The sponsored row now carries a REAL, followable destination --
+        # not None -- recovered from its own wrapper.
+        assert data["urls"][1] == "https://www.amazon.de" + self.SPONSORED_UNWRAPPED
+        assert all(u.startswith("https://www.amazon.de/") for u in data["urls"])
+        assert not any("/sspa/click" in u for u in data["urls"])
+
+        # Marked, not dropped: sponsored[1] is non-null exactly where the
+        # unwrap happened; sponsored[0] (organic) is null.
+        assert data["sponsored"] == ["", "sspa/click"]
+
+        # Every OTHER field is untouched -- titles[1]/prices[1] still
+        # genuinely describe row 2, same as always; only urls/sponsored
+        # differ from a plain organic row.
+        assert data["titles"] == ["HP Laptop", "Acer Laptop Sponsored"]
+        assert data["prices"] == [19.99, 19.99]
+        assert warnings == []
+
+    def test_a_newline_before_the_wrapper_still_marks_the_row_sponsored(self):
+        """Final-review finding: `.` does not cross a newline. Without `(?s)`
+        the alternation's second branch, `(?!.*sspa/click)`, succeeds at
+        position 0 of an href whose wrapper sits after a newline -- because
+        `.*` cannot reach the wrapper to refute it -- so `sponsored` reports
+        `""` (organic) on a row `unwrap_param` DID unwrap, since unwrap's own
+        `(?:^|[?&])url=` pattern uses no `.` and is unaffected. The two fields
+        then disagree, which this preset's description states cannot happen.
+        HTML attribute values may legally contain newlines, and the marker is
+        the only thing telling a caller a row is an ad."""
+        href = "\n" + self.SPONSORED_HREF
+        preset = _load("amazon_search_chromium")
+        scrape = materialize(
+            preset,
+            PresetScrapeRequest(
+                source="amazon_search_chromium",
+                preset_params={"query": "laptop"},
+                locale="de",
+            ),
+        )
+        page = _amazon_page(
+            [self._card(asin="SPON1", title="Acer Laptop Sponsored", href=href)]
+        )
+        data, _ = extract_fields(page, scrape.extract)
+
+        # The row WAS unwrapped ...
+        assert data["urls"] == ["https://www.amazon.de" + self.SPONSORED_UNWRAPPED]
+        # ... so the marker must say so too.
+        assert data["sponsored"] == ["sspa/click"]
+
+    def test_uk_locale_resolves_against_co_uk_not_com(self):
+        preset = _load("amazon_search_chromium")
+        scrape = materialize(
+            preset,
+            PresetScrapeRequest(
+                source="amazon_search_chromium",
+                preset_params={"query": "laptop"},
+                locale="uk",
+            ),
+        )
+        data, _ = extract_fields(self._page(), scrape.extract)
+        assert data["urls"] == [
+            "https://www.amazon.co.uk" + self.ORGANIC_HREF,
+            "https://www.amazon.co.uk" + self.SPONSORED_UNWRAPPED,
+        ]
+
+    def test_camoufox_twin_behaves_identically(self):
+        preset = _load("amazon_search_camoufox")
+        scrape = materialize(
+            preset,
+            PresetScrapeRequest(
+                source="amazon_search_camoufox",
+                preset_params={"query": "laptop"},
+                locale="de",
+            ),
+        )
+        data, _ = extract_fields(self._page(), scrape.extract)
+        assert data["urls"] == [
+            "https://www.amazon.de" + self.ORGANIC_HREF,
+            "https://www.amazon.de" + self.SPONSORED_UNWRAPPED,
+        ]
+        assert data["sponsored"] == ["", "sspa/click"]
+
+    def test_unmaterialized_extraction_recovers_the_url_but_urljoin_warns(self):
+        """`unwrap_param` needs no base at all -- unlike `urljoin`, calling
+        extract_fields directly (bypassing materialize()) still recovers the
+        real RELATIVE destination for a sponsored row. `urljoin` itself has
+        no base to resolve against here, so (fix-round-1 finding 4) it now
+        WARNS rather than silently staying relative -- unlike parse_price's
+        "us" default, there is no sensible default transform for a URL with
+        no base, so silence would be a "succeeded but useless" result with
+        nothing telling the caller why urls came back relative."""
+        preset = _load("amazon_search_chromium")
+        data, warnings = extract_fields(self._page(), preset.parsing_instructions)
+        assert data["urls"][0] == self.ORGANIC_HREF
+        assert data["urls"][1] == self.SPONSORED_UNWRAPPED
+        assert data["sponsored"] == ["", "sspa/click"]
+        # Exactly one warning: urljoin has no base. The sponsored marker does
+        # NOT warn here (unlike the single-card fixtures elsewhere in this
+        # file) because this page has one sponsored AND one organic row, so
+        # the column is not 100% null.
+        assert len(warnings) == 1
+        assert "urljoin" in warnings[0]
+
+    def test_sponsored_href_under_a_locale_path_prefix_still_unwraps_and_marks(self):
+        """Live capture 2026-08-28: amazon.de served its results under an
+        English-UI `/-/en/` path prefix, so the sponsored redirect was
+        `/-/en/sspa/click?...` rather than a bare `/sspa/click?...` at the
+        start of the href. Round 0's anchored `^/sspa/click` pattern MISSED
+        every one of the 6 sponsored rows on that page. Neither
+        `unwrap_param` nor the `sponsored` marker anchor to the start of the
+        href, so this shape needs no special-casing."""
+        organic = "/-/en/HP-Display-Graphics-Windows-Keyboard/dp/B0F8L98RLY/ref=sr_1_3"
+        sponsored = (
+            "/-/en/sspa/click?ie=UTF8&spc=MToyNjY0MjYwOTcxNDY5MzM0"
+            "&url=%2FAcer-Aspire-Laptop-Ryzen-Supply%2Fdp%2FB0836QR869"
+        )
+        page = _amazon_page(
+            [
+                self._card(asin="ORG2", title="HP Laptop EN-UI", href=organic),
+                self._card(asin="SPON2", title="Acer Laptop Sponsored EN-UI", href=sponsored),
+            ]
+        )
+        preset = _load("amazon_search_chromium")
+        scrape = materialize(
+            preset,
+            PresetScrapeRequest(
+                source="amazon_search_chromium", preset_params={"query": "laptop"}, locale="de"
+            ),
+        )
+
+        data, warnings = extract_fields(page, scrape.extract)
+
+        assert len(data["titles"]) == len(data["urls"]) == len(data["sponsored"]) == 2
+        assert data["urls"][0] == "https://www.amazon.de" + organic
+        assert (
+            data["urls"][1]
+            == "https://www.amazon.de/Acer-Aspire-Laptop-Ryzen-Supply/dp/B0836QR869"
+        )
+        assert not any("/sspa/click" in u for u in data["urls"])
+        assert data["sponsored"] == ["", "sspa/click"]
+        assert warnings == []
+
+
+class TestAmazonSearchSponsoredUnwrapAgainstRealAuditCaptures:
+    """Fix-round-1 review: verify the unwrap against the REAL hrefs recorded
+    in the 2026-08-27 dual-engine audit, not a hand-written fixture. Loads
+    every amazon_search run's `urls` from
+    research/preset_audit_dual_engine_2026_08_27.json, filters to the ones
+    that are the sponsored `/sspa/click` shape, and runs each through the
+    actual shipped `urls` post_process pipeline (read from the preset file,
+    not re-typed here, so a future edit to the pipeline is caught by this
+    test rather than silently going unchecked).
+    """
+
+    def _real_sponsored_hrefs(self) -> list[str]:
+        path = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "research" / "preset_audit_dual_engine_2026_08_27.json"
+        )
+        runs = json.loads(path.read_text(encoding="utf-8"))
+        hrefs = []
+        for run in runs:
+            if "amazon_search" not in run.get("preset", ""):
+                continue
+            for url in (run.get("data") or {}).get("urls") or []:
+                if url and "sspa/click" in url:
+                    hrefs.append(url)
+        return hrefs
+
+    def test_the_fixture_itself_has_the_expected_48_sponsored_hrefs(self):
+        # Pins the input so a change to the audit file is noticed, rather
+        # than silently shrinking what the next test actually checks.
+        assert len(self._real_sponsored_hrefs()) == 48
+
+    def test_every_real_sponsored_href_unwraps_to_a_plausible_product_path(self):
+        preset = _load("amazon_search_chromium")
+        ops = preset.parsing_instructions.fields["urls"].post_process
+        hrefs = self._real_sponsored_hrefs()
+        assert hrefs, "fixture loader returned nothing -- see the pinned-count test"
+
+        for href in hrefs:
+            html = f'<a href="{html_escape(href)}">x</a>'
+            rule = ExtractRule(
+                type="css",
+                fields={"url": FieldRule(selector="a", attr="href", post_process=ops)},
+            )
+            data, _ = extract_fields(html, rule)
+            out = data["url"]
+            # No base injected here (this checks the UNWRAP, which needs
+            # none) -- urljoin's own no-base behaviour is covered elsewhere.
+            assert out is not None, href
+            assert out.startswith("/"), (href, out)
+            assert "/dp/" in out, (href, out)
+            # The wrapper itself must be gone -- a half-unwrap that left the
+            # /sspa/click prefix attached would still be useless.
+            assert "sspa/click" not in out, (href, out)
+
+
 class TestAmazonSearchPriceLocaleIntegration:
     """End-to-end guard that the empty parse_price args really do get the
     correct locale injected per-domain, rather than a hardcoded one."""
 
     def _materialized(self, locale: str):
-        preset = _load("amazon_search")
+        preset = _load("amazon_search_chromium")
         return materialize(
             preset,
             PresetScrapeRequest(
-                source="amazon_search", preset_params={"query": "kaffee"}, locale=locale
+                source="amazon_search_chromium", preset_params={"query": "kaffee"}, locale=locale
             ),
         )
 

@@ -1,6 +1,6 @@
 """Web search endpoint: SERP + optional scrape in one call.
 
-Reuses the built-in `google_search` preset as the SERP source — materialize it
+Reuses the built-in `google_search_chromium` preset as the SERP source — materialize it
 with the query, run it through the normal job queue, parse the organic result
 blocks, and (optionally) scrape each result page with the same pipeline. The
 search logic is factored into `build_search` with an injected `run_job` so it
@@ -56,11 +56,24 @@ class EngineProfile:
 
 
 # One entry per engine — adding a fourth is a new preset + one line here.
+#
+# Each entry names an engine-suffixed variant explicitly. The three chosen here
+# are the engines these presets used before they were split in two, so this
+# endpoint's behaviour is unchanged by the split: google and bing ran Chromium,
+# yandex ran Camoufox (which is why it was adopted — it passes SmartCaptcha).
+# Letting a caller pick the other twin through /search is deliberately not
+# wired up here; it is a separate change.
 ENGINES: dict[str, EngineProfile] = {
-    "google": EngineProfile("google_search", "h3", "div[data-sncf='1'], .VwiC3b"),
-    "bing": EngineProfile("bing_search", "h2", ".b_caption p, p.b_lineclamp2"),
+    "google": EngineProfile(
+        "google_search_chromium", "h3", "div[data-sncf='1'], .VwiC3b"
+    ),
+    "bing": EngineProfile(
+        "bing_search_chromium", "h2", ".b_caption p, p.b_lineclamp2"
+    ),
     "yandex": EngineProfile(
-        "yandex_search", ".OrganicTitle-LinkText, h2", ".OrganicText, .TextContainer"
+        "yandex_search_camoufox",
+        ".OrganicTitle-LinkText, h2",
+        ".OrganicText, .TextContainer",
     ),
 }
 

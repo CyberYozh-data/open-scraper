@@ -8,6 +8,7 @@ from src.browser.login_runner import LoginRunner, _substitute_creds
 from src.sessions.models import LoginScript, LoginStep
 
 
+
 class TestSubstituteCreds:
     def test_replaces_creds_var(self):
         assert _substitute_creds("$creds_email", {"email": "a@b.com"}) == "a@b.com"
@@ -132,7 +133,9 @@ class TestLoginRunnerResult:
     @pytest.fixture
     def page(self):
         page = MagicMock()
-        page.goto = AsyncMock()
+        page.goto = AsyncMock(
+            return_value=MagicMock(request=MagicMock(redirected_from=None))
+        )
         page.fill = AsyncMock()
         page.click = AsyncMock()
         page.wait_for_selector = AsyncMock()

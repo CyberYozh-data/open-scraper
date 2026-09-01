@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.extract.models import FieldRule, ExtractRule
+from src.extract.models import FieldRule, ExtractRule, PostProcess
 
 
 class TestFieldRule:
@@ -102,3 +102,58 @@ class TestExtractRule:
         """Validation XPath type"""
         rule = ExtractRule(type="xpath", fields={})
         assert rule.type == "xpath"
+
+
+class TestPostProcessDocumentsTheUnwrapParamSafetyProperty:
+    """`PostProcess.op`'s Field description IS the OpenAPI contract for this
+    op -- it is what a preset author (and any client generating against
+    /openapi.json) reads. The refusal `unwrap_param` performs was added as a
+    documented property, not an implementation detail, so deleting the sentence
+    that states it must fail. Nothing else in the suite reads this text.
+    """
+
+    @staticmethod
+    def _description() -> str:
+        return PostProcess.model_fields["op"].description or ""
+
+    def test_the_refusal_is_stated(self):
+        text = self._description()
+        assert "absolute http(s) URL with a host" in text
+        assert "plain relative path" in text
+        for scheme in ("'javascript:'", "'data:'", "'file:'", "'ftp:'"):
+            assert scheme in text, f"{scheme} not named as refused"
+        assert "//host/path" in text, "the protocol-relative case is not named"
+        assert "TWO OR MORE slashes or backslashes" in text, (
+            "the slash-run rule -- not just the two-slash spelling -- must be "
+            "stated, since that is what fix round 2 widened"
+        )
+        assert "naming no path segment of its own" in text
+
+    def test_the_failure_DIRECTION_is_stated(self):
+        """The property is not merely "bad values are rejected" -- it is that
+        rejection is fail-SAFE (passthrough, never null). A caller relying on
+        row alignment needs that half."""
+        text = self._description()
+        assert "UNCHANGED (never null)" in text
+        assert "passthrough" in text
+
+    def test_the_same_host_NON_guarantee_is_stated(self):
+        """Fix-round-3 finding 1. This paragraph used to end "this op cannot
+        introduce ... via a following 'urljoin' -- one on a host the page's own
+        URL did not supply", which is FALSE: an absolute http(s) URL naming any
+        host is accepted by design, and `urljoin` leaves an absolute reference
+        alone. Measured through the shipped amazon_search_chromium pipeline
+        with the materializer's base injected, `url=https%3A%2F%2Fevil.example
+        .com%2Fx` yields `https://evil.example.com/x`.
+
+        The op adds no capability a plain `href="https://evil.example.com"`
+        did not already have, so this is a documentation defect rather than an
+        exploit -- but it is the published /openapi.json text, a reader could
+        take it as a same-host guarantee and skip their own check, and the
+        sibling tests in this class exist to FREEZE this paragraph. A frozen
+        false claim is worse than an unfrozen one."""
+        text = self._description()
+        assert "NOT a same-host guarantee" in text
+        assert "must check the host itself" in text
+        # The old wording must not come back.
+        assert "did not supply" not in text

@@ -1234,10 +1234,19 @@ function renderSearchResults(el, data) {
 }
 
 // Fill the Search-tab Locale dropdown from the *selected engine's* preset
-// locales (google_search / bing_search / yandex_search). The list was a
-// hardcoded us/uk/de/fr/ru/jp, so engine-specific locales — notably Yandex's
-// region set (kz, by, ee, ua, …, each carrying its own `lr`) — were never
-// selectable. Re-runs on engine change and when the scraper target changes.
+// locales (google_search_chromium / bing_search_chromium /
+// yandex_search_camoufox — the exact variants ENGINES in src/api/search.py
+// resolves each engine to). The list was a hardcoded us/uk/de/fr/ru/jp, so
+// engine-specific locales — notably Yandex's region set (kz, by, ee, ua, …,
+// each carrying its own `lr`) — were never selectable. Re-runs on engine
+// change and when the scraper target changes.
+// Mirrors ENGINES in src/api/search.py — keep the two in lockstep; adding or
+// changing an entry on one side without the other silently breaks this.
+const SEARCH_ENGINE_PRESET = {
+  google: 'google_search_chromium',
+  bing: 'bing_search_chromium',
+  yandex: 'yandex_search_camoufox',
+};
 async function populateSearchLocales() {
   const engineSel = document.getElementById('se-engine');
   const localeSel = document.getElementById('se-locale');
@@ -1251,8 +1260,18 @@ async function populateSearchLocales() {
     try { want = (JSON.parse(localStorage.getItem(STATE_KEY) || 'null')?.inputs || {})['se-locale'] || ''; }
     catch { /* no/invalid saved state */ }
   }
-  const { ok, data } = await apiCall(
-    `/api/v1/presets/${encodeURIComponent(engineSel.value + '_search')}`);
+  const preset = SEARCH_ENGINE_PRESET[engineSel.value];
+  if (!preset) {
+    // The lockstep with ENGINES in src/api/search.py has broken: the backend
+    // offers an engine this map does not know, so its locales silently stay
+    // whatever the previous engine left in the <select>. Say so.
+    console.warn(
+      `populateSearchLocales: no preset mapped for engine "${engineSel.value}" — ` +
+      `SEARCH_ENGINE_PRESET is out of lockstep with ENGINES in src/api/search.py; ` +
+      `known engines: ${Object.keys(SEARCH_ENGINE_PRESET).join(', ')}`);
+    return;
+  }
+  const { ok, data } = await apiCall(`/api/v1/presets/${encodeURIComponent(preset)}`);
   if (!ok || !data || !data.locales) return;
   const keys = Object.keys(data.locales);
   const def = data.default_locale || keys[0] || 'us';
@@ -2103,7 +2122,7 @@ function collectProxy(prefix) {
 renderProxyComponent('se', document.getElementById('se-proxy-component'));
 renderWarmupComponent('se', document.getElementById('se-warmup-component'));
 // Search tab uses an empty-value sentinel so collectProxy returns null (= no proxy
-// override, letting the google_search preset decide). Prepend it to the type select
+// override, letting the google_search_chromium preset decide). Prepend it to the type select
 // that renderProxyComponent just created.
 (function() {
   const typeSel = document.getElementById('se-proxy-type');

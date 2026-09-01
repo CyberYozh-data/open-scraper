@@ -58,7 +58,7 @@ _GOOGLE_SERP = """
 
 class TestGoogleSearchSelectors:
     def setup_method(self):
-        self.preset = _load("google_search")
+        self.preset = _load("google_search_chromium")
         self.fields = self.preset.parsing_instructions.fields
 
     def test_titles_scoped_to_rso_result_container(self):
@@ -105,7 +105,7 @@ class TestGoogleSearchSelectors:
 
 class TestGoogleSearchExtraction:
     def setup_method(self):
-        self.preset = _load("google_search")
+        self.preset = _load("google_search_chromium")
 
     def test_all_fields_aligned_and_ads_paa_excluded(self):
         data, warnings = extract_fields(_GOOGLE_SERP, self.preset.parsing_instructions)
@@ -143,7 +143,7 @@ class TestGoogleSearchSnippetlessResult:
     """
 
     def setup_method(self):
-        self.preset = _load("google_search")
+        self.preset = _load("google_search_chromium")
 
     def test_result_without_snippet_yields_none_in_its_own_slot(self):
         serp = """
@@ -205,7 +205,7 @@ class TestGoogleSearchKnownAlignmentLimitations:
     """
 
     def setup_method(self):
-        self.preset = _load("google_search")
+        self.preset = _load("google_search_chromium")
 
     def test_sitelinks_inside_result_grow_titles_and_links(self):
         """Latent: an extra <h3> inside a tF2Cxc breaks the 1-h3-per-result
@@ -301,7 +301,7 @@ class TestGoogleSearchSnippetRegexBoundary:
     """
 
     def setup_method(self):
-        self.preset = _load("google_search")
+        self.preset = _load("google_search_chromium")
 
     def _extract(self, block_body: str):
         serp = f'<html><body><div id="rso"><div class="tF2Cxc">{block_body}</div></div></body></html>'

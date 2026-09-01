@@ -49,7 +49,7 @@ def _walmart_page(*, price: str = "Now $199.00", reviews: str = "(4.4)|44.4K rat
 
 class TestWalmartProductValues:
     def setup_method(self):
-        self.preset = _load("walmart_product")
+        self.preset = _load("walmart_product_camoufox")
 
     def _extract(self, **kwargs):
         data, warnings = extract_fields(
@@ -119,7 +119,7 @@ class TestWalmartProductValues:
 
 class TestGoogleShoppingHasNoUrlsField:
     def setup_method(self):
-        self.preset = _load("google_shopping")
+        self.preset = _load("google_shopping_chromium")
 
     def test_prompt_schema_no_longer_advertises_urls(self):
         # GET /api/v1/presets/<name> returns the whole document, so a stale

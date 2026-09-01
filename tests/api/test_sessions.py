@@ -317,22 +317,12 @@ class TestSessionsServiceAuth:
         resp = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
         assert resp.status_code == 503
 
-    def test_session_ops_excluded_from_mcp_surface(self):
-        # The session operations are hijack-bearing and must not be advertised as
-        # (unauthenticated) MCP tools. Derived exclusion → a new session route
-        # can't silently drift onto the MCP surface.
-        from src.app import mcp_excluded_operations
-        from src.api.sessions import router as sessions_router
-
-        excluded = set(mcp_excluded_operations())
-        session_ops = {
-            route.operation_id
-            for route in sessions_router.routes
-            if getattr(route, "operation_id", None)
-        }
-        assert session_ops  # sanity: the router actually has operation_ids
-        assert session_ops <= excluded
-        assert "resolve_proxy" in excluded
+    # test_session_ops_excluded_from_mcp_surface moved to
+    # tests/api/test_mcp_surface.py. It recomputed the implementation's own
+    # comprehension over sessions_router.routes and compared it to itself, so
+    # it could not see drift — and did not, while eight prem-proxies routes sat
+    # on the MCP surface. The replacement inspects the MCP instance create_app
+    # actually builds.
 
     def test_correct_token_passes_gate(self, monkeypatch, mocker):
         monkeypatch.setattr(settings, "service_token", SecretStr("s3cret"))

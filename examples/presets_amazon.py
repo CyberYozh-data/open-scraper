@@ -26,7 +26,7 @@ load_dotenv()
 
 def scrape_amazon_preset(asin: str, locale: str = "us") -> dict:
     payload = {
-        "source": "amazon_product",
+        "source": "amazon_product_chromium",
         "preset_params": {"asin": asin},
         "locale": locale,
     }
@@ -43,7 +43,7 @@ def scrape_amazon_preset(asin: str, locale: str = "us") -> dict:
     if any(os.getenv(k) for k in _llm_keys):
         payload["llm"] = {"model": os.getenv("DEFAULT_LLM_MODEL", "openai/gpt-5.4-mini")}
 
-    console.print(f"[bold cyan]Preset amazon_product[/bold cyan] asin={asin} locale={locale}\n")
+    console.print(f"[bold cyan]Preset amazon_product_chromium[/bold cyan] asin={asin} locale={locale}\n")
 
     with httpx.Client(timeout=90.0) as client:
         resp = client.post(f"{API_BASE}/scrape/preset/page", json=payload)

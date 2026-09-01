@@ -112,6 +112,7 @@ def test_proxy_failure_matches_firefox_error_codes():
 
 async def test_run_scrape_success_envelope(monkeypatch):
     fetch_result = MagicMock(
+        egress_denied=[],
         ok=True, html="<html>hi</html>", final_url="https://e.com/", status_code=200,
         screenshot_b64=None, applied_user_agent="ua", applied_locale=None,
         applied_timezone=None, applied_accept_language=None, element_status=None,
@@ -149,6 +150,7 @@ async def test_run_scrape_surfaces_fetch_failure_in_meta(monkeypatch):
     # assert the surfaced meta. status_code=200 + blocked=False keep both the
     # proxy-failure and block rotation paths from firing.
     fetch_result = MagicMock(
+        egress_denied=[],
         ok=False, blocked=False, html="<html></html>", final_url="https://e.com/",
         status_code=200, screenshot_b64=None, applied_user_agent=None,
         applied_locale=None, applied_timezone=None, applied_accept_language=None,
@@ -205,6 +207,10 @@ async def test_run_scrape_rotates_proxy_on_captcha(monkeypatch):
             applied_locale=None, applied_timezone=None, applied_accept_language=None,
             element_status=None, storage_state=None, applied_warmup=None,
             applied_fingerprint=None,
+            # A real FetchResult carries an empty list here; a bare MagicMock
+            # attribute is truthy, which would read as "the guard refused
+            # something" and suppress every rotation.
+            egress_denied=[],
         )
         base.update(kw)
         return MagicMock(**base)
@@ -475,6 +481,7 @@ async def test_run_scrape_echoes_prem_targeting_and_warmup(monkeypatch):
     actually did (read from the fetch result), so clients see what was applied."""
     applied_warmup = {"type": "homepage", "url": "https://e.com/", "dwell_ms": 1500}
     fetch_result = MagicMock(
+        egress_denied=[],
         ok=True, html="<html>hi</html>", final_url="https://e.com/", status_code=200,
         screenshot_b64=None, applied_user_agent="ua", applied_locale=None,
         applied_timezone=None, applied_accept_language=None, element_status=None,
@@ -545,6 +552,7 @@ async def test_unvalidatable_metadata_degrades_the_field_not_the_page(
     validation from read to write must not cost data the caller came for.
     """
     fetch_result = MagicMock(
+        egress_denied=[],
         ok=True, blocked=False, html="<html>hi</html>", final_url="https://e.com/",
         status_code=200, screenshot_b64=None, applied_user_agent=None,
         applied_locale=None, applied_timezone=None, applied_accept_language=None,

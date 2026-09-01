@@ -39,6 +39,11 @@ def _proxy_config_to_url(cfg: ProxyConfig) -> str:
     "/available",
     response_model=ProxyListResponse,
     operation_id="list_available_proxies",
+    # HIGH-03: this enumerates the PURCHASED proxies on the account — ids,
+    # hosts, ports, access type. `/countries` below stays open on purpose: it
+    # is a static country list with nothing account-specific in it, and gating
+    # it would buy no secrecy while breaking a caller that needs no secret.
+    dependencies=[Depends(require_service_token)],
 )
 async def list_available_proxies(proxy_type: ProxyType) -> ProxyListResponse:
     """

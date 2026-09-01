@@ -217,8 +217,16 @@ class TestResolveProxyServiceAuth:
         from src.api.service_auth import require_service_token
 
         monkeypatch.setattr(settings, "service_token", SecretStr("s3cret"))
+        # The guard takes the Request it logs the path and peer host from;
+        # this drives it directly, so build a minimal one.
+        from starlette.requests import Request as _Request
+
+        request = _Request(
+            {"type": "http", "method": "GET", "path": "/api/v1/proxies/resolve",
+             "headers": [], "client": ("127.0.0.1", 1234), "query_string": b""}
+        )
         with pytest.raises(HTTPException) as exc:
-            await require_service_token(x_service_token="\xff\xfe")
+            await require_service_token(request, x_service_token="\xff\xfe")
         assert exc.value.status_code == 401
 
     def test_none_proxy_type_still_requires_token(self, monkeypatch):

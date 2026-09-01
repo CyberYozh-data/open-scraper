@@ -1,0 +1,104 @@
+{
+  "name": "ebay_search_chromium",
+  "source": "ebay",
+  "description": "eBay search results (sorted newest, _sop=12), s-card layout. Returns title/price/url arrays for item listings in the results river. Every field anchors to a per-card container eBay renders on each listing, so a card missing its price yields null in that slot instead of shifting the whole price column. Titles read the styled-text span as a direct child of .s-card__title (the container also holds a screen-reader-only 'Opens in a new window or tab'), and urls take the header anchor as a direct child so the card's image link is not collected. KNOWN CHANGE vs the su-card layout: the old [href*='/itm/'] filter is gone because applying it to one field alone re-introduces row shrinkage, so a non-item card in the river (eBay's 'Shop on eBay' dummy or a /sch/ related-search suggestion) is now emitted as a row — filter on the url if that matters. Neither shape occurred in 120 live cards (2026-07-26 — measured on Chromium, this preset's only engine before the 2026-08-27 split). Per-listing condition/shipping aren't column-alignable here; use LLM extraction for reliable per-row data. ENGINE: Chromium (Playwright). WebGL identity follows this host — an AMD Radeon 780M claim under a Windows UA — via chromium_webgl_identity(); no fingerprint_profile, which the Chromium runner would accept and ignore. MEASURED 2026-08-27 (n=2 per locale, 6 runs per engine, research/preset_audit_dual_engine_2026_08_27.json): 6/6 runs returned data here against 5/6 for ebay_search_camoufox — no separation at this sample size, and neither variant is recommended over the other: the single loss was one TargetClosedError on a warmup navigation, an n=1 event as plausibly host or container memory as engine. Extracted content was otherwise the same on both, INCLUDING a defect both share — the uk locale returned titles=62 against prices=60 and urls=60 on every run here (the twin 62 then 61), with row_alignment_mismatch fired. The excess titles are empty strings at mid-list indices, so the title selector is matching text-less nodes that the price and url selectors do not, and a consumer zipping by index has every row after the first empty one mispaired. The fix belongs in the title selector, on both twins. us and de were 60/60/60 on both engines, on every run that returned data. MEASURED 2026-08-28 (retest of the same twenty presets through the same harness after the five audit fixes; n=2 per locale, 92 runs, research/preset_audit_dual_engine_2026_08_28.json): 6/6 runs returned data, 60/60/61/62/60/60 rows -- 08-27 was 60/60/62/62/60/60, i.e. uk#0 shed one of its two excess titles and nothing else moved. The uk over-count and its consequence are unchanged too: 3 of the 363 titles collected in this round came back as EMPTY STRINGS -- not null; output_schema declares items as string, under which '' is valid and null is not, and the 08-27 paragraph above states the same shape -- and BOTH uk runs warned row_alignment_mismatch (uk#0 61/60/60, uk#1 62/60/60). Fills this round were 0.984 (uk#0) and 0.968 (uk#1); 08-27's uk pair was 0.968/0.968 on both runs -- the same defect, one title fewer on uk#0. None of the five fixes touched this preset and nothing in its recipe changed; it is included as a control, and the single-row drift on uk#0 is eBay's own, not this branch's.",
+  "kind": "builtin",
+  "url_template": "https://www.ebay.{domain}/sch/i.html?_nkw={query}&_sop=12",
+  "request_defaults": {
+    "device": "desktop",
+    "proxy_type": "prem_res_rotating",
+    "prem_proxy_options": {
+      "ip_filter": "quality-security"
+    },
+    "warmup": {
+      "type": "homepage"
+    },
+    "stealth": true,
+    "wait_until": "domcontentloaded",
+    "timeout_ms": 60000,
+    "block_assets": false,
+    "browser_engine": "chromium"
+  },
+  "locales": {
+    "us": {
+      "domain": "com",
+      "country": "US"
+    },
+    "uk": {
+      "domain": "co.uk",
+      "country": "GB"
+    },
+    "de": {
+      "domain": "de",
+      "country": "DE"
+    }
+  },
+  "default_locale": "us",
+  "parsing_instructions": {
+    "type": "css",
+    "fields": {
+      "titles": {
+        "selector": ".srp-river-results li.s-card--horizontal .su-card-container__header .s-card__title > span.su-styled-text",
+        "all": true,
+        "required": true,
+        "post_process": [
+          {
+            "op": "strip"
+          }
+        ]
+      },
+      "prices": {
+        "selector": ".srp-river-results li.s-card--horizontal .su-card-container__attributes__primary",
+        "attr": "html",
+        "all": true,
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "class=\"[^\"]*s-card__price[\\s\"][^>]*>(?:\\s|<[a-zA-Z][^>]*>)*([^<]+)"
+            ]
+          },
+          {
+            "op": "strip_tags"
+          },
+          {
+            "op": "strip"
+          }
+        ]
+      },
+      "urls": {
+        "selector": ".srp-river-results li.s-card--horizontal .su-card-container__header > a.s-card__link",
+        "attr": "href",
+        "all": true
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "titles": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "prices": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "urls": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "self_heal": true,
+  "prompt_schema": null,
+  "llm_extract_prompt": null,
+  "version": 3,
+  "updated_at": 1785024000.0
+}

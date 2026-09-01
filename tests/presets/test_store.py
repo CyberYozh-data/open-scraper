@@ -142,14 +142,22 @@ class TestBuiltInRegistry:
         items = registry.list()
         names = {p.name for p in items}
         expected = {
-            "amazon_product",
-            "google_search",
-            "amazon_search",
-            "google_shopping",
-            "ebay_search",
-            "walmart_product",
-            "youtube_video",
-            "linkedin_profile",
+            "amazon_product_chromium",
+            "amazon_product_camoufox",
+            "google_search_chromium",
+            "google_search_camoufox",
+            "amazon_search_chromium",
+            "amazon_search_camoufox",
+            "google_shopping_chromium",
+            "google_shopping_camoufox",
+            "ebay_search_chromium",
+            "ebay_search_camoufox",
+            "walmart_product_chromium",
+            "walmart_product_camoufox",
+            "youtube_video_chromium",
+            "youtube_video_camoufox",
+            "linkedin_profile_chromium",
+            "linkedin_profile_camoufox",
         }
         assert expected.issubset(names)
         # every shipped built-in is kind="builtin" and parses cleanly

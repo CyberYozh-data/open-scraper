@@ -21,6 +21,7 @@ from src.schemas import (
     ProxyType,
 )
 from src.settings import settings
+from src.utils.redaction import redact_url
 
 log = logging.getLogger(__name__)
 
@@ -144,7 +145,15 @@ class ProxyResolver:
         items = [
             ProxyItem(
                 id=str(p.id),
-                url=p.url,
+                # `GET /api/v1/proxies/available` is anonymous, and this is
+                # the vendor's `url` verbatim — the same field every other
+                # caller here treats as credential-bearing and redacts before
+                # it reaches a log. No proxy type returns userinfo in it today,
+                # so this closes a latent leak rather than an active one: it is
+                # an upstream response-shape change away from handing
+                # `user:pass@host` to an unauthenticated caller. The host:port
+                # the field exists for survives redaction.
+                url=redact_url(p.url),
                 status=p.status,
                 expired=p.expired,
                 host=p.connection_host,

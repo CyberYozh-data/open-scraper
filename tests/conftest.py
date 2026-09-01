@@ -11,6 +11,33 @@ from src.proxy.models import ProxyConfig
 from src.proxy.cyberyozh.client import OrderedProxy
 
 
+@pytest.fixture(autouse=True)
+def _no_live_dns(monkeypatch, request):
+    """Unit tests must not resolve real hostnames.
+
+    Browser navigation is egress-checked now, and the check resolves the
+    target — so without this every test that calls `fetch()` or `run_warmup()`
+    with a hostname silently acquires a live-DNS dependency. `ci.yml` states
+    that no test in the fast gate needs network egress, and an offline machine,
+    a DNS blip, or an NXDOMAIN-hijacking resolver that parks into CGNAT (which
+    the predicate correctly refuses) would turn dozens of unrelated tests red.
+
+    Answers a PUBLIC address, so a test that wants a refusal must use a literal
+    or patch `getaddrinfo` itself — both of which override this. The `e2e`
+    tests opt out: they run against real servers on purpose.
+    """
+    from src.security import egress
+
+    egress.reset_dns_cache()
+    if request.node.get_closest_marker("e2e") is None:
+        monkeypatch.setattr(
+            "src.security.egress._getaddrinfo",
+            lambda *a, **k: [(0, 0, 0, "", ("93.184.216.34", 0))],
+        )
+    yield
+    egress.reset_dns_cache()
+
+
 @pytest.fixture
 def test_settings():
     """Test settings"""

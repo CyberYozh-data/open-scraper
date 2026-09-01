@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.schemas import Device, ProxyGeo, ScrapeProxyType, Viewport
+from src.security.egress import EgressBlocked, assert_http_scheme
 
 SessionStatus = Literal["created", "logging_in", "ready", "expired", "failed"]
 
@@ -31,6 +32,24 @@ class LoginStep(BaseModel):
     key: str | None = None
     timeout_ms: int | None = Field(default=None, ge=0, le=120_000)
     ms: int | None = Field(default=None, ge=0, le=120_000)
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_http(cls, value: str | None) -> str | None:
+        """`ScrapeRequest.url` is an `HttpUrl`; this was a bare `str`.
+
+        A `file://` or `chrome://` step opens no TCP connection, so neither the
+        address predicate nor the route guard can see it — the schema is the
+        only layer that can. Note this validates the TEMPLATE: `_dispatch`
+        re-checks after `$creds_` substitution.
+        """
+        if value is None:
+            return None
+        try:
+            assert_http_scheme(value)
+        except EgressBlocked as exc:
+            raise ValueError("login step url must be http:// or https://") from exc
+        return value
 
 
 class LoginScript(BaseModel):

@@ -140,6 +140,69 @@ def is_selector_miss(error: str | None) -> bool:
     return error is not None and error.startswith(SELECTOR_MISS_PREFIX)
 
 
+def _host_of(url: str) -> str:
+    """Host only — never the full URL.
+
+    A query string routinely carries an API key, a session token or PII, and a
+    full-URL field is unbounded cardinality besides. The whole URL stays in the
+    human message; this is the part that may be queried.
+    """
+    try:
+        return urlsplit(url).hostname or "?"
+    except ValueError:
+        return "?"
+
+
+def egress_warnings(fetch_result) -> list[str]:
+    """That a refusal happened — a COUNT, never the hostnames.
+
+    Without this the field was written and never read, and a denied hop
+    reached the caller as `net::ERR_TUNNEL_CONNECTION_FAILED`, which explains
+    nothing and reads as a broken exit.
+
+    But the hostnames are chosen by the TARGET, and `warnings` is consumed by
+    a substring classifier in another repository: yozh-law-checker matches
+    ("captcha", "block detected", "anti-bot", "antibot") anywhere in a warning
+    and treats a hit on the seed page as proof the scan was blocked. Copying a
+    refused host in verbatim hands a target the lever — redirect a subresource
+    to `captcha.example` that resolves privately, and the scan reports itself
+    blocked.
+
+    So the same split as EGRESS_BLOCKED_ERROR: the caller learns THAT it
+    happened, the log says WHAT. Nothing target-controlled crosses into a
+    field somebody pattern-matches.
+    """
+    denied = getattr(fetch_result, "egress_denied", None)
+    if not isinstance(denied, list) or not denied:
+        return []
+    count = len(denied)
+    noun = "target" if count == 1 else "targets"
+    return [f"egress_blocked: {count} non-public {noun} refused"]
+
+
+def should_rotate_for(fetch_result) -> bool:
+    """Whether this failure is worth a fresh exit.
+
+    A target the egress guard refused is NOT: the refusal is deterministic, so
+    every rotation reproduces it and the whole retry budget burns for nothing.
+    It matters because the browser reports a denied CONNECT as
+    `net::ERR_TUNNEL_CONNECTION_FAILED`, and both "tunnel" and "net::err" are
+    proxy-failure needles — so the guard handed an attacker the pool-spending
+    lever that `EGRESS_BLOCKED_ERROR` was made a constant to close.
+    """
+    # A LIST, specifically. Suppressing a rotation is a behaviour change, and
+    # only a real record of refused targets justifies it — anything else falls
+    # through to the existing decision, which is the safe direction.
+    denied = getattr(fetch_result, "egress_denied", None)
+    if isinstance(denied, list) and denied:
+        return False
+    return bool(
+        fetch_result.blocked
+        or is_selector_miss(fetch_result.error)
+        or looks_like_proxy_failure(fetch_result.status_code, fetch_result.error)
+    )
+
+
 def looks_like_proxy_failure(status_code: int | None, error: str | None) -> bool:
     if status_code is not None and status_code in _RETRYABLE_HTTP_STATUSES:
         return True
@@ -331,21 +394,72 @@ def better_failure_evidence(
     return candidate if _evidence_rank(candidate) >= _evidence_rank(incumbent) else incumbent
 
 
-def self_referential_link_warning(
-    data: Any, final_url: str | None
-) -> str | None:
-    """Report extracted URLs that all point back at the page they came from.
+def self_referential_link_warning(data: Any, final_url: str | None) -> str | None:
+    """Report extracted URLs that never really left the page they came from.
 
     A SERP whose every result links to the search engine is not a SERP. Bing
     wraps organic hrefs in `bing.com/ck/a` redirects, so a `links` field read
     straight from href was 100% populated and 100% useless — a failure no
     fill-rate, row-count or status check can see, because nothing is missing.
 
-    Keyed on the shape rather than on any engine: it needs no field named
-    `links`, so a selector that drifts onto internal navigation trips it too.
-    It is descriptive, never fatal — a category page legitimately links within
-    itself, and this cannot tell that apart from the failure. The point is to
-    put the fact in front of a human, not to decide.
+    THE RULE: a redirect wrapper crowds every URL onto the SAME (or very few)
+    path(s), varying only the query string; a marketplace's own search gives
+    each result its own distinct path (eBay's `/itm/<id>`, Amazon's
+    `/dp/<asin>`). Fires when the number of distinct paths is (a) AT MOST
+    ONE (an absolute floor, not a ratio -- needed so this function's own
+    minimum judgeable case, 3 urls sharing a single path, can still fire;
+    a pure ratio would require 4+ urls before one shared path counts,
+    putting the guard's foundational case in a dead zone) OR (b) at most a
+    QUARTER of the total url count (`n_distinct * 4 <= len(urls)`), for a
+    wrapper spread across more than one endpoint. Both edges pinned exactly
+    in tests. The ratio arm is deliberately tighter than "at most half": two
+    ordinary, benign HTML shapes sit right at a 2x duplication factor --
+    eBay-shaped cards that link their destination twice (title anchor, image
+    anchor: 60 urls over 30 real distinct paths) and a page mixing 10 real
+    distinct product links with 12 `?page=N` pagination links (11 distinct
+    paths over 22 urls) -- both exactly the ratio a "half" boundary would
+    have fired on. The shape the ratio arm exists to catch, Google mixing
+    organic `/url?q=...` with ad `/aclk?sa=...`, sits at 2 distinct paths
+    over a realistic 10-20 urls (ratio 0.1-0.2), comfortably inside a quarter
+    with room to spare -- unlike a naive ">1 distinct path" boundary, which
+    goes quiet on any wrapper using more than one endpoint at all.
+
+    Host is compared EXACTLY (`urlsplit(u).netloc == urlsplit(final_url)
+    .netloc`), not by registrable domain or subdomain. A previous version of
+    this guard widened that comparison and normalized away long path
+    segments to (wrongly) treat Yandex's ad redirects as a false negative —
+    re-measurement showed the real Yandex record is mostly OFF-host organic
+    results (dns-shop.ru, ozon.ru, mvideo.ru, ...) with a handful of on-host
+    ads mixed in, correctly silent either way (see
+    tests/queue/test_self_referential_links.py::TestYandexWasCorrectlySilentAllAlong
+    for the measured composition); ablating both mechanisms against the full
+    92-run 2026-08-27 audit changed 0 of 92 verdicts. Measured trade-off, not
+    a claimed security property: a 32-hex or 36-char UUID redirect token
+    sits under a length-based "opaque" threshold and stays silent under the
+    old mechanism; a look-alike domain (e.g. one host merely ending in the
+    same letters as another) would read as the same site under a naive
+    subdomain check. Exact-host + distinct-path is simpler, has one fewer
+    thing to get wrong, and — run through this repo's own shipped
+    unwrap+urljoin pipeline — still catches a constructed regression where
+    that pipeline breaks and every amazon_search url stays wrapped (see
+    tests).
+
+    No preset-name exemption: a name-based fast path was tried and removed
+    -- it could only ever produce a false NEGATIVE (amazon_search's own
+    unwrap regressing, wrapped urls on amazon_search's own host, would be
+    silenced by the very name meant to protect it), while the distinct-path
+    property alone already keeps every real marketplace preset in the audit
+    silent without needing to name any of them.
+
+    A SINGLE genuine off-host link disables this guard entirely: the
+    "is every url on this exact host" gate requires ALL of them to match, so
+    29 wrapped urls plus one real destination is silent, the same as a
+    healthy page. This is a bigger practical hole than either measured
+    trade-off above and is not mitigated by anything in this function.
+
+    Descriptive, never fatal — a category page can legitimately link within
+    itself, and a handful of distinct internal links proves nothing either
+    way. The point is to put the fact in front of a human, not to decide.
 
     Silent below three URLs: one or two self-links prove nothing, and engines
     legitimately link to themselves for pagination and cached copies.
@@ -368,13 +482,33 @@ def self_referential_link_warning(
 
     if len(urls) < 3:
         return None
-    on_own = sum(1 for u in urls if urlsplit(u).netloc.lower() == own_host)
-    if on_own != len(urls):
+
+    split = [urlsplit(u) for u in urls]
+    on_own = [s for s in split if s.netloc.lower() == own_host]
+    if len(on_own) != len(urls):
         return None
+
+    distinct_paths = {s.path for s in on_own}
+    n_distinct = len(distinct_paths)
+    # Wrapper-shaped when there is (almost) only ONE real endpoint (the
+    # absolute floor -- needed so a 3- or 4-url single-path wrapper, the
+    # minimum this function ever judges at all, can still fire; a pure
+    # ratio would require 4+ urls before a lone shared path counts, putting
+    # the guard's own foundational case in a dead zone) OR the endpoint
+    # count is small RELATIVE to the row count (the quarter ratio, for a
+    # wrapper spread across more than one endpoint).
+    if n_distinct > 1 and n_distinct * 4 > len(urls):
+        # More than a quarter of the rows have their OWN distinct path -- a
+        # real catalog listing (the page's own marketplace search, possibly
+        # with some benign duplication -- two anchors per card, a pagination
+        # bar), not evidence of an unwrapped redirect.
+        return None
+
     return (
         f"all_extracted_links_self_referential: every one of the {len(urls)} "
-        f"extracted URLs is on {own_host}, the page's own host. On a search "
-        "preset that means the results were never unwrapped — the field is "
+        f"extracted URLs is on {own_host}, the page's own host, crowded onto "
+        f"just {len(distinct_paths)} distinct path(s). On a search preset "
+        "that means the results were never unwrapped — the field is "
         "populated but carries no destination."
     )
 
@@ -421,12 +555,16 @@ async def run_scrape(
 
     proxy_geo = apply_default_proxy_country(proxy_type_raw, proxy_geo)
 
+    # The full url stays in the human message; the queryable field is the HOST
+    # only. A query string routinely carries an API key or a session token, and
+    # a full-url field is unbounded cardinality besides.
     log.info(
         "job received request_id=%s proxy_type=%s proxy_pool_id=%s url=%s",
         request_id,
         proxy_type_raw,
         proxy_pool_id,
         url,
+        extra={"event": "scrape.job.received", "url_host": _host_of(url)},
     )
 
     try:
@@ -490,13 +628,6 @@ async def run_scrape(
 
         for attempt in range(1, attempts + 1):
             proxy_cfg = session.current_proxy()
-            log.debug(
-                "attempt %d/%d for request_id=%s with proxy=%s",
-                attempt,
-                attempts,
-                request_id,
-                proxy_cfg.server if proxy_cfg else "none"
-            )
             timeout_ms = _affordable_now()
             if timeout_ms is None:
                 # Normally attempt 1 (a ceiling too small for any attempt at
@@ -505,8 +636,23 @@ async def run_scrape(
                 # itself — a live provider call — spends the slack that was
                 # there when it was checked.
                 budget_notes.append(_not_started(attempt))
-                log.warning("%s (request_id=%s)", budget_notes[-1], request_id)
+                log.warning(
+                    "%s (request_id=%s)", budget_notes[-1], request_id,
+                    extra={"event": "scrape.attempt.not_started"},
+                )
                 break
+            log.debug(
+                "attempt %d/%d for request_id=%s with proxy=%s",
+                attempt,
+                attempts,
+                request_id,
+                proxy_cfg.server if proxy_cfg else "none",
+                # AFTER the budget gate: emitted before it, an attempt the
+                # deadline refused was logged as started and then, one line
+                # later, as not started — so any query counting attempts
+                # overcounted the fetches actually made.
+                extra={"event": "scrape.attempt.started"},
+            )
             if timeout_ms < configured_timeout_ms:
                 budget_notes.append(
                     f"attempt {attempt}/{attempts} shortened to {timeout_ms}ms of the "
@@ -555,7 +701,8 @@ async def run_scrape(
                 log.info(
                     "fetch succeeded on attempt %d for request_id=%s",
                     attempt,
-                    request_id
+                    request_id,
+                    extra={"event": "scrape.fetch.succeeded"},
                 )
                 break
 
@@ -564,20 +711,15 @@ async def run_scrape(
                 "fetch failed on attempt %d for request_id=%s: %s",
                 attempt,
                 request_id,
-                fetch_result.error
+                fetch_result.error,
+                extra={"event": "scrape.attempt.failed"},
             )
 
             # Rotate + retry on a proxy/network failure OR a captcha/block: a
             # block means this IP is burned, so a fresh proxy is the fix (bounded
             # by max_attempts). Anything else is a genuine target response — don't
             # waste proxies retrying it.
-            should_rotate = (
-                fetch_result.blocked
-                or is_selector_miss(fetch_result.error)
-                or looks_like_proxy_failure(
-                    fetch_result.status_code, fetch_result.error
-                )
-            )
+            should_rotate = should_rotate_for(fetch_result)
             # A navigation deadline is not evidence of a bad exit, but it is not
             # evidence of a good one either — a hung exit, or one answering 407
             # because the credentials expired, looks exactly like a slow page.
@@ -683,6 +825,10 @@ async def run_scrape(
         # attempt, and the response never said so.
         if fetch_result.warmup_error:
             warnings.append(f"warmup_failed: {fetch_result.warmup_error}")
+        # What the transport guard refused, if anything. The browser reports a
+        # denied hop as a bare transport error, so without this the caller sees
+        # a proxy fault where the truth is "that target is not public".
+        warnings.extend(egress_warnings(fetch_result))
         # The last attempt's error when it is not the one being reported: the
         # reported page explains the failure, but "attempts 2-3 both failed to
         # connect" is how a broken pool becomes visible, and dropping it makes

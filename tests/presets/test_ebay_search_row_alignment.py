@@ -116,7 +116,7 @@ def _ebay_page(cards: list[str]) -> str:
 
 class TestEbaySearchSelectors:
     def setup_method(self):
-        self.preset = _load("ebay_search")
+        self.preset = _load("ebay_search_chromium")
         self.fields = self.preset.parsing_instructions.fields
 
     def test_titles_read_the_inner_styled_text_span(self):
@@ -173,7 +173,7 @@ class TestEbaySearchSelectors:
 
 class TestEbaySearchExtraction:
     def setup_method(self):
-        self.preset = _load("ebay_search")
+        self.preset = _load("ebay_search_chromium")
 
     def _extract(self, cards):
         return extract_fields(_ebay_page(cards), self.preset.parsing_instructions)
@@ -246,7 +246,7 @@ class TestEbaySearchExtraction:
 
 class TestEbaySearchValueTraps:
     def setup_method(self):
-        self.preset = _load("ebay_search")
+        self.preset = _load("ebay_search_chromium")
 
     def _one(self, card: str):
         data, _ = extract_fields(_ebay_page([card]), self.preset.parsing_instructions)
@@ -301,7 +301,7 @@ class TestEbaySearchPriceMarkupShapes:
     """
 
     def setup_method(self):
-        self.preset = _load("ebay_search")
+        self.preset = _load("ebay_search_chromium")
 
     def _prices(self, price_rows: str):
         html = _ebay_page([_ebay_card(item_id="111", title="T", price_rows=price_rows)])
@@ -345,7 +345,7 @@ class TestEbaySearchContainerInvariant:
     """
 
     def setup_method(self):
-        self.preset = _load("ebay_search")
+        self.preset = _load("ebay_search_chromium")
 
     def test_card_without_the_attributes_container_shrinks_the_array(self):
         no_attrs = """
@@ -396,7 +396,7 @@ class TestEbaySearchNonItemCards:
     """
 
     def setup_method(self):
-        self.preset = _load("ebay_search")
+        self.preset = _load("ebay_search_chromium")
 
     def test_related_search_card_is_emitted_as_an_aligned_row(self):
         suggestion = """

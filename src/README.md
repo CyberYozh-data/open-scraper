@@ -599,16 +599,32 @@ user-defined presets persist under `data/presets/` (mount the volume — see
 
 ### Built-in presets
 
+Every built-in ships twice, once per browser engine — `<name>_chromium` and
+`<name>_camoufox` — so `GET /api/v1/presets` returns twenty names, never the
+bare `<name>`:
+
 | name | source | params | locales |
 |------|--------|--------|---------|
-| `amazon_product` | amazon | `asin` | us, uk, de, fr, jp |
-| `amazon_search` | amazon | `query` | us, uk, de |
-| `google_search` | google | `query` | us, uk, de, fr, ru, jp |
-| `google_shopping` | google | `query` | us, uk, de |
-| `ebay_search` | ebay | `query` | us, uk, de |
-| `walmart_product` | walmart | `product_id` | us |
-| `youtube_video` | youtube | `video_id` | global |
-| `linkedin_profile` | linkedin | `username` | global (needs auth session) |
+| `amazon_product_camoufox` | amazon | `asin` | us, uk, de, fr, jp |
+| `amazon_product_chromium` | amazon | `asin` | us, uk, de, fr, jp |
+| `amazon_search_camoufox` | amazon | `query` | us, uk, de |
+| `amazon_search_chromium` | amazon | `query` | us, uk, de |
+| `bing_search_camoufox` | bing | `query` | us, uk, de, fr, ru, jp |
+| `bing_search_chromium` | bing | `query` | us, uk, de, fr, ru, jp |
+| `ebay_search_camoufox` | ebay | `query` | us, uk, de |
+| `ebay_search_chromium` | ebay | `query` | us, uk, de |
+| `google_search_camoufox` | google | `query` | us, uk, de, fr, ru, jp |
+| `google_search_chromium` | google | `query` | us, uk, de, fr, ru, jp |
+| `google_shopping_camoufox` | google | `query` | us, uk, de |
+| `google_shopping_chromium` | google | `query` | us, uk, de |
+| `linkedin_profile_camoufox` | linkedin | `username` | global (needs auth session) |
+| `linkedin_profile_chromium` | linkedin | `username` | global (needs auth session) |
+| `walmart_product_camoufox` | walmart | `product_id` | us |
+| `walmart_product_chromium` | walmart | `product_id` | us |
+| `yandex_search_camoufox` | yandex | `query` | ru, moscow, spb, by, kz, ua, uz, am, az, ge, kg, tj, tm, md, tr, us, de, fr, gb, pl, ee, lv, lt |
+| `yandex_search_chromium` | yandex | `query` | ru, moscow, spb, by, kz, ua, uz, am, az, ge, kg, tj, tm, md, tr, us, de, fr, gb, pl, ee, lv, lt |
+| `youtube_video_camoufox` | youtube | `video_id` | global |
+| `youtube_video_chromium` | youtube | `video_id` | global |
 
 ### Scrape with a preset
 
@@ -616,7 +632,7 @@ user-defined presets persist under `data/presets/` (mount the volume — see
 curl -X POST http://localhost:8000/api/v1/scrape/preset/page \
   -H 'Content-Type: application/json' \
   -d '{
-    "source": "amazon_product",
+    "source": "amazon_product_chromium",
     "preset_params": {"asin": "B0CRTYZG5C"},
     "locale": "us",
     "llm": {"model": "openai/gpt-5.4-mini"}
@@ -670,6 +686,11 @@ LLM keys are server-side in `.env` (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
 endpoint via `CUSTOM_LLM_BASE_URL`/`CUSTOM_LLM_API_KEY`). Callers pick only
 the model string; the default is `DEFAULT_LLM_MODEL` (`openai/gpt-5.4-mini`).
 `sample_url` fetches are SSRF-guarded (no private/loopback/metadata targets).
+The same guard now covers browser navigation: `/scrape` and `/search` refuse a
+target that resolves to a non-public address, on every engine, and refuse to
+return content fetched through a non-public redirect hop. `EGRESS_ALLOW_HOSTS`
+names exceptions one host at a time; it is empty by default and has no
+wildcard.
 
 ### post_process
 
@@ -677,7 +698,39 @@ the model string; the default is `DEFAULT_LLM_MODEL` (`openai/gpt-5.4-mini`).
 values (per-item when `all: true`): `regex` (args `[pattern, group?]`),
 `parse_int`, `parse_float`, `parse_price` (args `["us"|"eu"]` for separator
 disambiguation), `strip`, `strip_tags`, `lowercase`, `uppercase`, `replace`
-(args `[old, new]`). A field may also override the rule's `type` (css/xpath).
+(args `[old, new]`), `urljoin` (args `[base_url]`, resolves a relative href —
+usually left empty and injected per-request by the materializer, the same
+pattern as `parse_price`'s locale; with no base at all it leaves the value
+unchanged and warns, since unlike `parse_price` there is no sensible default
+transform for a URL with no base), `unwrap_param` (args `[param_name]`,
+percent-decodes a query parameter's value out of a click-tracking redirect
+that carries its destination inline — e.g. Amazon's `/sspa/click?...&url=
+%2Freal%2Fpath` — passing any value that doesn't have that parameter through
+UNCHANGED, which lets one pipeline handle a field mixing wrapped and
+unwrapped values), `null_if_regex` (args `[pattern]`, nulls a matching value
+IN PLACE — for excluding one shape from an `all: true` field without
+shrinking it and misaligning every later row). A field may also override the
+rule's `type` (css/xpath).
+
+`unwrap_param` only hands on a decoded value that is an absolute `http(s)` URL
+**with a host**, or a plain relative path. The parameter is text the *page*
+controls, so everything else is refused and the ORIGINAL wrapper passes through
+UNCHANGED — never null, so a refused row keeps its slot and stays visibly a
+wrapper. Refused: any other scheme (`javascript:`, `data:`, `file:`, `ftp:` …);
+an `http(s)` value naming no host (`http:///x`, `http:/foo`); anything opening
+with **two or more** slashes or backslashes — `//host`, and equally `///host`,
+`/\host`, `\\host`, `\/host`, since a browser's URL parser skips the whole run
+and lands on `host`; and a reference naming no path segment of its own (`""`,
+`.`, `..`, `?a=b`, `#frag`, `/`), which can only point back at the page being
+scraped. Leading whitespace and tab/CR/LF are removed before that check,
+because a URL parser removes them too.
+
+This is **not** a same-host guarantee. An absolute `http(s)` URL naming any
+host is accepted by design — a redirect may legitimately point off-site — and a
+following `urljoin` leaves an absolute reference unchanged, so
+`url=https%3A%2F%2Fother.example%2Fx` really does come back as
+`https://other.example/x`. If you need the destination to stay on the page's
+own host, check the host yourself.
 
 `parse_int` takes the FIRST integer in the text, not every digit in it: a
 separator groups only as complete three-digit runs that all use the same
@@ -695,8 +748,8 @@ otherwise invisible, since the request still succeeds with the field simply null
 `strip_tags` renders an HTML fragment down to its text (tags dropped,
 entities decoded, whitespace collapsed). Pair `attr: "html"` + `regex` +
 `strip_tags` to read a value out of a container that is always present even
-when the value is missing — the row-alignment trick `amazon_search` and
-`google_search` rely on. Fields returning flat parallel arrays (`all: true`)
+when the value is missing — the row-alignment trick the `amazon_search_*` and
+`google_search_*` presets rely on. Fields returning flat parallel arrays (`all: true`)
 must match exactly one node per row: a selector pointed at an element that
 only exists when its value does silently shrinks the array and shifts every
 later row, whereas an always-present container yields `null` in the right
@@ -706,8 +759,9 @@ slot.
 
 `POST /api/v1/search` runs a web search and returns ranked results in one
 **synchronous** call (no `job_id` to poll). It uses the built-in
-`google_search` preset as the SERP source, parses the organic results, and can
-optionally scrape each result page with the normal pipeline.
+`google_search_chromium` preset as the SERP source, parses the organic
+results, and can optionally scrape each result page with the normal
+pipeline.
 
 ```bash
 # SERP only
@@ -734,12 +788,25 @@ SERP fetch.
 
 ## MCP Integration
 
-Yozh Scraper exposes all its API tools via the
+Yozh Scraper exposes an explicit **allowlist** of its API tools via the
 [Model Context Protocol](https://modelcontextprotocol.io/) at `/mcp`. This
 lets AI assistants use the scraper directly as a tool — no extra code
 required.
 
+The allowlist is `MCP_TOOLS` in [`src/app.py`](app.py), and a route is not a
+tool until it is named there. It used to be a denylist keyed on
+`operation_id`, which structurally could not name a route that declared none —
+which is how eight `/api/v2/prem-proxies` routes became anonymously callable
+agent tools while the code claimed nothing could drift onto the surface.
+
+**`/mcp` itself carries no authentication**, so anything on this list is
+callable by any client that can reach the port. That is why the list is
+explicit rather than "everything except a few". Session operations and
+`resolve_proxy` are gated behind `SERVICE_TOKEN` and never advertised.
+
 ### Available MCP tools
+
+The table below is a summary; `MCP_TOOLS` is the source of truth.
 
 | Tool | Description |
 |------|-------------|

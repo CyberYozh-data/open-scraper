@@ -12,17 +12,32 @@ import pytest
 from src.browser.runner import run_warmup
 
 
+def _warmup_page(url: str = "https://example.com/"):
+    """An AsyncMock page shaped like a real Playwright one: a string `url` and
+    a `goto` that returns a Response with a terminated redirect chain. Without
+    both, the warmup landing check sees an unreadable chain and refuses."""
+    page = AsyncMock()
+    page.url = url
+    page.goto = AsyncMock(
+        return_value=MagicMock(request=MagicMock(redirected_from=None))
+    )
+    return page
+
+
 class _Page:
     """Minimal page double: goto either works or raises."""
 
     def __init__(self, boom: Exception | None = None):
         self.boom = boom
         self.visited: list[str] = []
+        # A real page exposes `url`; the warmup landing check reads it.
+        self.url = "https://example.com/"
 
     async def goto(self, url, **_kw):
         self.visited.append(url)
         if self.boom is not None:
             raise self.boom
+        self.url = url
         return None
 
     async def wait_for_timeout(self, _ms):
