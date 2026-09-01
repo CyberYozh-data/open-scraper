@@ -4,6 +4,66 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.12] - 2026-09-01
+
+Security-hardening and reliability release: browser navigation is refused to
+non-public addresses (SSRF), the premium-proxy surface is gated behind
+`SERVICE_TOKEN` and the MCP tool surface is an allowlist, presets ship per
+browser engine, and logs are correlated with an opt-in JSON shape. Contains
+two breaking changes — see below.
+
+### Added
+
+- Every built-in preset now ships as an explicit per-engine variant,
+  `<name>_chromium` and `<name>_camoufox` (e.g. `google_search_chromium`,
+  `yandex_search_camoufox`). A request names the exact variant it wants; each
+  preset carries its own `browser_engine`.
+- Structured, correlated logging: business events get stable names and a
+  request/job correlation id threaded through the scrape -> queue -> browser
+  chain, so success/error rate and latency are answerable from logs. An opt-in
+  JSON log shape is available via `LOG_FORMAT=json` (default `text`).
+- Browser egress policy: an `EGRESS_ALLOW_HOSTS` allowlist (empty by default)
+  and an `EGRESS_TRANSPORT_GUARD` toggle (on by default) for the transport-level
+  guard.
+
+### Changed
+
+- **BREAKING (presets):** the old single-name built-ins (`google_search`,
+  `google_shopping`, `amazon_product`, `amazon_search`, `bing_search`,
+  `ebay_search`, `linkedin_profile`, `walmart_product`, `yandex_search`,
+  `youtube_video`) are replaced by their per-engine variants. A request using a
+  bare old name now returns 404 `preset_not_found`; append the engine suffix
+  (`_chromium`, or `_camoufox` for the two anti-bot targets `yandex_search` and
+  `walmart_product`).
+- **BREAKING (deploy):** `GET /api/v1/proxies/available` and the entire
+  `/api/v2/prem-proxies/*` catalog now require `SERVICE_TOKEN` and fail closed
+  (503 when the token is unconfigured, 401 without it). Any consumer of these
+  endpoints must send the `X-Service-Token` header; deploy the consumer first,
+  or their calls degrade (for the proxy geo catalog, silently).
+
+### Security
+
+- Browser navigation to non-public addresses is refused by default. The main
+  scrape, warmup and session-login navigations validate the resolved IP and
+  re-check every redirect hop, blocking loopback, private (RFC1918),
+  link-local (incl. the cloud-metadata address), CGNAT and IPv4-mapped-IPv6
+  targets. A transport-level guard (on by default) dials only validated public
+  IPs, closing the redirect / DNS-rebinding / sub-resource vectors the
+  navigation check alone cannot.
+- The MCP tool surface is now an allowlist: only explicitly named operations
+  are advertised as agent tools, so a new route is hidden by default and the
+  premium-proxy and credential-bearing operations are no longer reachable
+  anonymously through MCP.
+- Proxy-catalog responses redact credentialed proxy URLs, keeping `host:port`
+  while stripping `user:pass`.
+
+### Fixed
+
+- Browser teardown failures (page / context / proxy-bridge close) are now
+  logged and time-bounded instead of being swallowed silently, on both the
+  scrape and the session-login paths, so a wedged or leaked browser resource is
+  visible and cannot hang the worker.
+
 ## [0.1.11] - 2026-08-24
 
 Reliability and hardening release: partial job results survive one unreadable
