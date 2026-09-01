@@ -1,9 +1,21 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from src.browser.runner import warmup_origin, run_warmup
+
+
+def _warmup_page(url: str = "https://example.com/"):
+    """An AsyncMock page shaped like a real Playwright one: a string `url` and
+    a `goto` that returns a Response with a terminated redirect chain. Without
+    both, the warmup landing check sees an unreadable chain and refuses."""
+    page = AsyncMock()
+    page.url = url
+    page.goto = AsyncMock(
+        return_value=MagicMock(request=MagicMock(redirected_from=None))
+    )
+    return page
 
 
 def test_warmup_origin_from_search_url():
@@ -14,7 +26,7 @@ def test_warmup_origin_from_search_url():
 
 @pytest.mark.asyncio
 async def test_run_warmup_visits_origin_then_dwells():
-    page = AsyncMock()
+    page = _warmup_page()
     applied = await run_warmup(
         page, "https://yandex.ru/search/?text=x",
         {"type": "homepage"}, timeout_ms=40000, default_dwell_ms=2500,
@@ -29,7 +41,7 @@ async def test_run_warmup_visits_origin_then_dwells():
 
 @pytest.mark.asyncio
 async def test_run_warmup_noop_when_disabled_or_unknown_type():
-    page = AsyncMock()
+    page = _warmup_page()
     for warmup in (None, {"type": "other"}):
         outcome = await run_warmup(page, "https://yandex.ru/s", warmup,
                                    timeout_ms=1, default_dwell_ms=1)
@@ -42,7 +54,7 @@ async def test_run_warmup_noop_when_disabled_or_unknown_type():
 
 @pytest.mark.asyncio
 async def test_run_warmup_swallows_errors():
-    page = AsyncMock()
+    page = _warmup_page()
     page.goto.side_effect = RuntimeError("boom")
 
     outcome = await run_warmup(page, "https://yandex.ru/s", {"type": "homepage"},
@@ -61,7 +73,7 @@ async def test_run_warmup_swallows_errors():
 async def test_camoufox_fetch_runs_warmup(monkeypatch):
     import src.browser.camoufox_runner as cr
 
-    page = AsyncMock()
+    page = _warmup_page()
     page.goto.return_value = AsyncMock(status=200)
     page.content.return_value = "<html>OrganicTitle</html>"
     page.url = "https://yandex.ru/search/?text=x"
@@ -104,7 +116,7 @@ async def test_scrape_runner_threads_warmup_to_fetch():
 
 @pytest.mark.asyncio
 async def test_run_warmup_custom_visits_given_url():
-    page = AsyncMock()
+    page = _warmup_page()
     applied = await run_warmup(
         page, "https://yandex.ru/search/?text=x",
         {"type": "custom", "url": "https://warm.example/seed"},

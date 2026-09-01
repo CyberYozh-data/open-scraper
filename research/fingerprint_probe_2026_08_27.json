@@ -1,0 +1,175 @@
+[
+ {
+  "engine": "chromium",
+  "page": "webgl",
+  "data": {
+   "unmasked_vendor": "Google Inc. (AMD)",
+   "unmasked_renderer": "ANGLE (AMD, AMD Radeon(TM) 780M (0x000015BF) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "max_texture_size": "8192",
+   "webgl_report_hash": "4def78034b9fa266804389e6bd270938"
+  },
+  "meta": {
+   "status_code": 200,
+   "fetch_ok": true,
+   "applied_fingerprint": null,
+   "applied_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "applied_timezone": "Europe/London",
+   "applied_locale": "en-GB"
+  },
+  "warnings": [],
+  "elapsed_s": 6.0,
+  "took_ms": 5377,
+  "config": {
+   "started_at": "2026-08-28T00:49:22.754582+00:00",
+   "proxy_type": "prem_res_rotating",
+   "browser_engine": "chromium",
+   "stealth": true
+  }
+ },
+ {
+  "engine": "chromium",
+  "page": "canvas",
+  "data": {
+   "canvas_signature": "d64418dffdd77d1444ae9bd3549aefee",
+   "canvas_uniqueness": "99.95% (119 of 258037 user agents have the same signature)"
+  },
+  "meta": {
+   "status_code": 200,
+   "fetch_ok": true,
+   "applied_fingerprint": null,
+   "applied_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "applied_timezone": "Europe/London",
+   "applied_locale": "en-GB"
+  },
+  "warnings": [],
+  "elapsed_s": 12.0,
+  "took_ms": 10972,
+  "config": {
+   "started_at": "2026-08-28T00:49:28.775139+00:00",
+   "proxy_type": "prem_res_rotating",
+   "browser_engine": "chromium",
+   "stealth": true
+  }
+ },
+ {
+  "engine": "chromium",
+  "page": "ip",
+  "data": {
+   "ip_address": "86.175.21.0/24",
+   "country": "GB",
+   "webrtc_local": "n/a",
+   "webrtc_public": "n/a"
+  },
+  "meta": {
+   "status_code": 200,
+   "fetch_ok": true,
+   "applied_fingerprint": null,
+   "applied_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "applied_timezone": "Europe/London",
+   "applied_locale": "en-GB"
+  },
+  "warnings": [],
+  "elapsed_s": 6.0,
+  "took_ms": 5499,
+  "config": {
+   "started_at": "2026-08-28T00:49:40.793297+00:00",
+   "proxy_type": "prem_res_rotating",
+   "browser_engine": "chromium",
+   "stealth": true
+  }
+ },
+ {
+  "engine": "camoufox",
+  "page": "webgl",
+  "data": {
+   "unmasked_vendor": "Google Inc. (AMD)",
+   "unmasked_renderer": "ANGLE (AMD, Radeon R9 200 Series Direct3D11 vs_5_0 ps_5_0), or similar",
+   "max_texture_size": "16384",
+   "webgl_report_hash": ""
+  },
+  "meta": {
+   "status_code": 200,
+   "fetch_ok": true,
+   "applied_fingerprint": {
+    "profile": "windows_on_host",
+    "os": "windows",
+    "webgl_vendor": "Google Inc. (AMD)",
+    "webgl_renderer": "ANGLE (AMD, Radeon R9 200 Series Direct3D11 vs_5_0 ps_5_0), or similar"
+   },
+   "applied_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+   "applied_timezone": "Europe/London",
+   "applied_locale": "en-GB"
+  },
+  "warnings": [],
+  "elapsed_s": 9.0,
+  "took_ms": 7365,
+  "config": {
+   "started_at": "2026-08-28T00:49:46.804180+00:00",
+   "proxy_type": "prem_res_rotating",
+   "browser_engine": "camoufox",
+   "fingerprint_profile": "windows_on_host"
+  }
+ },
+ {
+  "engine": "camoufox",
+  "page": "canvas",
+  "data": {
+   "canvas_signature": "8147a3d57346c5e01d89e8f28d84df8a",
+   "canvas_uniqueness": "100% (The signature is unique to our database)"
+  },
+  "meta": {
+   "status_code": 200,
+   "fetch_ok": true,
+   "applied_fingerprint": {
+    "profile": "windows_on_host",
+    "os": "windows",
+    "webgl_vendor": "Google Inc. (AMD)",
+    "webgl_renderer": "ANGLE (AMD, Radeon R9 200 Series Direct3D11 vs_5_0 ps_5_0), or similar"
+   },
+   "applied_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+   "applied_timezone": "Europe/London",
+   "applied_locale": "en-GB"
+  },
+  "warnings": [],
+  "elapsed_s": 12.0,
+  "took_ms": 11762,
+  "config": {
+   "started_at": "2026-08-28T00:49:55.817235+00:00",
+   "proxy_type": "prem_res_rotating",
+   "browser_engine": "camoufox",
+   "fingerprint_profile": "windows_on_host"
+  }
+ },
+ {
+  "engine": "camoufox",
+  "page": "ip",
+  "data": {
+   "ip_address": "91.125.210.0/24",
+   "country": "GB",
+   "webrtc_local": "n/a",
+   "webrtc_public": "185.182.52.0/24"
+  },
+  "meta": {
+   "status_code": 200,
+   "fetch_ok": true,
+   "applied_fingerprint": {
+    "profile": "windows_on_host",
+    "os": "windows",
+    "webgl_vendor": "Google Inc. (AMD)",
+    "webgl_renderer": "ANGLE (AMD, Radeon R9 200 Series Direct3D11 vs_5_0 ps_5_0), or similar"
+   },
+   "applied_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+   "applied_timezone": "Europe/London",
+   "applied_locale": "cy-GB"
+  },
+  "warnings": [],
+  "elapsed_s": 12.0,
+  "took_ms": 9131,
+  "config": {
+   "started_at": "2026-08-28T00:50:07.837956+00:00",
+   "proxy_type": "prem_res_rotating",
+   "browser_engine": "camoufox",
+   "fingerprint_profile": "windows_on_host"
+  }
+ }
+]

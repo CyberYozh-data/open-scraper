@@ -43,7 +43,7 @@ _Timeout = PWTimeoutError
 
 def _page(*, content: str, url: str, status: int = 200, selector_times_out: bool = True):
     page = AsyncMock()
-    page.goto = AsyncMock(return_value=Mock(status=status))
+    page.goto = AsyncMock(return_value=Mock(status=status, request=Mock(redirected_from=None)))
     page.content = AsyncMock(return_value=content)
     page.url = url
     page.screenshot = AsyncMock(return_value=b"PNGBYTES")

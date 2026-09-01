@@ -14,6 +14,7 @@ from typing import Any
 
 from src.extract.extractor import extract_fields
 from src.extract.models import ExtractRule
+from src.presets.materializer import strip_materializer_injected
 from src.presets.models import ParserPlan, ParsingInstructions
 from src.presets.parser_pipeline import run as run_pipeline
 from src.presets.store import PresetStore
@@ -87,9 +88,18 @@ async def apply(
     warnings = [str(warning) for warning in result.warnings]
 
     if result.mode == "self_healed" and result.healed_instructions:
+        # Strip whatever THIS request's materialize() call injected (a price
+        # locale, a urljoin base) before it can be written to a user preset —
+        # `result.healed_instructions` copies post_process verbatim from the
+        # already-materialized instructions, so left alone it would freeze
+        # this one request's locale/URL into the preset forever. See
+        # strip_materializer_injected's docstring.
+        healed_for_persist = strip_materializer_injected(
+            result.healed_instructions, plan.materializer_injected
+        )
         if plan.preset_kind == "user" and plan.preset_name:
             _persist_self_heal(
-                plan.preset_name, result.healed_instructions, warnings
+                plan.preset_name, healed_for_persist, warnings
             )
         elif plan.preset_name:
             log.info(

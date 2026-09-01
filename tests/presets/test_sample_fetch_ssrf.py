@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 import src.presets.service as service_mod
+import src.security.egress as egress_mod
 from src.presets.service import _assert_public_url, _fetch_sample_html
 from src.presets.exceptions import SampleFetchError
 
@@ -29,39 +30,49 @@ class TestAssertPublicUrl:
             "ftp://internal/x",
         ],
     )
-    def test_rejects_unsafe(self, url, mocker):
-        # localhost resolves to a loopback addr; getaddrinfo is real for that.
+    @pytest.mark.asyncio
+    async def test_rejects_unsafe(self, url):
         with pytest.raises(SampleFetchError):
-            _assert_public_url(url)
+            await _assert_public_url(url)
 
-    def test_allows_public_ip(self):
+    @pytest.mark.asyncio
+    async def test_allows_public_ip(self):
         # 93.184.216.34 is example.com's well-known public IP literal.
-        _assert_public_url("http://93.184.216.34/x")  # no raise
+        await _assert_public_url("http://93.184.216.34/x")  # no raise
 
-    def test_allows_public_hostname(self, mocker):
+    @pytest.mark.asyncio
+    async def test_allows_public_hostname(self, mocker):
         mocker.patch.object(
-            service_mod.socket,
-            "getaddrinfo",
+            egress_mod,
+            "_getaddrinfo",
             return_value=[(2, 1, 6, "", ("93.184.216.34", 80))],
         )
-        _assert_public_url("https://example.com/page")  # no raise
+        await _assert_public_url("https://example.com/page")  # no raise
 
-    def test_rejects_hostname_resolving_to_private(self, mocker):
+    @pytest.mark.asyncio
+    async def test_rejects_hostname_resolving_to_private(self, mocker):
         mocker.patch.object(
-            service_mod.socket,
-            "getaddrinfo",
+            egress_mod,
+            "_getaddrinfo",
             return_value=[(2, 1, 6, "", ("10.1.2.3", 80))],
         )
         with pytest.raises(SampleFetchError):
-            _assert_public_url("https://sneaky.internal/x")
+            await _assert_public_url("https://sneaky.internal/x")
 
 
 class TestFetchRevalidatesRedirects:
     @pytest.mark.asyncio
     async def test_redirect_to_internal_is_blocked(self, mocker):
+        """The 302 is served ONCE, not on every hop.
+
+        The previous version of this test returned a redirect forever, so it
+        also passed with the guard deleted — via "too many redirects fetching
+        sample". Serving one hop and asserting the SSRF message is what makes
+        it fail when the revalidation goes away.
+        """
         mocker.patch.object(
-            service_mod.socket,
-            "getaddrinfo",
+            egress_mod,
+            "_getaddrinfo",
             return_value=[(2, 1, 6, "", ("93.184.216.34", 80))],
         )
 
@@ -76,7 +87,7 @@ class TestFetchRevalidatesRedirects:
 
         class _Client:
             def __init__(self, *a, **k):
-                pass
+                self.calls = 0
 
             async def __aenter__(self):
                 return self
@@ -85,18 +96,22 @@ class TestFetchRevalidatesRedirects:
                 return False
 
             async def get(self, url, headers=None):
-                # public URL redirects to a metadata endpoint
-                return _Resp(302, location="http://169.254.169.254/")
+                self.calls += 1
+                if self.calls == 1:
+                    return _Resp(302, location="http://169.254.169.254/")
+                return _Resp(200, text="<html>internal</html>")
 
         mocker.patch.object(service_mod.httpx, "AsyncClient", _Client)
-        with pytest.raises(SampleFetchError):
+        with pytest.raises(SampleFetchError) as excinfo:
             await _fetch_sample_html("https://example.com/start")
+        assert "not a public address" in str(excinfo.value)
+        assert "redirects" not in str(excinfo.value)
 
     @pytest.mark.asyncio
     async def test_happy_fetch_returns_text(self, mocker):
         mocker.patch.object(
-            service_mod.socket,
-            "getaddrinfo",
+            egress_mod,
+            "_getaddrinfo",
             return_value=[(2, 1, 6, "", ("93.184.216.34", 80))],
         )
 

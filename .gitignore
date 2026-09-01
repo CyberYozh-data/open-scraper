@@ -166,6 +166,17 @@ docker-compose.k12.yml
 # Runtime preset volume (mounted into web-scraper at ./data/presets) — user-defined / self-healed presets, not source
 /data/
 
-# Local SERP/anti-bot research & experiments — empirical probes, captured HTML,
-# results. Host-local, never committed (may contain proxy exit IPs / fetched pages).
-/research/
+# Local SERP/anti-bot research & experiments. Captured raw pages (e.g.
+# research/fingerprint_probe_captures/) stay host-local and untracked: they are
+# the literal fetched page, unredacted, and can carry a full proxy exit IP plus
+# whatever else the page saw. The probe/audit *.py / *.json ARE trackable —
+# they are the permanent, reviewed measurement records these research tasks
+# exist to produce — BECAUSE the scripts truncate any IP address before
+# writing it (see fingerprint_probe_2026_08_27.py's _truncate_ip: /24 for
+# IPv4, /48 for IPv6) AND because their own prose/examples use RFC 5737
+# documentation-range addresses instead of real exits. A script that writes a
+# full third-party address anywhere in its .py or .json is a bug in that
+# script, not something this ignore rule is meant to catch.
+/research/*
+!/research/*.py
+!/research/*.json

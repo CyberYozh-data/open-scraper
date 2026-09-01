@@ -61,6 +61,81 @@ def test_build_options_viewport_maps_to_window_tuple():
     assert opts["window"] == (1920, 1080)
 
 
+def test_camoufox_options_pin_the_locale_for_the_requested_country():
+    """Camoufox draws a language from the exit region's list when none is pinned,
+    and that list includes minority languages: production runs announced bar-DE
+    (Bavarian), it-DE and en-DE for Germany and es-US for the United States.
+    en-DE is what made Amazon serve an English page to a preset whose price
+    parser had been told to expect European formatting."""
+    opts = build_camoufox_options(
+        proxy=None, block_assets=False, webrtc_block=False,
+        proxy_geo={"country_code": "DE"},
+    )
+    assert opts["locale"] == "de-DE"
+
+
+def test_camoufox_options_omit_the_locale_for_an_unknown_country():
+    """Unknown country: no pin, so Camoufox's own draw still applies rather than
+    a guess of ours being asserted as fact."""
+    opts = build_camoufox_options(
+        proxy=None, block_assets=False, webrtc_block=False,
+        proxy_geo={"country_code": "ZZ"},
+    )
+    assert "locale" not in opts
+
+
+def test_camoufox_options_omit_the_locale_when_no_geo_is_given():
+    """No proxy_geo at all (the common no-proxy path) must not KeyError or
+    invent a locale — same as the unknown-country case."""
+    opts = build_camoufox_options(proxy=None, block_assets=False, webrtc_block=False)
+    assert "locale" not in opts
+
+
+def test_camoufox_never_pins_a_locale_camoufox_itself_would_reject():
+    """Every _COUNTRY_MAP entry, run through camoufox's OWN validator.
+
+    geo_profile.py is not guaranteed to only contain locales Camoufox's
+    IANA-tag data recognizes: measured, exactly one of 250 entries --
+    "XK" -> "sq-XK" (Kosovo, not a registered ISO region as far as the
+    `language-tags` package is concerned) -- raises `InvalidLocale` when
+    handed to Camoufox's own `handle_locales`. Before the guard in
+    build_camoufox_options existed, that locale was pinned unconditionally,
+    so `AsyncCamoufox(**opts)` raised before the browser ever started and the
+    queue's retry loop repeated the same guaranteed failure on every retry,
+    burning the attempt budget and the proxy session on something that could
+    never succeed.
+
+    This is the guard's regression pin, not a comment: for every country the
+    pin build_camoufox_options actually produces must agree with what
+    Camoufox's own validator would accept — present exactly when Camoufox
+    accepts it, absent precisely when Camoufox would not.
+    """
+    from camoufox.exceptions import InvalidLocale
+    from camoufox.locale import handle_locales
+
+    from src.browser.geo_profile import _COUNTRY_MAP
+
+    for country_code, profile in _COUNTRY_MAP.items():
+        try:
+            handle_locales(profile.locale, {})
+            camoufox_accepts = True
+        except InvalidLocale:
+            camoufox_accepts = False
+
+        opts = build_camoufox_options(
+            proxy=None, block_assets=False, webrtc_block=False,
+            proxy_geo={"country_code": country_code},
+        )
+
+        if camoufox_accepts:
+            assert opts.get("locale") == profile.locale, country_code
+        else:
+            assert "locale" not in opts, (
+                f"{country_code}: Camoufox rejects {profile.locale!r} but "
+                "build_camoufox_options pinned it anyway"
+            )
+
+
 def test_runner_is_never_warm():
     r = CamoufoxRunner(timeout_ms=30000)
     assert r.is_started() is False
@@ -79,7 +154,7 @@ class _ACM:
 def _mock_page(monkeypatch):
     from unittest.mock import AsyncMock, Mock
     page = AsyncMock()
-    page.goto = AsyncMock(return_value=Mock(status=200))
+    page.goto = AsyncMock(return_value=Mock(status=200, request=Mock(redirected_from=None)))
     page.content = AsyncMock(return_value="<html><body>real results</body></html>")
     page.url = "https://ya.ru/"
     page.evaluate = AsyncMock(return_value={
@@ -610,6 +685,39 @@ async def test_the_fetch_resolves_the_profile_it_was_given(monkeypatch):
 
     assert seen["fingerprint"].profile == "linux"
     assert seen["fingerprint"].spoof_os == "linux"
+
+
+@pytest.mark.asyncio
+async def test_the_fetch_forwards_proxy_geo_to_the_locale_pin(monkeypatch):
+    """The entire production delta for the locale-pin fix is one forwarded
+    kwarg at this call site (fetch -> build_camoufox_options). Every test
+    that exercises the pin by calling build_camoufox_options directly would
+    stay green even if that forwarding were deleted -- confirmed by deleting
+    it and re-running this file: the direct-call locale tests still passed,
+    and so did the rest of tests/browser. This is the one test that goes red
+    on that deletion.
+    """
+    seen: dict = {}
+    built: dict = {}
+    _mock_page(monkeypatch)
+    real = build_camoufox_options
+
+    def _spy(**kwargs):
+        seen.update(kwargs)
+        result = real(**kwargs)
+        built.update(result)
+        return result
+
+    monkeypatch.setattr("src.browser.camoufox_runner.build_camoufox_options", _spy)
+
+    await CamoufoxRunner(timeout_ms=30000).fetch(
+        url="https://ya.ru/", device="desktop", proxy=None, headers=None,
+        wait_until="domcontentloaded", wait_for_selector=None, timeout_ms=None,
+        screenshot=False, proxy_geo={"country_code": "DE"},
+    )
+
+    assert seen["proxy_geo"] == {"country_code": "DE"}
+    assert built["locale"] == "de-DE"
 
 
 @pytest.mark.asyncio

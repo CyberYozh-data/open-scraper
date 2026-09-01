@@ -29,10 +29,13 @@ log = logging.getLogger(__name__)
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
 # Countries that write prices with a comma decimal separator ("12,34").
-# parse_price defaults to "us" (dot decimal); a built-in shipping a `de`
-# locale would otherwise turn "12,34 €" into 1234.0. The set is a pragmatic
-# majority — explicit args on a step always win, so a preset author can
-# override per field.
+# parse_price defaults to "us" (dot decimal). This subsystem is still needed,
+# but only for a 1-digit-tail price ("12,3 €"): _parse_price reads a 2-digit
+# tail straight from the text regardless of locale, so "12,34 €" no longer
+# needs this to parse correctly, but "12,3 €" without an "eu" hint still
+# comes back as 123.0 rather than 12.3. The set is a pragmatic majority —
+# explicit args on a step always win, so a preset author can override per
+# field.
 _COMMA_DECIMAL_COUNTRIES = frozenset(
     {
         "DE", "FR", "ES", "IT", "NL", "BE", "AT", "PT", "FI", "SE", "NO",
@@ -48,24 +51,137 @@ def _price_locale_for(country: str) -> str:
 
 def _inject_price_locale(
     instructions: "ParsingInstructions", price_locale: str
-) -> "ParsingInstructions":
+) -> tuple["ParsingInstructions", list[str]]:
     """Fill empty parse_price args with the locale-appropriate separator
-    rule. Explicit args set by the preset author are left untouched."""
+    rule. Explicit args set by the preset author are left untouched.
+
+    Returns the (possibly unchanged) instructions AND the field names that
+    were actually injected -- the caller records this on `ParserPlan.
+    materializer_injected` so a later self-heal can strip exactly these
+    values back to empty before persisting (see `strip_materializer_injected`
+    below); a self-heal that persisted this request's injected locale would
+    freeze it into the preset forever, silently wrong for every other market.
+    """
     new_fields = {}
-    changed = False
+    injected_fields: list[str] = []
     for fname, frule in instructions.fields.items():
         new_pp = []
+        field_injected = False
         for step in frule.post_process:
             if step.op == "parse_price" and not step.args:
                 new_pp.append(step.model_copy(update={"args": [price_locale]}))
-                changed = True
+                field_injected = True
             else:
                 new_pp.append(step)
+        if field_injected:
+            injected_fields.append(fname)
         new_fields[fname] = (
             frule.model_copy(update={"post_process": new_pp})
             if new_pp != list(frule.post_process)
             else frule
         )
+    if not injected_fields:
+        return instructions, []
+    return instructions.model_copy(update={"fields": new_fields}), injected_fields
+
+
+def inject_url_base(
+    instructions: "ParsingInstructions", base_url: str
+) -> tuple["ParsingInstructions", list[str]]:
+    """Fill empty `urljoin` args with the URL this request is about to fetch.
+
+    extract_fields (src/extract/extractor.py) takes only page_html — it is
+    never given the page's URL, navigated or otherwise — so a relative href
+    (Amazon serves every search-result href relative) cannot be made absolute
+    inside the extractor itself. Threading the *navigated* URL all the way
+    down through worker_parse -> parser_pipeline -> extract_fields would touch
+    three modules' signatures and the self-heal path for a fix scoped to one
+    preset. Instead this mirrors `_inject_price_locale`: the materializer
+    already computes the exact URL the fetch is about to use (`url`, above,
+    built from the same locale/domain the preset resolves), and injects it as
+    `urljoin`'s base at the one place both are in scope together. Explicit
+    args set by the preset author are left untouched.
+
+    Public (no leading underscore): `src/presets/service.py`'s preview()/
+    test() also call this directly, with `req.sample_url` as the base, so
+    those paths predict the same absolute urls production will return
+    instead of silently no-op'ing where a URL was available all along.
+
+    Returns the (possibly unchanged) instructions AND the field names that
+    were actually injected -- see `_inject_price_locale`'s docstring for why
+    the caller needs this (the self-heal-freezes-the-base bug).
+    """
+    new_fields = {}
+    injected_fields: list[str] = []
+    for fname, frule in instructions.fields.items():
+        new_pp = []
+        field_injected = False
+        for step in frule.post_process:
+            if step.op == "urljoin" and not step.args:
+                new_pp.append(step.model_copy(update={"args": [base_url]}))
+                field_injected = True
+            else:
+                new_pp.append(step)
+        if field_injected:
+            injected_fields.append(fname)
+        new_fields[fname] = (
+            frule.model_copy(update={"post_process": new_pp})
+            if new_pp != list(frule.post_process)
+            else frule
+        )
+    if not injected_fields:
+        return instructions, []
+    return instructions.model_copy(update={"fields": new_fields}), injected_fields
+
+
+def strip_materializer_injected(
+    instructions: "ParsingInstructions", injected: dict[str, list[str]]
+) -> "ParsingInstructions":
+    """Undo `_inject_price_locale`/`inject_url_base` before a self-heal is
+    persisted to a user preset.
+
+    `_under_original_contract` (parser_pipeline.py) builds the instructions a
+    self-heal writes back by copying `post_process` VERBATIM from the
+    already-materialized instructions -- which, for any op an `_inject_*`
+    helper filled in for THIS ONE request, means the value baked in belongs
+    to this request's locale/URL, not to the preset. Persisting it as-is
+    freezes that one request's value forever: the next materialize() call
+    sees non-empty args and skips injection (by design -- an author's
+    explicit args must never be overwritten), so every later request, in
+    every locale, silently resolves against a stale, request-specific value
+    -- a plausible-looking absolute URL on the wrong domain, or a price
+    locale that stops matching the market. If a user preset's `url_template`
+    ever carried a credential in its query string, that credential would be
+    the thing frozen in and served back by the unauthenticated
+    `GET /api/v1/presets/{name}`.
+
+    `injected` names exactly the (op -> [field, ...]) pairs a materialize()
+    call actually filled in, which is the only source that can tell an
+    injected value apart from an author's explicit one -- they are
+    indistinguishable by content alone once both have round-tripped through
+    the same `PostProcess.args` list. Blanking those specific args back to
+    `[]` restores the "not yet injected" state the preset's author actually
+    wrote, so the very next materialize() call (for whatever locale/URL that
+    request uses) re-injects a fresh, correct value.
+    """
+    if not injected:
+        return instructions
+    new_fields = {}
+    changed = False
+    for fname, frule in instructions.fields.items():
+        target_ops = {op for op, fields in injected.items() if fname in fields}
+        if not target_ops:
+            new_fields[fname] = frule
+            continue
+        new_pp = [
+            step.model_copy(update={"args": []}) if step.op in target_ops else step
+            for step in frule.post_process
+        ]
+        if new_pp != list(frule.post_process):
+            changed = True
+            new_fields[fname] = frule.model_copy(update={"post_process": new_pp})
+        else:
+            new_fields[fname] = frule
     if not changed:
         return instructions
     return instructions.model_copy(update={"fields": new_fields})
@@ -251,10 +367,21 @@ def materialize(preset: Preset, req: PresetScrapeRequest) -> ScrapeRequest:
         )
 
     instructions = req.parsing_override or preset.parsing_instructions
+    # Records exactly which (op, field) pairs this call injected -- carried on
+    # ParserPlan so a later self-heal can strip them back to empty before
+    # persisting (see strip_materializer_injected's docstring for why: an
+    # injected value is specific to THIS request's locale/URL, and freezing
+    # it into a user preset silently breaks every other locale/URL forever).
+    materializer_injected: dict[str, list[str]] = {}
     if instructions is not None:
-        instructions = _inject_price_locale(
+        instructions, price_injected = _inject_price_locale(
             instructions, _price_locale_for(locale.country)
         )
+        if price_injected:
+            materializer_injected["parse_price"] = price_injected
+        instructions, url_injected = inject_url_base(instructions, url)
+        if url_injected:
+            materializer_injected["urljoin"] = url_injected
     else:
         # AI-only preset: no deterministic parser. Force raw_html so the PR-3
         # LLM step has the page to work with.
@@ -276,6 +403,7 @@ def materialize(preset: Preset, req: PresetScrapeRequest) -> ScrapeRequest:
         llm_extract_prompt=preset.llm_extract_prompt,
         preset_name=preset.name,
         preset_kind=preset.kind,
+        materializer_injected=materializer_injected,
     )
 
     try:

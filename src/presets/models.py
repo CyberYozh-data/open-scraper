@@ -167,3 +167,14 @@ class ParserPlan(BaseModel):
     llm_extract_prompt: str | None = None
     preset_name: str | None = None
     preset_kind: PresetKind | None = None
+    materializer_injected: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Which post_process args the materializer filled in for THIS "
+            "request (op name -> field names), e.g. {'urljoin': ['urls']}. "
+            "Lets a self-heal strip exactly these back to empty before "
+            "persisting to a user preset, so the next materialize() call "
+            "re-injects a fresh, request-appropriate value instead of the "
+            "one baked in here."
+        ),
+    )

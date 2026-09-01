@@ -22,6 +22,17 @@ SCRAPER_URL = os.getenv("OPEN_SCRAPER_URL", "http://localhost:8000")
 API_BASE = f"{SCRAPER_URL}/api/v1"
 
 
+def service_headers() -> dict[str, str]:
+    """`X-Service-Token` when SERVICE_TOKEN is in the environment, else {}.
+
+    The gated surfaces — `/proxies/available`, `/proxies/resolve`, the sessions
+    router and the prem-proxy catalog — answer 401 without it. Empty is
+    correct against an ungated deployment: the header is a no-op there.
+    """
+    token = os.getenv("SERVICE_TOKEN", "")
+    return {"X-Service-Token": token} if token else {}
+
+
 def submit_scrape_job(
     url: str,
     *,

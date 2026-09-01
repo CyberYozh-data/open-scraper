@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import logging
 import math
 import os
 import re
 import time
 from functools import lru_cache
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Any, Optional, Literal
@@ -24,11 +23,21 @@ from playwright.async_api import (
 from playwright_stealth import Stealth
 
 from src.browser.page_io import read_content_settling_navigation
+from src.browser.teardown import TEARDOWN_TIMEOUT_S as _TEARDOWN_TIMEOUT_S, close_quietly
 from src.proxy.models import ProxyConfig
 from src.proxy.socks_bridge import open_socks_to_http_bridge
+from src.security.egress_guard import open_egress_guard
 from src.browser.geo_profile import resolve_profile
 from src.browser.fingerprint_profile import chromium_webgl_identity
 from src.schemas import ElementScreenshotStatus
+from src.security.egress import (
+    EGRESS_BLOCKED_ERROR,
+    EgressBlocked,
+    assert_landing_public,
+    assert_navigable,
+    assert_page_public,
+    make_route_guard,
+)
 from src.settings import settings
 
 
@@ -458,7 +467,9 @@ class WarmupOutcome:
     error: str | None = None
 
 
-async def run_warmup(page, target_url, warmup, *, timeout_ms, default_dwell_ms) -> WarmupOutcome:
+async def run_warmup(
+    page, target_url, warmup, *, timeout_ms, default_dwell_ms, resolve: bool = True
+) -> WarmupOutcome:
     """Optional pre-navigation warmup. Non-fatal: any failure is reported and
     swallowed so the real navigation still runs.
 
@@ -483,8 +494,22 @@ async def run_warmup(page, target_url, warmup, *, timeout_ms, default_dwell_ms) 
         return WarmupOutcome()
     dwell = warmup.get("dwell_ms")
     dwell = default_dwell_ms if dwell is None else dwell
+    # `type='custom'` is a second caller-supplied URL and was completely
+    # unvalidated. Refused non-fatally like any other warmup failure, but with
+    # the constant message — the requested host must not travel into
+    # `warnings`, which is caller-visible.
     try:
-        await page.goto(str(warm_url), wait_until="domcontentloaded", timeout=timeout_ms)
+        await assert_navigable(str(warm_url), resolve=resolve)
+    except EgressBlocked:
+        return WarmupOutcome(error=EGRESS_BLOCKED_ERROR)
+    try:
+        response = await page.goto(
+            str(warm_url), wait_until="domcontentloaded", timeout=timeout_ms
+        )
+        # The warmup navigation redirects like any other, and the route guard
+        # is blind to those hops. Non-fatal either way — but without this the
+        # warmup was the one navigation with a pre-flight and no landing check.
+        await assert_landing_public(response, page.url, resolve=resolve)
         await page.wait_for_timeout(dwell)
         return WarmupOutcome(applied={"type": wtype, "url": str(warm_url), "dwell_ms": dwell})
     except Exception as exc:  # pylint: disable=broad-except
@@ -705,6 +730,10 @@ class FetchResult:
     # network/proxy error: the request succeeded but the IP is burned, so the
     # queue layer should rotate the proxy and retry.
     blocked: bool = False
+    # Targets the transport guard refused during this fetch (host:port), so a
+    # denied redirect hop or sub-resource is explainable. Without it the caller
+    # sees only a raw transport error and reads it as a proxy fault.
+    egress_denied: list[str] = field(default_factory=list)
 
 
 class PlaywrightRunner:
@@ -843,17 +872,33 @@ class PlaywrightRunner:
         ``await bridge_cm.__aexit__(None, None, None)`` in their finally clause
         when the returned bridge is not None.
 
+        On the DIRECT path (no upstream proxy — which is the default,
+        `proxy_type="none"`) it also inserts the local egress guard into the
+        proxy slot. That is the only layer that PREVENTS a refused request
+        instead of refusing its content afterwards: measured against real
+        Chromium, a proxy here is handed both hops of a redirect and is handed
+        a hostname rather than an address the browser already resolved, so it
+        closes both the redirect blind spot and the TOCTOU window.
+
+        Bound to the caller's existing `bridge_cm` slot, so no new lifecycle
+        appears at any call site.
+
         Returns:
-            (effective_proxy, bridge_cm) — pass-through when no bridge is needed.
+            (effective_proxy, bridge_cm, guard) — `guard` is None unless the
+            transport guard is in play; `bridge_cm` is None when neither is.
         """
         if proxy is None:
-            return None, None
+            if not settings.egress_transport_guard:
+                return None, None, None
+            guard_cm = open_egress_guard(resolve=True)
+            guard = await guard_cm.__aenter__()
+            return ProxyConfig(server=guard.url), guard_cm, guard
         needs_bridge = (
             proxy.server.lower().startswith("socks5://")
             and (proxy.username or proxy.password)
         )
         if not needs_bridge:
-            return proxy, None
+            return proxy, None, None
 
         from urllib.parse import urlparse, quote
         parsed = urlparse(proxy.server)
@@ -867,7 +912,7 @@ class PlaywrightRunner:
         bridge_cm = open_socks_to_http_bridge(socks_url)
         local_url = await bridge_cm.__aenter__()
         log.info("routing SOCKS5 proxy %s via local bridge %s", proxy.server, local_url)
-        return ProxyConfig(server=local_url, username=None, password=None), bridge_cm
+        return ProxyConfig(server=local_url, username=None, password=None), bridge_cm, None
 
     async def _new_context(
         self,
@@ -879,6 +924,7 @@ class PlaywrightRunner:
         render: bool = True,
         storage_state: dict | None = None,
         viewport: dict[str, int] | None = None,
+        resolve_dns: bool | None = None,
     ) -> BrowserContext:
         assert self._browser is not None
         preset = DESKTOP if device == "desktop" else MOBILE
@@ -962,6 +1008,26 @@ class PlaywrightRunner:
         effective_block_assets = self.block_assets if block_assets is None else block_assets
         if effective_block_assets:
             await context.route("**/*", _block_assets_route)
+        # Registered AFTER the asset blocker and unconditionally: Playwright
+        # runs route handlers last-registered-first, so this decides before the
+        # blocker forwards anything, and it must not inherit `block_assets`.
+        # It yields with `fallback()`, so the blocker still gets its turn.
+        #
+        # Cost, stated because it is not free: "enabling routing disables http
+        # cache" (Playwright's own API docs). Only new behaviour when
+        # `block_assets=false` — the default already registered a route — so
+        # the affected case is screenshot-with-images scrapes, which is also
+        # where the re-fetched bytes are paid for through the proxy.
+        # Explicit, never `proxy is None`: this parameter receives
+        # `effective_proxy`, so once the transport guard occupies that slot the
+        # derived answer inverts and the route guard silently stops resolving.
+        # The caller knows whether an UPSTREAM proxy is in play; this does not.
+        await context.route(
+            "**/*",
+            make_route_guard(
+                resolve=(proxy is None) if resolve_dns is None else resolve_dns
+            ),
+        )
         return context
 
     def _looks_like_captcha_or_block(
@@ -997,6 +1063,25 @@ class PlaywrightRunner:
         addons: list[str] | None = None,
         warmup: dict | None = None,
     ) -> FetchResult:
+        # Before `start()`, so a refused target costs neither a browser launch
+        # nor a proxy lease AT THIS BOUNDARY — `EphemeralPlaywrightRunner` and
+        # the queue layer both do their own setup before calling in, so this is
+        # not the end-to-end claim. `resolve` is off on the proxied path: the
+        # upstream proxy does its own DNS, so a local answer describes a
+        # different network than the one that will be dialled.
+        try:
+            await assert_navigable(url, resolve=proxy is None)
+        except EgressBlocked:
+            return FetchResult(
+                html="",
+                final_url=None,
+                status_code=None,
+                screenshot_b64=None,
+                ok=False,
+                error=EGRESS_BLOCKED_ERROR,
+                element_status="no_screenshot",
+            )
+
         await self.start()
         assert self._browser is not None
 
@@ -1006,21 +1091,29 @@ class PlaywrightRunner:
 
         effective_block_assets = self.block_assets if block_assets is None else block_assets
 
-        effective_proxy, bridge_cm = await self.resolve_proxy(proxy)
+        effective_proxy, bridge_cm, egress_guard = await self.resolve_proxy(proxy)
 
         context = None
         page = None
 
         async def _teardown() -> None:
+            """Close everything this fetch opened. See src/browser/teardown.py
+            for why each close is independent, bounded and logged."""
             if page is not None:
-                with contextlib.suppress(Exception):
-                    await page.close()
+                await close_quietly(
+                    "page", page.close, owner=url, timeout=_TEARDOWN_TIMEOUT_S
+                )
             if context is not None:
-                with contextlib.suppress(Exception):
-                    await context.close()
+                await close_quietly(
+                    "context", context.close, owner=url, timeout=_TEARDOWN_TIMEOUT_S
+                )
             if bridge_cm is not None:
-                with contextlib.suppress(Exception):
-                    await bridge_cm.__aexit__(None, None, None)
+                await close_quietly(
+                    "socks bridge",
+                    lambda: bridge_cm.__aexit__(None, None, None),
+                    owner=url,
+                    timeout=_TEARDOWN_TIMEOUT_S,
+                )
 
         # Acquire context/page outside the main fetch try; a failure here would
         # otherwise leak the context and SOCKS bridge (the fetch finally never
@@ -1030,6 +1123,7 @@ class PlaywrightRunner:
                 device=device, proxy=effective_proxy, headers=headers,
                 block_assets=block_assets, proxy_geo=proxy_geo, render=render,
                 storage_state=storage_state, viewport=viewport,
+                resolve_dns=proxy is None,
             )
 
             if cookies:
@@ -1076,6 +1170,12 @@ class PlaywrightRunner:
             result.applied_accept_language = applied["accept_language"]
             result.applied_warmup = applied_warmup
             result.warmup_error = warmup_error
+            # Read here rather than at each return: the guard accumulates
+            # refusals for the whole fetch, so the list is only final once the
+            # fetch is over — including on the error paths, where a refused
+            # target is usually the REASON for the error.
+            if egress_guard is not None:
+                result.egress_denied = list(egress_guard.denied)
             return result
 
         try:
@@ -1084,10 +1184,16 @@ class PlaywrightRunner:
                 page, url, warmup,
                 timeout_ms=effective_timeout_ms,
                 default_dwell_ms=settings.warmup_dwell_ms,
+                resolve=proxy is None,
             )
             applied_warmup = warmup_outcome.applied
             warmup_error = warmup_outcome.error
             resp = await page.goto(url, wait_until=wait_until, timeout=effective_timeout_ms)
+            # The route guard is blind to redirect hops (Playwright does not
+            # invoke it for them), so a public URL that 302s into the internal
+            # network reaches this line having already fetched. Walking the
+            # chain here refuses to hand the body back — blind, not full-read.
+            await assert_landing_public(resp, page.url, resolve=proxy is None)
             selector_missing = False
             # See redirected_to_block: once the navigation has landed on a block
             # endpoint, the selector cannot appear, and waiting for it burns a
@@ -1117,6 +1223,15 @@ class PlaywrightRunner:
 
             html = await read_content_settling_navigation(page)
             final_url = page.url
+            # AFTER the read, not before. The landing check above is a snapshot
+            # taken at `goto`; `read_content_settling_navigation` deliberately
+            # waits out an in-flight navigation and returns the content of
+            # wherever the page ENDED UP. Checked before the read, a public
+            # page that meta-refreshes to a public hop which 302s internal
+            # still returned the internal body with ok=True — measured.
+            # `final_url` is the URL this html actually belongs to, so that is
+            # what has to be public.
+            await assert_page_public(page, resolve=proxy is None)
             status_code = resp.status if resp is not None else None
             captcha_detected = self._looks_like_captcha_or_block(
                 html, final_url=final_url
@@ -1140,6 +1255,10 @@ class PlaywrightRunner:
                 effective_block_assets=effective_block_assets,
             )
             if png is not None:
+                # The capture is its own window in which the page can navigate,
+                # and an image of an internal page is the same disclosure as
+                # its html.
+                await assert_page_public(page, resolve=proxy is None)
                 screenshot_b64 = base64.b64encode(png).decode("ascii")
 
             new_storage_state = None
@@ -1161,6 +1280,19 @@ class PlaywrightRunner:
                 blocked=fetch_blocked,
             ))
 
+        # Before the broad arms: they stringify the exception into `error`,
+        # which would put the attacker's host back into a caller-visible
+        # message and hand `looks_like_proxy_failure` needles to match on.
+        except EgressBlocked:
+            return _with_applied(FetchResult(
+                html="",
+                final_url=None,
+                status_code=None,
+                screenshot_b64=None,
+                ok=False,
+                error=EGRESS_BLOCKED_ERROR,
+                element_status="no_screenshot",
+            ))
         except PWError as e:
             return _with_applied(FetchResult(
                 html="",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -17,6 +18,9 @@ PostProcessOp = Literal[
     "uppercase",
     "replace",
     "base64_decode",
+    "urljoin",
+    "null_if_regex",
+    "unwrap_param",
 ]
 
 
@@ -36,7 +40,54 @@ class PostProcess(BaseModel):
             "fragment down to its "
             "text (tags dropped, entities decoded, whitespace collapsed) — "
             "pair it with attr='html' + 'regex' to read a value out of an "
-            "always-present container without the container's markup."
+            "always-present container without the container's markup. "
+            "'unwrap_param' (args=[param_name]) reads a query parameter out "
+            "of a click-tracking redirect (Amazon's sponsored-result links "
+            "carry the real destination inline: "
+            "'/sspa/click?...&url=%2Freal%2Fpath') and percent-decodes it; "
+            "when the value has no such parameter it PASSES THROUGH "
+            "UNCHANGED (not null), which is what lets one pipeline handle a "
+            "mixed field of wrapped and unwrapped values -- pair it with "
+            "'urljoin' to also resolve the recovered (still relative) path. "
+            "The decoded value is only ever handed on when it is an absolute "
+            "http(s) URL with a host, or a plain relative path: the parameter "
+            "is text the PAGE controls, so a crafted value is refused and the "
+            "original wrapper passes through UNCHANGED (never null). Refused: "
+            "any other scheme ('javascript:', 'data:', 'file:', 'ftp:' ...); "
+            "an http(s) value naming no host ('http:///x'); anything opening "
+            "with TWO OR MORE slashes or backslashes -- '//host/path' and "
+            "every other spelling of it ('///host', '/\\host', '\\\\host'), "
+            "which a browser resolves onto 'host' identically; and a "
+            "reference naming no path segment of its own ('', '.', '?a=b', "
+            "'#frag'), which can only point back at the page being scraped. "
+            "Worst case is a passthrough, so this op cannot introduce a "
+            "non-http(s) link and cannot turn a relative value into an "
+            "off-host one. It is NOT a same-host guarantee: an absolute "
+            "http(s) URL naming ANY host is accepted by design, because a "
+            "redirect may legitimately point off-site. "
+            "'url=https%3A%2F%2Fother.example%2Fx' is handed on as "
+            "'https://other.example/x' and a following 'urljoin' leaves it "
+            "unchanged (RFC 3986: an absolute reference ignores the base). "
+            "A caller that needs the destination to stay on the page's own "
+            "host must check the host itself -- this op does not do it for "
+            "them, and neither does 'urljoin'. "
+            "'urljoin' (args=[base_url]?) resolves a relative href (Amazon "
+            "serves every search-result href relative) against base_url via "
+            "RFC 3986 resolution; an already-absolute value passes through "
+            "unchanged. extract_fields never sees the page's own URL, so "
+            "base_url is usually left empty in the preset and injected by "
+            "the materializer from the request it is about to fetch (same "
+            "pattern as parse_price's empty locale arg). Unlike "
+            "parse_price's 'us' default, there is no sensible default "
+            "transform for a URL with no base: with none at all "
+            "(materializer bypassed and no explicit base_url given) it "
+            "leaves the value UNCHANGED and adds a warning, rather than "
+            "silently shipping a relative link with nothing telling the "
+            "caller why. 'null_if_regex' (args=[pattern]) nulls the value "
+            "IN PLACE when pattern matches, leaving it untouched otherwise "
+            "-- for excluding one shape from an all=true field without "
+            "shrinking the array, which would misalign every later row "
+            "against its sibling fields."
         ),
     )
     args: list[Any] = Field(default_factory=list)
@@ -50,6 +101,22 @@ class PostProcess(BaseModel):
             raise ValueError("replace requires 2 args: [old, new]")
         if self.op == "regex" and len(self.args) < 1:
             raise ValueError("regex requires 1 arg: [pattern]")
+        if self.op == "unwrap_param" and len(self.args) < 1:
+            raise ValueError("unwrap_param requires 1 arg: [param_name]")
+        if self.op == "null_if_regex":
+            if len(self.args) < 1:
+                raise ValueError("null_if_regex requires 1 arg: [pattern]")
+            # Unlike 'regex' (whose pattern is validated the same way it has
+            # been since this op shipped, and is left alone here), an
+            # uncompilable null_if_regex pattern is caught at preset-creation
+            # time rather than nulling the whole column at scrape time -- the
+            # cost of a self-heal-worthy typo discovered only in production.
+            try:
+                re.compile(self.args[0])
+            except re.error as exc:
+                raise ValueError(
+                    f"null_if_regex: invalid regex pattern {self.args[0]!r}: {exc}"
+                ) from exc
         if self.op == "parse_price":
             if self.args and self.args[0] not in ("us", "eu"):
                 raise ValueError(

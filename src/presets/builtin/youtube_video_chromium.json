@@ -1,0 +1,105 @@
+{
+  "name": "youtube_video_chromium",
+  "source": "youtube",
+  "description": "YouTube watch page. Title/channel/published come from stable <meta>/JSON-LD; views/likes are parsed from the in-page ytInitialData/ytInitialPlayerResponse JSON (viewCount/likeCount) instead of the JS-rendered DOM. Uses prem_res_rotating; domcontentloaded avoids hanging on YouTube's constant polling. ENGINE: Chromium (Playwright). WebGL identity follows this host — an AMD Radeon 780M claim under a Windows UA — via chromium_webgl_identity(); no fingerprint_profile, which the Chromium runner would accept and ignore. MEASURED 2026-08-27 (2 runs per engine, 4 runs in total on the one locale this preset has, research/preset_audit_dual_engine_2026_08_27.json): all four runs across both engines returned the same payload field for field — title, channel, views 1808853690, likes 19353698, published_at 2009-10-24T23:57:33-07:00 — with no warnings on either. NO SEPARATION: neither variant is recommended over the other. No timing claim is made; the audit's elapsed times are 3s-quantized poll intervals and cannot rank engines. Four runs against one video is a thin basis for a durable statement either way. MEASURED 2026-08-28 (retest of the same twenty presets through the same harness after the five audit fixes; n=2 per locale, 92 runs, research/preset_audit_dual_engine_2026_08_28.json): 2/2 runs returned data with title and channel filled, en-US on both -- identical to 08-27 and to the Camoufox twin. Control preset: none of the five fixes touched it and nothing moved.",
+  "kind": "builtin",
+  "url_template": "https://www.youtube.com/watch?v={video_id}",
+  "request_defaults": {
+    "device": "desktop",
+    "proxy_type": "prem_res_rotating",
+    "stealth": true,
+    "wait_until": "domcontentloaded",
+    "timeout_ms": 60000,
+    "block_assets": true,
+    "browser_engine": "chromium"
+  },
+  "locales": {
+    "global": {
+      "domain": "com",
+      "country": "US"
+    }
+  },
+  "default_locale": "global",
+  "parsing_instructions": {
+    "type": "css",
+    "fields": {
+      "title": {
+        "selector": "meta[name='title']",
+        "attr": "content",
+        "required": true
+      },
+      "channel": {
+        "selector": "link[itemprop='name']",
+        "attr": "content"
+      },
+      "published_at": {
+        "selector": "meta[itemprop='datePublished'], meta[itemprop='uploadDate']",
+        "attr": "content"
+      },
+      "views": {
+        "selector": "html",
+        "attr": "html",
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "\"viewCount\":\"(\\d+)\""
+            ]
+          },
+          {
+            "op": "parse_int"
+          }
+        ]
+      },
+      "likes": {
+        "selector": "html",
+        "attr": "html",
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "\"likeCount\":\"(\\d+)\""
+            ]
+          },
+          {
+            "op": "parse_int"
+          }
+        ]
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string"
+      },
+      "channel": {
+        "type": "string"
+      },
+      "published_at": {
+        "type": "string"
+      },
+      "views": {
+        "type": "integer"
+      },
+      "likes": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "title"
+    ]
+  },
+  "self_heal": true,
+  "prompt_schema": {
+    "title": "video title",
+    "channel": "channel / uploader name",
+    "published_at": "publish date ISO string",
+    "views": "view count as integer",
+    "likes": "like count as integer"
+  },
+  "llm_extract_prompt": null,
+  "version": 1,
+  "updated_at": 1747267200.0
+}

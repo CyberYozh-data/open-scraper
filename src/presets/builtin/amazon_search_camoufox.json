@@ -1,0 +1,160 @@
+{
+  "name": "amazon_search_camoufox",
+  "source": "amazon",
+  "description": "Amazon search results page. Returns one flat array per field across result cards; consumers zip them by index. ROW-ALIGNMENT INVARIANT: each field must match exactly one node per card, so every field anchors to a per-card container Amazon renders on EVERY card (title-recipe / price-recipe / asin-faceout-container) and digs the value out of that container's html by regex. A container that is present but empty yields null in the correct slot; a selector that matches NOTHING does not yield null — it shrinks the array and silently misaligns every row after it. So never point a field at an element that only exists when the value does (e.g. .a-price .a-offscreen directly): anchor to the always-present container instead. Localizes by domain (.com/.co.uk/.de). block_assets off so lazy product images load. ENGINE: Camoufox, fingerprint_profile=windows_on_host — a Windows claim over this host's real AMD GPU vendor. Windows rather than the honest Linux because measurement put an honest Linux claim at 15 and 23 retries against 1 and 8 for Windows (see src/browser/fingerprint_profile.py). MEASURED 2026-08-27 (n=2 per locale, 6 runs per engine, research/preset_audit_dual_engine_2026_08_27.json): 4/6 runs returned data on BOTH engines — no separation at this sample size, and neither variant is recommended over the other. This one reached all three markets (de 1/2, uk 2/2, us 1/2), but its two empty runs were HTTP 200 with the titles selector matching nothing — consistent with this repo's known Amazon throttle page served as a 200, though the page HTML is deliberately not in the record, so read their zero retries as possibly an undetected block rather than as health. The twin was 2/2 on de and uk and blocked 2/2 on us (HTTP 503 plus captcha), so the whole margin is one us run. Both engines shared the preset's defects at that time: urls came back 22/22 relative on every successful run, with 6 sponsored /sspa/click entries mixed into the organic list. FIXED 2026-08-28 (round 0): urljoin resolved organic urls absolute and null_if_regex nulled the sponsored row's url in place -- closing the relative-url defect but only half of the sponsored one, since deleting the url identified a sponsored row without recovering its real destination, and its None was indistinguishable from a drifted selector. FIX ROUND 1 2026-08-28: Amazon's own sponsored redirect carries the real destination inline (`/sspa/click?...&url=%2Freal%2Fpath`), so `urls` now UNWRAPS it via a new `unwrap_param` op (percent-decodes the `url` query parameter; passes any other value through unchanged, which is what lets one pipeline handle organic and sponsored hrefs together) and then resolves it absolute the same way as every organic url -- every row gets a real, followable destination, sponsored included. A parallel `sponsored` field (same selector, same length) carries a non-null marker exactly on the rows that were unwrapped, so a caller can still filter organic-only without losing data. Verified live 2026-08-28 against real amazon.de and amazon.co.uk search pages, and against all 48 real sponsored hrefs recorded in the 2026-08-27 dual-engine audit (research/preset_audit_dual_engine_2026_08_27.json): amazon.de sometimes serves its results under an English-UI /-/en/ path prefix, which lands in front of the sponsored redirect too (/-/en/sspa/click?...) -- unlike round 0's anchored exclusion pattern (which MISSED every sponsored row under this prefix), neither `unwrap_param` (matches `url=` anywhere) nor the `sponsored` marker's regex (matches `sspa/click` anywhere) depend on where in the path the wrapper sits, so this shape needed no special-casing. FIX ROUND 2 2026-08-28: `sponsored` now yields a non-null value on EVERY row (an always-matching alternation: the literal `sspa/click` when present, an empty string otherwise) instead of null on an organic row -- reads as truthy-vs-empty rather than value-vs-null, so a genuinely ad-free page no longer trips a false silent-null warning. FIX ROUND 3 (final review): that alternation now carries `(?s)`. `.` does not cross a newline, so on an href whose wrapper sits after one the `(?!.*sspa/click)` branch could not see the wrapper to refute itself, matched empty at position 0, and reported the row ORGANIC while `unwrap_param` -- whose pattern uses no `.` -- unwrapped it anyway: the two fields disagreeing on the same row, which this description says cannot happen. HTML attribute values may legally contain newlines. Regression-tested in tests/presets/test_amazon_search_row_alignment.py. CORRECTION (measured, not fixed): the marker's own death is still indistinguishable from a healthy ad-free page -- if Amazon renamed sspa/click, every row would read \"\" (not sponsored), byte-identical to a real ad-free run; only the false alarm was closed, not that gap. `prices`/`ratings` now declare their items as nullable too (measured in the same audit: 5/176 and 15/176 nulls respectively, by design per the row-alignment invariant above) -- this repo's self-heal hands `output_schema` to the LLM as the target contract, so a schema claiming a column can never be null was steering a heal toward exactly the per-row selector shape this preset forbids. MEASURED 2026-08-28 (retest of the same twenty presets through the same harness after the five audit fixes; n=2 per locale, 92 runs, research/preset_audit_dual_engine_2026_08_28.json): 5/6 runs returned data (08-27: 4/6). THE URL DEFECT IS CLOSED: `urls` came back 22/22 ABSOLUTE on every successful run (08-27: 0/22 absolute, 22/22 relative), 0 rows still carrying /sspa/click, and `sponsored` is exactly as long as `urls` on every run with exactly 6 rows marked. Marker correctness was checked WITHIN each run rather than by position: across both engines' 198 rows in this record, all 54 marked rows resolve to a destination whose own ref carries Amazon's ad marker (_sspa / -spons) and all 144 unmarked rows carry none -- 0 disagreements. The marked index sets also reproduce 08-27's wrapped-href index sets per market ([0,1,7,8,13,14] on de, [0,7,8,13,14,21] on uk, [0,1,6,11,16,21] on us). The one empty run is the known Amazon throttle page: HTTP 200 with \"field 'titles': required selector not found\" and no block warning -- read it as an undetected block, not as a selector defect. ratings null 3/110, by design.",
+  "kind": "builtin",
+  "url_template": "https://www.amazon.{domain}/s?k={query}",
+  "request_defaults": {
+    "device": "desktop",
+    "proxy_type": "prem_res_rotating",
+    "wait_until": "domcontentloaded",
+    "timeout_ms": 60000,
+    "block_assets": false,
+    "browser_engine": "camoufox",
+    "fingerprint_profile": "windows_on_host"
+  },
+  "locales": {
+    "us": {
+      "domain": "com",
+      "country": "US"
+    },
+    "uk": {
+      "domain": "co.uk",
+      "country": "GB"
+    },
+    "de": {
+      "domain": "de",
+      "country": "DE"
+    }
+  },
+  "default_locale": "us",
+  "parsing_instructions": {
+    "type": "css",
+    "fields": {
+      "titles": {
+        "selector": "div[data-component-type='s-search-result'] [data-cy='title-recipe'] h2",
+        "all": true,
+        "required": true,
+        "post_process": [
+          {
+            "op": "strip"
+          }
+        ]
+      },
+      "urls": {
+        "selector": "div[data-component-type='s-search-result'] [data-cy='title-recipe'] > a[href]",
+        "attr": "href",
+        "all": true,
+        "post_process": [
+          {
+            "op": "unwrap_param",
+            "args": [
+              "url"
+            ]
+          },
+          {
+            "op": "urljoin"
+          }
+        ]
+      },
+      "prices": {
+        "selector": "div[data-component-type='s-search-result'] [data-cy='price-recipe']",
+        "attr": "html",
+        "all": true,
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "a-offscreen[^>]*>[^<]*?(\\d[\\d.,]*\\d|\\d)"
+            ]
+          },
+          {
+            "op": "parse_price"
+          }
+        ]
+      },
+      "ratings": {
+        "selector": "div[data-component-type='s-search-result'] [data-cy='asin-faceout-container']",
+        "attr": "html",
+        "all": true,
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "a-icon-alt[^>]*>(?:\\s|<[a-zA-Z][^>]*>)*(\\d[.,]\\d)"
+            ]
+          },
+          {
+            "op": "replace",
+            "args": [
+              ",",
+              "."
+            ]
+          },
+          {
+            "op": "parse_float"
+          }
+        ]
+      },
+      "sponsored": {
+        "selector": "div[data-component-type='s-search-result'] [data-cy='title-recipe'] > a[href]",
+        "attr": "href",
+        "all": true,
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "(?s)sspa/click|(?!.*sspa/click)"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "titles": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "urls": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "prices": {
+        "type": "array",
+        "items": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "ratings": {
+        "type": "array",
+        "items": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "sponsored": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "self_heal": true,
+  "prompt_schema": null,
+  "llm_extract_prompt": null,
+  "version": 6,
+  "updated_at": 1787875200.0
+}

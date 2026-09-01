@@ -215,13 +215,30 @@ self-heal:
 curl -X POST http://localhost:8000/api/v1/scrape/preset/page \
   -H 'Content-Type: application/json' \
   -d '{
-    "source": "amazon_product",
+    "source": "amazon_product_chromium",
     "preset_params": {"asin": "B0CRTYZG5C"},
     "locale": "us",
     "llm": {"model": "openai/gpt-5.4-mini"}
   }'
 # → {"job_id": "..."}  then GET /api/v1/scrape/<job_id>/results
 ```
+
+Every built-in ships twice, once per browser engine: `<name>_chromium` and
+`<name>_camoufox`. `GET /api/v1/presets` lists both, and each one's
+`description` carries three trailing paragraphs: an `ENGINE:` clause naming the
+browser engine and explaining its fingerprint identity — the chosen profile and
+rationale for Camoufox, the host-aligned WebGL claim (or why it does not apply)
+for Chromium — followed by TWO `MEASURED` paragraphs, one per audit round,
+stating that variant's own verdict from the runs recorded in
+`research/preset_audit_dual_engine_2026_08_27.json` and
+`research/preset_audit_dual_engine_2026_08_28.json` (the same twenty presets
+re-run through the same harness after the fixes), including where a variant
+loses to its twin, where neither is recommended, and which defects the retest
+left open.
+
+The `_camoufox` variants reject `session_id`, `cookies` and `render=false` with
+HTTP 400 (the Camoufox runner accepts and silently ignores all three), so
+anything authenticated runs on the `_chromium` variant.
 
 `llm` is optional — without it the deterministic parser runs alone; with it,
 selectors self-heal when a required field comes back empty. LLM provider
@@ -234,16 +251,24 @@ settings and `DEFAULT_LLM_MODEL`.
 sessions: create a session, log in once (declarative login script or
 injected cookies), then pass its `session_id` to any scrape so pages are
 fetched with the stored cookies + storage state. Required for logged-in
-targets such as the `linkedin_profile` preset.
+targets such as the `linkedin_profile_chromium` preset.
 
 ## MCP integration
 
 Both services speak [Model Context Protocol](https://modelcontextprotocol.io/)
 over Streamable HTTP:
 
-- **Scraper** → `http://localhost:8000/mcp` — tools: `run_scrape_page`,
-  `run_scrape_pages`, `get_job_status`, `get_job_result`, `cancel_scrape_job`,
-  `health`.
+- **Scraper** → `http://localhost:8000/mcp` — the tools are exactly
+  `MCP_TOOLS` in [`src/app.py`](src/app.py) (21 today: the scrape and job
+  operations, the preset CRUD and generation, `run_search`, the proxy
+  catalogue, `health`, `get_queue_stats`). That tuple is an **allowlist**: a
+  route is not a tool until it is named there. Session operations and
+  `resolve_proxy` and the whole `/api/v2/prem-proxies` catalog are gated
+  behind `SERVICE_TOKEN` and never advertised.
+
+  **The `/mcp` endpoint itself carries no authentication** — anything on this
+  list is callable by any client that can reach the port. That is why the list
+  is explicit rather than "everything except a few".
 - **Crawler** → `http://localhost:8001/mcp` — tools: `create_crawl`,
   `get_crawl`, `get_crawl_results`, `cancel_crawl`, `health` (the SSE
   `events` stream is excluded — streams don't fit the MCP tool model).

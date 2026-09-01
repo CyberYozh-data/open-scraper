@@ -6,12 +6,9 @@ per-route and maps them to HTTP responses.
 """
 from __future__ import annotations
 
-import ipaddress
 import logging
-import socket
 import time
 from typing import Literal
-from urllib.parse import urlparse
 
 import httpx
 from pydantic import ValidationError
@@ -20,6 +17,7 @@ from src.presets.exceptions import PresetValidationError, SampleFetchError
 from src.presets.llm.client import LLMError
 from src.presets.llm.schema_gen import infer_schema
 from src.presets.llm.selector_gen import generate_selectors
+from src.presets.materializer import inject_url_base
 from src.presets.models import ParsingInstructions, Preset
 from src.presets.parser_pipeline import run as run_pipeline
 from src.presets.requests import (
@@ -33,50 +31,29 @@ from src.presets.store import (
     PresetNameInvalid,
     PresetStore,
 )
+from src.security.egress import EGRESS_BLOCKED_ERROR, EgressBlocked, assert_navigable
 from src.settings import settings
 
 log = logging.getLogger(__name__)
 
 _SAMPLE_FETCH_TIMEOUT_S = 30.0
 _MAX_REDIRECTS = 5
-_CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
 
 
-def _assert_public_url(url: str) -> None:
-    """Reject SSRF targets. Raises SampleFetchError for any non-public address."""
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise SampleFetchError(f"unsupported URL scheme: {parsed.scheme!r}")
-    host = parsed.hostname
-    if not host:
-        raise SampleFetchError("URL has no host")
+async def _assert_public_url(url: str) -> None:
+    """SSRF guard for the sample fetch — an adapter over the shared policy.
 
-    addrs: list[str] = []
+    The name survives so `src/api/presets.py`'s SampleFetchError -> HTTP 400
+    mapping is unchanged, but the predicate now lives in `src/security/egress`
+    alongside the one the browser paths use. The local copy this replaces
+    failed open on an empty resolver answer and raised `ValueError` (an HTTP
+    500) on an unparseable one; both are fixed by the move, and the sample
+    fetch can no longer drift away from the navigation guard.
+    """
     try:
-        ipaddress.ip_address(host)
-        addrs = [host]
-    except ValueError:
-        try:
-            infos = socket.getaddrinfo(host, None)
-            addrs = [info[4][0] for info in infos]
-        except OSError as exc:
-            raise SampleFetchError(f"cannot resolve host: {host}") from exc
-
-    for addr in addrs:
-        ip = ipaddress.ip_address(addr)
-        if ip.version == 6 and ip.ipv4_mapped is not None:
-            ip = ip.ipv4_mapped
-        unsafe = (
-            ip.is_private,
-            ip.is_loopback,
-            ip.is_link_local,
-            ip.is_reserved,
-            ip.is_multicast,
-            ip.is_unspecified,
-            ip.version == 4 and ip in _CGNAT_NET,
-        )
-        if any(unsafe):
-            raise SampleFetchError(f"refusing to fetch non-public address ({addr})")
+        await assert_navigable(url, resolve=True)
+    except EgressBlocked as exc:
+        raise SampleFetchError(EGRESS_BLOCKED_ERROR) from exc
 
 
 async def _fetch_sample_html(url: str) -> str:
@@ -91,7 +68,7 @@ async def _fetch_sample_html(url: str) -> str:
             timeout=_SAMPLE_FETCH_TIMEOUT_S, follow_redirects=False
         ) as http:
             for _ in range(_MAX_REDIRECTS + 1):
-                _assert_public_url(current)
+                await _assert_public_url(current)
                 resp = await http.get(current, headers={"User-Agent": "Mozilla/5.0"})
                 if resp.status_code in (301, 302, 303, 307, 308):
                     location = resp.headers.get("location")
@@ -216,9 +193,18 @@ class PresetService:
     ) -> dict:
         preset = store.get(name)
         html = await self._get_sample_html(req)
+        instructions = preset.parsing_instructions
+        # Same base a real scrape's materialize() would inject (see
+        # materializer.inject_url_base) -- without this, testing a preset
+        # whose urls use `urljoin` reports them relative even though the
+        # sample was fetched from a known URL, and production returns them
+        # absolute. `sample_html`-only calls have no URL to inject, and
+        # correctly fall through to urljoin's own no-base warning.
+        if instructions is not None and req.sample_url:
+            instructions, _ = inject_url_base(instructions, req.sample_url)
         result = await run_pipeline(
             html,
-            preset.parsing_instructions,
+            instructions,
             self_heal=req.self_heal,
             llm_model=req.llm_model,
             output_schema=preset.output_schema,
@@ -268,9 +254,28 @@ class PresetService:
                 )
                 raise
 
+        # Same reasoning as PresetService.test(): predict what a real
+        # materialize() would inject for `urljoin`'s base, so preview does
+        # not report relative urls for instructions that will resolve
+        # absolute in production. Injected into a SEPARATE variable, never
+        # into `instructions` itself: `instructions` is what gets returned
+        # below as `parsing_instructions`, which exists precisely so a caller
+        # can persist it (the only way to retrieve LLM-generated instructions
+        # in from_prompt/from_schema mode) -- reassigning `instructions` to
+        # the injected copy would echo `sample_url` (which may itself carry a
+        # credential in its query string) back in the response, and a
+        # preview -> create round-trip would freeze THIS request's base into
+        # the stored preset forever, exactly the bug self-heal persistence
+        # was just fixed for, one file away.
+        pipeline_instructions = instructions
+        if pipeline_instructions is not None and req.sample_url:
+            pipeline_instructions, _ = inject_url_base(
+                pipeline_instructions, req.sample_url
+            )
+
         result = await run_pipeline(
             html,
-            instructions,
+            pipeline_instructions,
             self_heal=req.self_heal,
             llm_model=req.llm_model,
             output_schema=output_schema,

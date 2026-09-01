@@ -14,6 +14,33 @@ The tester talks to **two** backends:
   is required for `EventSource` (SSE doesn't support custom headers, so the
   proxy hop isn't workable).
 
+## Service token
+
+The scraper gates `/api/v2/prem-proxies/*`, `/api/v1/proxies/resolve` and every
+`/api/v1/sessions` route behind a shared secret. Start the harness with it:
+
+```bash
+SERVICE_TOKEN=<the value from the scraper's .env> node server.js
+```
+
+The Express proxy injects `X-Service-Token`, so the secret never reaches the
+browser — but only when **both** hold:
+
+- the upstream is on `SCRAPER_TARGETS` (defaults to localhost / `web-scraper` /
+  `open-crawler` on their usual ports), and
+- the path is one of the gated prefixes.
+
+Both constraints are load-bearing. `/proxy` takes its upstream from the
+caller's `x-scraper-target` header and accepts any URL, and this listener is
+not bound to loopback — so an unconditional header would hand the secret to
+whatever host a caller named. That secret is not scoped to the catalog: it
+also unlocks `/api/v1/proxies/resolve`, which returns a fully credentialed
+paid-proxy URL. Point the tester at a scraper elsewhere by adding it to
+`SCRAPER_TARGETS`; the server warns when it declines to send the token.
+
+Without a token those panels get 401s — and `app.js` swallows fetch errors, so
+they render as empty dropdowns with a silent console rather than an error.
+
 ## Tabs
 
 - **Scrape Page** — full parameter set: URL, device, `wait_until`, selectors,

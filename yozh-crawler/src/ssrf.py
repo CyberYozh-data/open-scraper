@@ -26,6 +26,13 @@ log = logging.getLogger(__name__)
 # pass as "public". Mirrors the scraper's preset sample-fetch guard
 # (src/presets/service.py).
 _CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
+# 6to4 relay anycast and IPv6 site-local. Like CGNAT, both pass every stdlib
+# predicate as "public"; `fec0::/10` is deprecated but still routed on plenty
+# of internal networks. Mirrored in src/security/egress.py — the scraper is a
+# separate image, so this is a deliberate second copy and
+# tests/security/test_policy_parity.py fails when the two drift.
+_6TO4_RELAY_NET = ipaddress.ip_network("192.88.99.0/24")
+_SITE_LOCAL_V6_NET = ipaddress.ip_network("fec0::/10")
 
 
 class SSRFError(Exception):
@@ -47,6 +54,13 @@ def _ip_is_public(ip_str: str) -> bool:
     # address is classified by its IPv4 value regardless of Python version.
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
+    # Membership tests are version-specific: `IPv6Address in IPv4Network`
+    # raises rather than returning False.
+    if ip.version == 4:
+        if ip in _CGNAT_NET or ip in _6TO4_RELAY_NET:
+            return False
+    elif ip in _SITE_LOCAL_V6_NET:
+        return False
     return not (
         ip.is_private
         or ip.is_loopback
@@ -54,7 +68,6 @@ def _ip_is_public(ip_str: str) -> bool:
         or ip.is_reserved
         or ip.is_multicast
         or ip.is_unspecified
-        or (ip.version == 4 and ip in _CGNAT_NET)
     )
 
 

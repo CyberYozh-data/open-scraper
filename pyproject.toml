@@ -29,6 +29,9 @@ files = [
     # that annotation from documentation into a guarantee. runner.py stays
     # out: it carries ~17 pre-existing playwright-stub errors.
     "src/browser/camoufox_runner.py",
+    # A security module that is not type-checked is the wrong default: the
+    # predicate here decides whether a request leaves the container.
+    "src/security",
 ]
 # `files` picks what mypy checks AS SOURCES; it does not scope REPORTING.
 # Without this, mypy follows imports out of those files and reports everything

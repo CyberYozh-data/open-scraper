@@ -72,7 +72,7 @@ def _page(items: list[str]) -> str:
 
 class TestYandexSearchSelectors:
     def setup_method(self):
-        self.preset = _load("yandex_search")
+        self.preset = _load("yandex_search_camoufox")
         self.fields = self.preset.parsing_instructions.fields
 
     def test_every_field_anchors_on_the_same_organic_block(self):
@@ -105,7 +105,7 @@ class TestYandexSearchSelectors:
 
 class TestYandexSearchExtraction:
     def setup_method(self):
-        self.preset = _load("yandex_search")
+        self.preset = _load("yandex_search_camoufox")
 
     def _extract(self, items):
         return extract_fields(_page(items), self.preset.parsing_instructions)

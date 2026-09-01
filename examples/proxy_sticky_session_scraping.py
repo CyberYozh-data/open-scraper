@@ -18,7 +18,7 @@ import json
 
 import httpx
 from dotenv import load_dotenv
-from client_helpers import scrape_page, console, API_BASE
+from client_helpers import scrape_page, console, API_BASE, service_headers
 
 load_dotenv()
 
@@ -26,7 +26,11 @@ load_dotenv()
 def list_proxies(proxy_type: str) -> list:
     """Fetch available proxies of a given type from the API."""
     with httpx.Client(timeout=15.0) as client:
-        response = client.get(f"{API_BASE}/proxies/available", params={"proxy_type": proxy_type})
+        response = client.get(
+            f"{API_BASE}/proxies/available",
+            params={"proxy_type": proxy_type},
+            headers=service_headers(),
+        )
         response.raise_for_status()
     data = response.json()
     return data.get("items") or []

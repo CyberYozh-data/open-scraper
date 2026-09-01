@@ -117,6 +117,10 @@ pytestmark = pytest.mark.e2e
 @pytest.mark.asyncio
 async def test_session_login_and_authenticated_scrape(monkeypatch):
     monkeypatch.setattr(settings, "service_token", SecretStr(_SERVICE_TOKEN))
+    # Browser navigation refuses non-public addresses. This is the one place a
+    # loopback target is legitimate, so name it — there is no global
+    # off-switch, and adding one would defeat the guard everywhere else.
+    monkeypatch.setattr(settings, "egress_allow_hosts", "127.0.0.1")
 
     target_port = _free_port()
     scraper_port = _free_port()

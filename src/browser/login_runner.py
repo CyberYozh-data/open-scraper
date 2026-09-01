@@ -6,6 +6,12 @@ import re
 import time
 from typing import Any
 
+from src.security.egress import (
+    EGRESS_BLOCKED_ERROR,
+    EgressBlocked,
+    assert_landing_public,
+    assert_navigable,
+)
 from src.sessions.models import LoginScript, LoginStep, SessionLoginResult
 
 
@@ -51,10 +57,30 @@ class LoginRunner:
         context: Any,                       # playwright.async_api.BrowserContext
         script: LoginScript,
         creds: dict[str, str],
+        resolve_dns: bool = True,
     ) -> tuple[SessionLoginResult, dict[str, Any] | None]:
         start = time.perf_counter()
         try:
-            await self._execute_steps(page, script, creds)
+            await self._execute_steps(page, script, creds, resolve_dns=resolve_dns)
+        except EgressBlocked as exc:
+            # No screenshot. The page is sitting on the address we just
+            # refused, so `_try_screenshot` would hand the caller a rendered
+            # image of exactly the content the refusal exists to withhold —
+            # measured at 2,067,659 pixels of an internal admin page. The
+            # error is the constant for the same reason: it names no host.
+            failed_index = getattr(exc, "_login_step_index", None)
+            log.warning("login_runner step refused by egress policy: index=%s", failed_index)
+            return (
+                SessionLoginResult(
+                    ok=False,
+                    failed_step_index=failed_index,
+                    failed_step=getattr(exc, "_login_step", None),
+                    error=EGRESS_BLOCKED_ERROR,
+                    screenshot_b64=None,
+                    took_ms=int((time.perf_counter() - start) * 1000),
+                ),
+                None,
+            )
         except Exception as exc:  # pylint: disable=broad-except
             failed_index = getattr(exc, "_login_step_index", None)
             failed_step = getattr(exc, "_login_step", None)
@@ -146,16 +172,20 @@ class LoginRunner:
         page: Any,
         script: LoginScript,
         creds: dict[str, str],
+        *,
+        resolve_dns: bool = True,
     ) -> None:
         for index, step in enumerate(script.steps):
             try:
-                await self._dispatch(page, step, creds)
+                await self._dispatch(page, step, creds, resolve=resolve_dns)
             except Exception as exc:
                 exc._login_step_index = index  # type: ignore[attr-defined]
                 exc._login_step = step  # type: ignore[attr-defined]
                 raise
 
-    async def _dispatch(self, page: Any, step: LoginStep, creds: dict[str, str]) -> None:
+    async def _dispatch(
+        self, page: Any, step: LoginStep, creds: dict[str, str], *, resolve: bool = True
+    ) -> None:
         op = step.op
         value = _substitute_creds(step.value, creds) if step.value is not None else None
         url = _substitute_creds(step.url, creds) if step.url is not None else None
@@ -163,7 +193,16 @@ class LoginRunner:
         if op == "goto":
             if not url:
                 raise ValueError("goto requires url")
-            await page.goto(url)
+            # The full address check, not just the scheme. The context route
+            # guard this page inherits is blind to redirect hops, and a failing
+            # login step returns a SCREENSHOT of whatever it landed on
+            # (`_try_screenshot` below) — a full-read primitive, so a scheme
+            # check alone was not enough. Re-checked here rather than only on
+            # the model because `$creds_` substitution happens after validation
+            # and a credential value can carry its own scheme and host.
+            await assert_navigable(url, resolve=resolve)
+            response = await page.goto(url)
+            await assert_landing_public(response, page.url, resolve=resolve)
         elif op == "fill":
             if not step.selector or value is None:
                 raise ValueError("fill requires selector and value")

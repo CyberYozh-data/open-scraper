@@ -7,9 +7,18 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from src.app import create_app
+from src.settings import settings
 
 
 pytestmark = pytest.mark.e2e
+
+
+@pytest.fixture(autouse=True)
+def _allow_loopback_target(monkeypatch):
+    """`pytest_httpserver` serves on loopback, which browser navigation now
+    refuses. Named explicitly rather than switched off globally — the guard has
+    no kill switch on purpose."""
+    monkeypatch.setattr(settings, "egress_allow_hosts", "127.0.0.1")
 
 
 @pytest.fixture(scope="session")

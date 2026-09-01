@@ -17,6 +17,7 @@ from taskiq import Context, TaskiqDepends
 from src.browser.camoufox_runner import CamoufoxRunner
 from src.browser.ephemeral_runner import EphemeralPlaywrightRunner
 from src.browser.login_runner import LoginRunner
+from src.browser.teardown import TEARDOWN_TIMEOUT_S as _TEARDOWN_TIMEOUT_S, close_quietly
 from src.proxy.base import ProxyConfigError
 from src.proxy.resolver import proxy_resolver
 from src.browser.runner import apply_page_masking
@@ -40,6 +41,7 @@ from src.sessions.store import (
     get_session_store,
 )
 from src.settings import settings
+from src.observability.log_context import bind_log_context, current_log_context
 from src.utils.ids import new_request_id
 
 log = logging.getLogger(__name__)
@@ -55,12 +57,29 @@ def _is_successful_status(status_code: int | None) -> bool:
     return status_code is not None and 200 <= int(status_code) < 400
 
 
-def make_error_payload(page: dict[str, Any], error: str) -> ScrapeResponse:
+def make_error_payload(
+    page: dict[str, Any], error: str, *, request_id: str | None = None
+) -> ScrapeResponse:
     """Error placeholder for a page slot (moved from src/jobs.py
     _create_error_response). Built as the model rather than a look-alike dict,
-    so the shape is checked here instead of on read-back."""
+    so the shape is checked here instead of on read-back.
+
+    The id is ADOPTED from the run that failed, not minted fresh. Minting one
+    here meant the id the caller received was a different string from the one
+    in every log line about that run — on every failure branch, which is
+    exactly when someone goes looking. `scrape_runner.py` carries a comment
+    saying so; this is that comment being fixed rather than restated.
+
+    Falls back to a new id when there is no run to adopt: `scrape_service`
+    builds slots for pages that never reached a worker, and a response without
+    an id fails validation on read-back.
+    """
     return ScrapeResponse(
-        request_id=new_request_id(),
+        request_id=(
+            request_id
+            or current_log_context().get("request_id")
+            or new_request_id()
+        ),
         took_ms=0,
         meta=ScrapeMeta(
             url=str(page.get("url")),
@@ -234,6 +253,30 @@ async def scrape_page_task(
     page_index: int,
     context: Context = TaskiqDepends(),
 ) -> None:
+    # One binding for the whole delivery, so no call site downstream has to
+    # remember an id — and `make_error_payload` adopts the request_id, which is
+    # what makes the id the caller receives on a FAILURE the same string as the
+    # one in every log line about that run.
+    #
+    # Bound INSIDE the task, never in a worker-startup hook: each asyncio task
+    # inherits a COPY of its parent's context, so a binding made outside would
+    # be inherited by every later task and the correlation would start lying.
+    #
+    # The id is minted here rather than deeper so the early returns below (job
+    # gone, cancelled, redelivery fast-forward) are correlated too.
+    request_id = new_request_id()
+    with bind_log_context(
+        job_id=job_id, page_index=page_index, request_id=request_id
+    ):
+        await _scrape_page_task(job_id, page_index, request_id, context)
+
+
+async def _scrape_page_task(
+    job_id: str,
+    page_index: int,
+    request_id: str,
+    context: Context,
+) -> None:
     store = get_job_store()
     meta = await store.get_meta(job_id)
     if meta is None:
@@ -262,8 +305,6 @@ async def scrape_page_task(
             return
         await _kiq_chain_next(store, job_id, page_index)
         return
-
-    request_id = new_request_id()
 
     # Stamped before the wait_for so the scrape loop sizes its attempts against
     # the deadline actually being enforced. Everything between here and the first
@@ -340,7 +381,7 @@ async def login_task(login_id: str, context: Context = TaskiqDepends()) -> None:
                 # orphaned login could write storage_state after the API already
                 # declared the session failed.
                 result = await asyncio.wait_for(
-                    _run_login(await _get_runner(context), job),
+                    _run_login(await _get_runner(context), job, login_id=login_id),
                     timeout=settings.login_task_timeout_s,
                 )
         except Exception as exc:  # noqa: BLE001 — a login_id always gets a result key
@@ -355,7 +396,9 @@ async def login_task(login_id: str, context: Context = TaskiqDepends()) -> None:
     )
 
 
-async def _run_login(runner, job: dict[str, Any]) -> dict[str, Any]:
+async def _run_login(
+    runner, job: dict[str, Any], *, login_id: str | None = None
+) -> dict[str, Any]:
     """Replay a login script using the given runner. Faithful move of
     worker_pool.py _handle_login_job body (second copy, lines 284-377).
 
@@ -389,9 +432,10 @@ async def _run_login(runner, job: dict[str, Any]) -> dict[str, Any]:
         # exposes resolve_proxy() to spawn a local HTTP-to-SOCKS5 bridge
         # when needed. Re-use the same helper that scrape paths use so
         # login works for every proxy type a scrape works for.
-        effective_proxy, bridge_cm = await runner.resolve_proxy(proxy_cfg)
+        effective_proxy, bridge_cm, _egress_guard = await runner.resolve_proxy(proxy_cfg)
 
         context = await runner._new_context(
+            resolve_dns=proxy_cfg is None,
             device=session_pin["device"],
             proxy=effective_proxy,
             headers=None,
@@ -421,6 +465,12 @@ async def _run_login(runner, job: dict[str, Any]) -> dict[str, Any]:
         script = LoginScript.model_validate(script_dict)
         result, new_state = await login_runner.replay(
             page=page, context=context, script=script, creds=creds,
+            # Same rule as a scrape: with an upstream proxy, local DNS
+            # describes a different network than the one that will be dialled.
+            # The CALLER's proxy, not the effective one: the transport guard
+            # can occupy the effective slot on the direct path, which would
+            # invert this.
+            resolve_dns=proxy_cfg is None,
         )
 
         return {
@@ -448,21 +498,32 @@ async def _run_login(runner, job: dict[str, Any]) -> dict[str, Any]:
             "traceback": tb_text,
         }
     finally:
-        try:
-            if page is not None:
-                await page.close()
-        except Exception:  # pylint: disable=broad-except
-            pass
-        try:
-            if context is not None:
-                await context.close()
-        except Exception:  # pylint: disable=broad-except
-            pass
+        # The same three closes as a scrape, through the same helper. They were
+        # three silent `except Exception: pass` blocks with no deadline — on
+        # the path that holds an authenticated browser session, where a leaked
+        # context is worth more than on an ordinary scrape.
+        # `login_id`, not `session_pin["session_id"]`: that key does not exist.
+        # `SessionService.login` builds session_pin from device, viewport and
+        # the proxy fields only, so the first version of this read None every
+        # time and every warning would have said "for ?" — the correlation
+        # dead on arrival, which is the whole failure mode this line exists to
+        # end. `login_id` is already in scope in the caller and needs no
+        # payload change.
+        if page is not None:
+            await close_quietly(
+                "page", page.close, owner=login_id, timeout=_TEARDOWN_TIMEOUT_S
+            )
+        if context is not None:
+            await close_quietly(
+                "context", context.close, owner=login_id, timeout=_TEARDOWN_TIMEOUT_S
+            )
         if bridge_cm is not None:
-            try:
-                await bridge_cm.__aexit__(None, None, None)
-            except Exception:  # pylint: disable=broad-except
-                pass
+            await close_quietly(
+                "socks bridge",
+                lambda: bridge_cm.__aexit__(None, None, None),
+                owner=login_id,
+                timeout=_TEARDOWN_TIMEOUT_S,
+            )
 
 
 @broker.task(task_name="reclaim_stale", schedule=[{"interval": 60, "schedule_id": "reclaim_stale"}])

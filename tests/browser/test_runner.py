@@ -242,7 +242,7 @@ class TestFetch:
         runner._browser = mock_browser
 
         mock_page = AsyncMock()
-        mock_response = Mock()
+        mock_response = Mock(request=Mock(redirected_from=None))
         mock_response.status = 200
         mock_page.goto = AsyncMock(return_value=mock_response)
         mock_page.content = AsyncMock(return_value="<html><body>Test</body></html>")
@@ -280,7 +280,7 @@ class TestFetch:
         runner._browser = AsyncMock()
 
         mock_page = AsyncMock()
-        mock_response = Mock()
+        mock_response = Mock(request=Mock(redirected_from=None))
         mock_response.status = 403
         mock_page.goto = AsyncMock(return_value=mock_response)
         # A generic edge error page (not a captcha phrase) — the old heuristic
@@ -323,7 +323,7 @@ class TestFetch:
         )
 
         mock_page = AsyncMock()
-        mock_response = Mock()
+        mock_response = Mock(request=Mock(redirected_from=None))
         mock_response.status = 200
         mock_page.goto = AsyncMock(return_value=mock_response)
         mock_page.content = AsyncMock(return_value="<html></html>")
@@ -362,7 +362,7 @@ class TestFetch:
         headers = {"User-Agent": "Custom UA", "Accept-Language": "en-US"}
 
         mock_page = AsyncMock()
-        mock_response = Mock()
+        mock_response = Mock(request=Mock(redirected_from=None))
         mock_response.status = 200
         mock_page.goto = AsyncMock(return_value=mock_response)
         mock_page.content = AsyncMock(return_value="<html></html>")
@@ -398,7 +398,7 @@ class TestFetch:
         runner._browser = AsyncMock()
 
         mock_page = AsyncMock()
-        mock_response = Mock()
+        mock_response = Mock(request=Mock(redirected_from=None))
         mock_response.status = 200
         mock_page.goto = AsyncMock(return_value=mock_response)
         mock_page.wait_for_selector = AsyncMock()
@@ -433,7 +433,7 @@ class TestFetch:
         screenshot_bytes = b"fake_png_data"
 
         mock_page = AsyncMock()
-        mock_response = Mock()
+        mock_response = Mock(request=Mock(redirected_from=None))
         mock_response.status = 200
         mock_page.goto = AsyncMock(return_value=mock_response)
         mock_page.content = AsyncMock(return_value="<html></html>")
@@ -468,7 +468,7 @@ class TestFetch:
         runner._browser = AsyncMock()
 
         mock_page = AsyncMock()
-        mock_response = Mock()
+        mock_response = Mock(request=Mock(redirected_from=None))
         mock_response.status = 200
         mock_page.goto = AsyncMock(return_value=mock_response)
         mock_page.content = AsyncMock(return_value="<html></html>")
@@ -537,7 +537,7 @@ class TestFetch:
         captcha_html = "<html><body>Please verify you are a human</body></html>"
 
         mock_page = AsyncMock()
-        mock_response = Mock()
+        mock_response = Mock(request=Mock(redirected_from=None))
         mock_response.status = 200
         mock_page.goto = AsyncMock(return_value=mock_response)
         mock_page.content = AsyncMock(return_value=captcha_html)
@@ -707,8 +707,10 @@ class TestNewContext:
             headers=None,
         )
 
-        # Check, route was configurated
-        mock_context.route.assert_called_once()
+        # Two handlers now: the asset blocker, then the egress guard. The
+        # guard is registered second on purpose — Playwright runs handlers
+        # last-registered-first, so it decides before the blocker forwards.
+        assert mock_context.route.await_count == 2
 
 
 class TestCaptchaDetection:
@@ -963,7 +965,7 @@ class TestFetchBlockedFlag:
         runner._browser = AsyncMock()
 
         mock_page = AsyncMock()
-        mock_response = Mock()
+        mock_response = Mock(request=Mock(redirected_from=None))
         mock_response.status = 200
         mock_page.goto = AsyncMock(return_value=mock_response)
         mock_page.content = AsyncMock(
@@ -992,7 +994,7 @@ class TestFetchBlockedFlag:
         runner._browser = AsyncMock()
 
         mock_page = AsyncMock()
-        mock_response = Mock()
+        mock_response = Mock(request=Mock(redirected_from=None))
         mock_response.status = 200
         mock_page.goto = AsyncMock(return_value=mock_response)
         mock_page.content = AsyncMock(return_value="<html><body>Hello</body></html>")
@@ -1032,7 +1034,7 @@ class TestFetchResourceCleanup:
 
         with patch.object(runner, "_new_context", return_value=mock_context), \
                 patch.object(runner, "resolve_proxy",
-                             AsyncMock(return_value=(None, bridge_cm))):
+                             AsyncMock(return_value=(None, bridge_cm, None))):
             with pytest.raises(PWError):
                 await runner.fetch(
                     url="https://example.com", device="desktop", proxy=None,
@@ -1054,7 +1056,7 @@ class TestFetchResourceCleanup:
         with patch.object(runner, "_new_context",
                           AsyncMock(side_effect=PWError("context boom"))), \
                 patch.object(runner, "resolve_proxy",
-                             AsyncMock(return_value=(None, bridge_cm))):
+                             AsyncMock(return_value=(None, bridge_cm, None))):
             with pytest.raises(PWError):
                 await runner.fetch(
                     url="https://example.com", device="desktop", proxy=None,

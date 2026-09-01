@@ -1,0 +1,102 @@
+{
+  "name": "linkedin_profile_camoufox",
+  "source": "linkedin",
+  "description": "LinkedIn public profile. LinkedIn requires an authenticated session and walls most data behind login, and THIS VARIANT CANNOT CARRY ONE: session_id is rejected with HTTP 400 on browser_engine='camoufox' (so are cookies and render=false) because the Camoufox runner accepts and silently ignores them, which would return a logged-OUT page reading as success — use linkedin_profile_chromium whenever a session is needed. This variant therefore runs anonymous: expect only what LinkedIn serves logged-out, with self-heal/AI carrying most fields. Best-effort selectors target the public profile shell. ENGINE: Camoufox, fingerprint_profile=windows_on_host — a Windows claim over this host's real AMD GPU vendor. Windows rather than the honest Linux because measurement put an honest Linux claim at 15 and 23 retries against 1 and 8 for Windows (see src/browser/fingerprint_profile.py). MEASURED 2026-08-27 (2 runs per engine, 4 runs in total on the one locale this preset has, research/preset_audit_dual_engine_2026_08_27.json): all four runs across both engines returned one identical payload — name, location and current_position correct, headline null on 4/4. NO SEPARATION: the engine changed nothing measurable, so neither variant is recommended over the other, and the headline gap is a preset defect to fix on both. Four runs against one profile is a thin basis for either statement. MEASURED 2026-08-28 (retest of the same twenty presets through the same harness after the five audit fixes; n=2 per locale, 92 runs, research/preset_audit_dual_engine_2026_08_28.json): 2/2 runs returned data, name 'Bill Gates' on both, headline null on both -- byte-for-byte the same outcome as 08-27 on both engines. None of the five fixes touched this preset; it is a control, and the headline null is a standing defect this retest neither closed nor worsened. SCHEMA (final review): `headline` now declares its type as [string, null], not string. It measured null on 4 of 4 runs in BOTH records, and this preset sets self_heal: true, which hands `output_schema` to the LLM as the target contract (parser_pipeline.run -> generate_selectors) -- so a schema claiming the field can never be null contradicted every observation this preset has ever produced and steered a heal against it. Same reason amazon_search's prices/ratings are nullable. This documents the measured state; the missing headline stays an open defect.",
+  "kind": "builtin",
+  "url_template": "https://www.linkedin.com/in/{username}",
+  "request_defaults": {
+    "device": "desktop",
+    "proxy_type": "prem_res_rotating",
+    "wait_until": "domcontentloaded",
+    "timeout_ms": 60000,
+    "block_assets": true,
+    "browser_engine": "camoufox",
+    "fingerprint_profile": "windows_on_host"
+  },
+  "locales": {
+    "global": {
+      "domain": "com",
+      "country": "US"
+    }
+  },
+  "default_locale": "global",
+  "parsing_instructions": {
+    "type": "css",
+    "fields": {
+      "name": {
+        "selector": "h1",
+        "required": true,
+        "post_process": [
+          {
+            "op": "strip"
+          }
+        ]
+      },
+      "headline": {
+        "selector": ".text-body-medium.break-words, .top-card-layout__headline",
+        "post_process": [
+          {
+            "op": "strip"
+          }
+        ]
+      },
+      "location": {
+        "selector": "html",
+        "attr": "html",
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "\"addressLocality\":\"([^\"]+)\""
+            ]
+          }
+        ]
+      },
+      "current_position": {
+        "selector": "html",
+        "attr": "html",
+        "post_process": [
+          {
+            "op": "regex",
+            "args": [
+              "\"worksFor\":\\[\\{\"@type\":\"Organization\",\"name\":\"([^\"]+)\""
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "headline": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "location": {
+        "type": "string"
+      },
+      "current_position": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "name"
+    ]
+  },
+  "self_heal": true,
+  "prompt_schema": {
+    "name": "person full name",
+    "headline": "professional headline",
+    "location": "city / region",
+    "current_position": "current title and company"
+  },
+  "llm_extract_prompt": null,
+  "version": 2,
+  "updated_at": 1787875200.0
+}
